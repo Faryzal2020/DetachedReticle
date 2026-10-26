@@ -1,0 +1,71 @@
+# =============================================================
+# Whitelist-style .gitignore
+# Everything at the repo root is ignored by default.
+# Only the items explicitly un-ignored below are tracked.
+# NOTE: if you add a new top-level file/folder you want in git,
+#       add a matching "!/name" line below (this is deliberate).
+# =============================================================
+
+# Ignore everything at the root...
+/*
+
+# ...except these
+!/.gitignore
+!/AGENTS.md
+!/README.md
+!/LICENSE
+!/LICENSE.md
+!/CHANGELOG.md
+!/docs/
+!/r6/
+!/red4ext/
+# Native plugin source code (C++):
+!/CMakeLists.txt
+!/src/
+
+# -------------------------------------------------------------
+# Never track these, even inside whitelisted folders
+# -------------------------------------------------------------
+
+# Local reference material (decompiled CDPR scripts etc.)
+# (already ignored by the root rule; listed for clarity)
+/reference/
+/dist/
+
+# Compiled / built artifacts
+*.dll
+*.pdb
+*.lib
+*.exp
+*.obj
+# If you ship a built plugin dll, force-add it explicitly:
+#   git add -f red4ext/plugins/<ModName>/<ModName>.dll
+
+# Game data that must never be committed
+*.archive
+*.xl.bak
+*.bk
+*.redscripts
+tweakdb.bin
+*.bin
+
+# Packaging output
+*.zip
+*.7z
+*.rar
+
+# Logs, backups, temp
+*.log
+*.bak
+*.tmp
+*.orig
+*.rej
+
+# Editor / OS / tool noise
+.vscode/
+.idea/
+.agent/
+.gemini/
+.DS_Store
+Thumbs.db
+desktop.ini

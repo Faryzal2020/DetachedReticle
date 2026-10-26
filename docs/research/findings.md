@@ -1,0 +1,2 @@
+- "Vector4.Normalize3()" causes crash at startup; wrong method name
+- require("ffi") causes crash
