@@ -48,3 +48,12 @@
   3. Straight Shooting Enforcement: Added native `weapon.ShootStraight(true)` calls in both CET `onUpdate` and redscript `ShootEvents.OnEnter` / `UpdateDetachedAim` to disable REDengine's native camera convergence.
 (user test timestamp: 2026-10-27 22:35:25 +0700)
 
+#iteration 6
+- error: In-game logs confirmed pure freelook divergence of 47.84 deg and muzzle forward vector calculation, but the visual bullet still shot toward the camera reticle instead of the barrel direction.
+- error cause:
+  1. `Attack_GameEffect` runs compiled native `EffectObjectProvider_PhysicalRay`, which ignores script blackboard orientation overrides and queries the player camera gaze.
+  2. `WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.Shoot, effectBlackboard)` was still executing unconditionally in `ShootEvents.OnEnter`. In REDengine, this native function explicitly generates the first-person visual bullet tracer beam converging to the camera crosshair.
+- fix:
+  1. Replaced `gameEffectAttack.StartAttack()` with native `weapon.AI_ShootForwards(scriptInterface.executionOwner, ammoCost, projParams, projectilesPerShot, charge, muzzlePos, normMuzzleFwd)` which explicitly forces the engine to fire the shot along `normMuzzleFwd` from `muzzlePos`.
+  2. Suppressed `WeaponObject.TriggerWeaponEffects(..., Shoot)` when `isDecoupledActive` is true, preventing the native camera-converging tracer from being generated.
+(user test timestamp: 2026-10-27 23:15:08 +0700)

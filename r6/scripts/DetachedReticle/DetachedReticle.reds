@@ -473,43 +473,11 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
             }
         }
 
-        let attackContext: AttackInitContext;
-        attackContext.record = attackRecord;
-        attackContext.instigator = scriptInterface.executionOwner;
-        attackContext.source = scriptInterface.executionOwner;
-        attackContext.weapon = weapon;
-
-        let attackObj: ref<IAttack> = IAttack.Create(attackContext);
-        let gameEffectAttack: ref<Attack_GameEffect> = attackObj as Attack_GameEffect;
-        let projectileAttack: ref<Attack_Projectile> = attackObj as Attack_Projectile;
-
-        if IsDefined(gameEffectAttack) {
-            let statMods: array<ref<gameStatModifierData>>;
-            gameEffectAttack.GetStatModList(statMods);
-            let effect: ref<EffectInstance> = gameEffectAttack.PrepareAttack(scriptInterface.executionOwner);
-            if IsDefined(effect) {
-                let sharedData: EffectData = effect.GetSharedData();
-                EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.position, muzzlePos);
-                EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.muzzlePosition, muzzlePos);
-                EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.forward, normMuzzleFwd);
-                EffectData.SetQuat(sharedData, GetAllBlackboardDefs().EffectSharedData.rotation, Transform.GetOrientation(muzzleTransform));
-                EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.raycastEnd, targetPt);
-                EffectData.SetFloat(sharedData, GetAllBlackboardDefs().EffectSharedData.range, maxRange);
-                EffectData.SetVariant(sharedData, GetAllBlackboardDefs().EffectSharedData.attack, ToVariant(attackObj));
-                EffectData.SetVariant(sharedData, GetAllBlackboardDefs().EffectSharedData.attackStatModList, ToVariant(statMods));
-                EffectData.SetBool(sharedData, GetAllBlackboardDefs().EffectSharedData.playerOwnedWeapon, true);
-                gameEffectAttack.StartAttack();
-            }
-        } else if IsDefined(projectileAttack) {
-            let launchEvt: ref<gameprojectileSpawnerLaunchEvent> = projectileAttack.PrepareAttack(scriptInterface.executionOwner);
-            if IsDefined(launchEvt) {
-                launchEvt.launchParams.logicalPositionProvider = IPositionProvider.CreateSlotPositionProvider(weapon, n"Muzzle");
-                launchEvt.launchParams.logicalOrientationProvider = IOrientationProvider.CreateStaticOrientationProvider(Quaternion.BuildFromDirectionVector(normMuzzleFwd));
-                launchEvt.launchParams.visualPositionProvider = launchEvt.launchParams.logicalPositionProvider;
-                launchEvt.launchParams.visualOrientationProvider = launchEvt.launchParams.logicalOrientationProvider;
-                weapon.QueueEvent(launchEvt);
-            }
-        }
+        let projParams: gameprojectileWeaponParams;
+        let ammoCost: Uint16 = Cast<Uint16>(1);
+        let projectilesPerShot: Uint8 = Cast<Uint8>(1);
+        let charge: Float = 1.0;
+        weapon.AI_ShootForwards(scriptInterface.executionOwner, ammoCost, projParams, projectilesPerShot, charge, muzzlePos, normMuzzleFwd);
 
         if IsDefined(aimSys) {
             aimSys.RecordShot(muzzlePos, normMuzzleFwd, targetPt);
@@ -548,16 +516,19 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
                 broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, 10.0);
             }
         }
-        WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.SilencedShoot, effectBlackboard);
+        if !isDecoupledActive {
+            WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.SilencedShoot, effectBlackboard);
+        }
         WeaponObject.SendAmmoUpdateEvent(scriptInterface.executionOwner, weapon);
     } else {
-        if statsSystem.GetStatValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatType.HasMuzzleBrake) > 0.0 {
-            WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.MuzzleBrakeShoot, effectBlackboard);
-            WeaponObject.SendAmmoUpdateEvent(scriptInterface.executionOwner, weapon);
-        } else {
-            WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.Shoot, effectBlackboard);
-            WeaponObject.SendAmmoUpdateEvent(scriptInterface.executionOwner, weapon);
+        if !isDecoupledActive {
+            if statsSystem.GetStatValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatType.HasMuzzleBrake) > 0.0 {
+                WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.MuzzleBrakeShoot, effectBlackboard);
+            } else {
+                WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.Shoot, effectBlackboard);
+            }
         }
+        WeaponObject.SendAmmoUpdateEvent(scriptInterface.executionOwner, weapon);
         if IsDefined(broadcaster) {
             GameInstance.GetQuestsSystem(gameInstance).SetFact(n"player_fired_a_weapon", 1);
             if IsEntityInInteriorArea(GetPlayer(gameInstance)) {
