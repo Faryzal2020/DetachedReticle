@@ -10,7 +10,7 @@ Instructions for AI coding agents working in this repository. Read this file ful
 |---|---|
 | `<ModName>` | `DetachedReticle` *(rename freely, then update everywhere)* |
 | `<GAME_ROOT>` | `E:\Cyberpunk 2077` *(edit to your install path)* |
-| Game version the reference dump was made from | `TODO — e.g. 2.xx` |
+| Game version the reference dump was made from | `2.50 (Build 3.0.88.46235)` |
 
 ---
 
