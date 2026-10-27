@@ -27,4 +27,10 @@
 - error: `[NO_MATCHING_OVERLOAD] At r6\scripts\DetachedReticle\DetachedReticle.reds:484:13: gameEffectAttack.GetStatModList(statMods); arguments passed to 'GetStatModList' do not match any of the overloads: 1st argument: expected '[ref<gameStatModifierData>]', given '[gameStatModifierData]'`
 - error cause: `gameStatModifierData` is an engine class type, so redscript arrays of this type require the explicit reference wrapper `array<ref<gameStatModifierData>>`.
 - fix: Changed `let statMods: array<gameStatModifierData>;` to `let statMods: array<ref<gameStatModifierData>>;` on line 483.
+(user test timestamp: 2026-10-27 22:29:17 +0700)
+
+#iteration 4
+- error: `[NO_MATCHING_OVERLOAD] At r6\scripts\DetachedReticle\DetachedReticle.reds:543:16: if WeaponObject.GetWeaponType(weapon.GetItemID()) == gamedataItemType.Wea_SniperRifle; arguments passed to 'OperatorEqual' do not match any of the overloads: 1st argument: expected 'TweakDBID', given 'gamedataItemType' ...`
+- error cause: Redscript does not provide direct `==` operator overloads for game enums (`gamedataItemType`, `gamedataWeaponEvolution`); it requires the built-in intrinsic `Equals(enumA, enumB)`.
+- fix: Replaced `==` with `Equals(...)` on lines 543 and 583.
 (user test timestamp: pending user verification)

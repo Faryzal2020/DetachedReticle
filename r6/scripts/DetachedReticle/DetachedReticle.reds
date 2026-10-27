@@ -540,7 +540,7 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
             broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.IllegalAction);
             broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.SilencedGunshot);
             broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.SilencedGunshot, 10.0, emptyInvestigateData, true);
-            if WeaponObject.GetWeaponType(weapon.GetItemID()) == gamedataItemType.Wea_SniperRifle {
+            if Equals(WeaponObject.GetWeaponType(weapon.GetItemID()), gamedataItemType.Wea_SniperRifle) {
                 broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, 10.0);
             }
         }
@@ -580,7 +580,7 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
     if numBurstTotal > 0.0 {
         fullAutoPenalty = 1.0 + (((numBurstTotal + 1.0) / magazineCapacity) * statsSystem.GetStatValue(Cast<StatsObjectID>(GetPlayer(gameInstance).GetEntityID()), gamedataStatType.FullAutoStaminaCostPenalty));
     }
-    if RPGManager.GetWeaponEvolution(weapon.GetItemID()) == gamedataWeaponEvolution.Tech && scriptInterface.GetStatPoolsSystem().GetStatPoolValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatPoolType.WeaponCharge, false) >= WeaponObject.GetBaseMaxChargeThreshold(weapon) {
+    if Equals(RPGManager.GetWeaponEvolution(weapon.GetItemID()), gamedataWeaponEvolution.Tech) && scriptInterface.GetStatPoolsSystem().GetStatPoolValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatPoolType.WeaponCharge, false) >= WeaponObject.GetBaseMaxChargeThreshold(weapon) {
         fullChargePenalty = 1.5;
     }
     this.ConsumeStamina(scriptInterface, attackRecord, fullAutoPenalty, fullChargePenalty);
