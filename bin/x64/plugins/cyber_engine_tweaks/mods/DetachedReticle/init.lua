@@ -284,14 +284,18 @@ registerForEvent("onUpdate", function(delta)
         if okCount and shotCount and shotCount > (DetachedReticle.lastShotCount or 0) then
             DetachedReticle.lastShotCount = shotCount
             local mPos, bDir, tPt, angle = nil, nil, nil, 0.0
+            local modeNum = 0
+            local modeName = "Unknown"
             pcall(function()
                 mPos = aimSys:GetLastShotMuzzlePos()
                 bDir = aimSys:GetLastShotBulletDir()
                 tPt = aimSys:GetLastShotTargetPt()
                 angle = aimSys:GetLastShotAngleDeg()
+                modeNum = aimSys:GetLastShotTestMode() or 0
+                modeName = aimSys:GetLastShotTestModeName() or "Unknown"
             end)
-            Log(string.format("[BALLISTICS RECORD #%d] GunDivergence=%.2f deg | FreeYaw=%.2f deg, FreePitch=%.2f deg | Muzzle=(%.2f, %.2f, %.2f) | BulletDir=(%.3f, %.3f, %.3f)",
-                shotCount, angle or 0.0, DetachedReticle.freeYaw, DetachedReticle.freePitch,
+            Log(string.format("[BALLISTICS RECORD #%d] [%s (Mode #%d)] GunDivergence=%.2f deg | FreeYaw=%.2f deg, FreePitch=%.2f deg | Muzzle=(%.2f, %.2f, %.2f) | BulletDir=(%.3f, %.3f, %.3f)",
+                shotCount, modeName, modeNum, angle or 0.0, DetachedReticle.freeYaw, DetachedReticle.freePitch,
                 (mPos and (mPos.x or mPos.X)) or 0.0, (mPos and (mPos.y or mPos.Y)) or 0.0, (mPos and (mPos.z or mPos.Z)) or 0.0,
                 (bDir and (bDir.x or bDir.X)) or 0.0, (bDir and (bDir.y or bDir.Y)) or 0.0, (bDir and (bDir.z or bDir.Z)) or 0.0
             ))
@@ -303,8 +307,10 @@ registerForEvent("onUpdate", function(delta)
     if DetachedReticle.timer >= 3.0 then
         DetachedReticle.timer = 0
         if DetachedReticle.isActive then
-            Log(string.format("[STATUS] Pure Freelook ACTIVE | Yaw=%.2f deg | Pitch=%.2f deg | LeftClick=Shoots",
-                DetachedReticle.freeYaw, DetachedReticle.freePitch))
+            local curMode = 0
+            if aimSys then pcall(function() curMode = aimSys:GetTestMode() or 0 end) end
+            Log(string.format("[STATUS] Pure Freelook ACTIVE | Yaw=%.2f deg | Pitch=%.2f deg | Mode=%d (0=RoundRobin) | LeftClick=Shoots",
+                DetachedReticle.freeYaw, DetachedReticle.freePitch, curMode))
         end
     end
 end)
@@ -322,5 +328,25 @@ registerForEvent("onShutdown", function()
     end
     Log("Shutdown cleanly.")
 end)
+
+-- Console helper for switching test modes from CET console:
+-- DetachedReticle.SetMode(0) = Round Robin (cycles 1..6 automatically on each shot)
+-- DetachedReticle.SetMode(1) = Lock Mode 1 (Anim Suppressed Baseline)
+-- DetachedReticle.SetMode(2) = Lock Mode 2 (Proper AI_ShootForwards)
+-- DetachedReticle.SetMode(3) = Lock Mode 3 (Attack_GameEffect PrepareAttack & Run)
+-- DetachedReticle.SetMode(4) = Lock Mode 4 (GameEffectSystem Static weaponShoot)
+-- DetachedReticle.SetMode(5) = Lock Mode 5 (Continuous Attack Vector)
+-- DetachedReticle.SetMode(6) = Lock Mode 6 (Vanilla PushAnimationEvent with ShootStraight)
+DetachedReticle.SetMode = function(mode)
+    local aimSys = nil
+    pcall(function()
+        aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
+    end)
+    if aimSys then
+        local m = tonumber(mode) or 0
+        aimSys:SetTestMode(m)
+        Log(string.format("[CONFIG] Test Mode changed to: %d", m))
+    end
+end
 
 return DetachedReticle

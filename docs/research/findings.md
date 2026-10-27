@@ -57,3 +57,18 @@
   1. Replaced `gameEffectAttack.StartAttack()` with native `weapon.AI_ShootForwards(scriptInterface.executionOwner, ammoCost, projParams, projectilesPerShot, charge, muzzlePos, normMuzzleFwd)` which explicitly forces the engine to fire the shot along `normMuzzleFwd` from `muzzlePos`.
   2. Suppressed `WeaponObject.TriggerWeaponEffects(..., Shoot)` when `isDecoupledActive` is true, preventing the native camera-converging tracer from being generated.
 (user test timestamp: 2026-10-27 23:15:08 +0700)
+
+#iteration 7
+- error: User confirmed in live tests that bullets still shoot toward the camera reticle instead of the gun reticle/barrel orientation, despite telemetry logs proving up to 47.29 deg of pure freelook divergence across 14 shots.
+- error cause:
+  1. In `ShootEvents.OnEnter`, `scriptInterface.PushAnimationEvent(n"RightShoot")` was still executing. In REDengine's first-person player animation graph, the `RightShoot` event contains an animation-track callback that natively triggers the active weapon attack. Because `ReadyEvents.OnUpdate` keeps `weapon.SetAttack(attackID)` bound to vanilla `Bullet_GameEffect`, this animation event triggers a native camera-bound raycast.
+  2. `weapon.AI_ShootForwards` was called without `AIWeapon.SetAttackBasedOnTimeDilation`, which is required to bind attack data for the forward shoot query on player puppets.
+  3. Testing a single vector in isolation without suppressing the animation track left uncertainty regarding which subsystem (animation event vs effect provider vs targeting system) produced the visible tracer.
+- fix:
+  1. Implemented a comprehensive multi-approach ballistic experimental matrix ("spreading the net"):
+     - Experiment A (Anim Event Suppression): Suppress `scriptInterface.PushAnimationEvent(n"RightShoot")` to verify if the camera bullet originates solely from the animation graph.
+     - Experiment B (Proper AI_ShootForwards): Bind `AIWeapon.SetAttackBasedOnTimeDilation` and fire `weapon.AI_ShootForwards` along `normMuzzleFwd` with anim event suppressed.
+     - Experiment C (Direct EffectSystem Dispatch): Invoke `EffectSystem.CreateEffectStatic(n"weaponShoot", n"player_ray", ...)` explicitly overriding `EffectSharedData.position` and `EffectSharedData.forward` with physical muzzle vectors.
+     - Experiment D (Continuous Attack Vector): Call `weapon.StartContinuousAttack(muzzlePos, normMuzzleFwd)` / `PrepareContinuousAttack`.
+  2. Implemented round-robin cycling and CET hotkey/console mode selection with dedicated on-disk logging to `DetachedReticle.log`, outputting the exact experiment mode, vector inputs, and branch execution for every single shot.
+(user test timestamp: 2026-10-27 23:25:55 +0700)
