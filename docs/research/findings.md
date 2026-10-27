@@ -89,6 +89,8 @@
   3. Re-enable `PushAnimationEvent(n"RightShoot")` in redscript so normal weapon recoil slide animation functions seamlessly.
 (user test timestamp: 2026-10-28 01:46:19 +0700)
 
+(Note: at this point the first MVP has been achieved, the player can move the camera freely with gun unholstered, while left mouse click will make the gun shoots at the point of where the gun is pointing at)
+
 #iteration 9
 - error: Shotgun bullet spread becomes one (all pellets collapse into a single trajectory point without spread).
 - error cause:
@@ -132,5 +134,8 @@
   2. Valid Body Orientation API: Used valid REDengine API `Vector4.Heading(player:GetWorldForward())` / `math.atan2(fwd.y, fwd.x)` to measure current body yaw and rotate the player puppet towards `intendedWorldYaw` via `TeleportationFacility.Teleport`.
   3. Stationary Camera in World Space: Set `fpp:SetLocalTransform` relative yaw to `normalizeDeg(intendedWorldYaw - currentBodyYaw)`. The camera in world space remains 100% stationary on the mouse aim point while the character body and weapon swivel smoothly into alignment.
   4. Outward Divergence Clamp: Clamped max divergence by pulling the body along rather than pulling the camera back.
-(untested)
+(user test timestamp: 2026-10-28 03:23:19 +0700)
+
+#iteration 12
+- error: the camera now rotates 90 degree to the left and tilted (rolling) to the left when gun unholstered, with shaking left to right every frame.
 
