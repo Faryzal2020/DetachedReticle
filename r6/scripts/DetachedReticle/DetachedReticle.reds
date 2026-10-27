@@ -421,11 +421,11 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
     fullChargePenalty = 1.0;
     visualStimDistance = 50.0;
     weapon = this.GetWeaponObject(scriptInterface);
-    muzzleFxScale = statsSystem.GetStatValue(weapon.GetEntityID(), gamedataStatType.WeaponVFX_MuzzleFxScale);
+    muzzleFxScale = statsSystem.GetStatValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatType.WeaponVFX_MuzzleFxScale);
     if muzzleFxScale >= 0.0 && muzzleFxScale != 1.0 {
         effectBlackboard.SetValueUnclamped(n"muzzleFxScale", muzzleFxScale);
     }
-    shellsFxScale = statsSystem.GetStatValue(weapon.GetEntityID(), gamedataStatType.WeaponVFX_ShellsFxScale);
+    shellsFxScale = statsSystem.GetStatValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatType.WeaponVFX_ShellsFxScale);
     if shellsFxScale >= 0.0 && shellsFxScale != 1.0 {
         effectBlackboard.SetValueUnclamped(n"shellsFxScale", shellsFxScale);
     }
@@ -535,7 +535,7 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
     }
     this.SetBlackboardIntVariable(scriptInterface, this.GetBlackboardID(scriptInterface), EnumInt(gamePSMRangedWeaponStates.Shoot));
     broadcaster = scriptInterface.executionOwner.GetStimBroadcasterComponent();
-    if statsSystem.GetStatValue(weapon.GetEntityID(), gamedataStatType.CanSilentKill) > 0.0 {
+    if statsSystem.GetStatValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatType.CanSilentKill) > 0.0 {
         if IsDefined(broadcaster) {
             broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.IllegalAction);
             broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.SilencedGunshot);
@@ -547,7 +547,7 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
         WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.SilencedShoot, effectBlackboard);
         WeaponObject.SendAmmoUpdateEvent(scriptInterface.executionOwner, weapon);
     } else {
-        if statsSystem.GetStatValue(weapon.GetEntityID(), gamedataStatType.HasMuzzleBrake) > 0.0 {
+        if statsSystem.GetStatValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatType.HasMuzzleBrake) > 0.0 {
             WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.MuzzleBrakeShoot, effectBlackboard);
             WeaponObject.SendAmmoUpdateEvent(scriptInterface.executionOwner, weapon);
         } else {
@@ -578,9 +578,9 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
     numBurstTotal = Cast<Float>(stateContext.GetIntParameter(this.GetShootingNumBurstTotalName(), true));
     magazineCapacity = Cast<Float>(WeaponObject.GetMagazineCapacity(weapon));
     if numBurstTotal > 0.0 {
-        fullAutoPenalty = 1.0 + (((numBurstTotal + 1.0) / magazineCapacity) * statsSystem.GetStatValue(GetPlayer(gameInstance).GetEntityID(), gamedataStatType.FullAutoStaminaCostPenalty));
+        fullAutoPenalty = 1.0 + (((numBurstTotal + 1.0) / magazineCapacity) * statsSystem.GetStatValue(Cast<StatsObjectID>(GetPlayer(gameInstance).GetEntityID()), gamedataStatType.FullAutoStaminaCostPenalty));
     }
-    if RPGManager.GetWeaponEvolution(weapon.GetItemID()) == gamedataWeaponEvolution.Tech && scriptInterface.GetStatPoolsSystem().GetStatPoolValue(weapon.GetEntityID(), gamedataStatPoolType.WeaponCharge, false) >= WeaponObject.GetBaseMaxChargeThreshold(weapon) {
+    if RPGManager.GetWeaponEvolution(weapon.GetItemID()) == gamedataWeaponEvolution.Tech && scriptInterface.GetStatPoolsSystem().GetStatPoolValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatPoolType.WeaponCharge, false) >= WeaponObject.GetBaseMaxChargeThreshold(weapon) {
         fullChargePenalty = 1.5;
     }
     this.ConsumeStamina(scriptInterface, attackRecord, fullAutoPenalty, fullChargePenalty);
