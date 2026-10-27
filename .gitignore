@@ -17,6 +17,7 @@
 !/LICENSE.md
 !/CHANGELOG.md
 !/docs/
+!/bin/
 !/r6/
 !/red4ext/
 # Native plugin source code (C++):
@@ -56,6 +57,8 @@ tweakdb.bin
 
 # Logs, backups, temp
 *.log
+*.sqlite3
+*.sqlite
 *.bak
 *.tmp
 *.orig

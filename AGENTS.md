@@ -75,6 +75,9 @@ The repo mirrors the game directory so the repo contents **are** the release.
 ├── .gitignore
 ├── docs/                      # design notes + research (tracked)
 │   └── research/
+├── bin/                       # CET lua scripts (tracked)
+│   └── x64/plugins/cyber_engine_tweaks/mods/<ModName>/
+│       └── init.lua
 ├── r6/
 │   ├── scripts/<ModName>/     # .reds files (tracked)
 │   └── tweaks/<ModName>/      # TweakXL .yaml / .xl files (tracked, if needed)
