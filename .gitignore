@@ -39,8 +39,8 @@
 *.lib
 *.exp
 *.obj
-# If you ship a built plugin dll, force-add it explicitly:
-#   git add -f red4ext/plugins/<ModName>/<ModName>.dll
+# Ship compiled dll of the mod
+!/red4ext/plugins/DetachedReticle/DetachedReticle.dll
 
 # Game data that must never be committed
 *.archive
