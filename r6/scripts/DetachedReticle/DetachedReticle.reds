@@ -393,9 +393,9 @@ private func UpdateDetachedAim() -> Void {
 // the attack is dispatched along the physical 3D muzzle orientation toward the gun reticle,
 // while preserving all vanilla behavior (animations, stamina, ammo, sounds, VFX) when inactive.
 @replaceMethod(ShootEvents)
-protected export function OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<StateGameScriptInterface>) -> Void {
+protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<StateGameScriptInterface>) -> Void {
     let weapon: ref<WeaponObject>;
-    let attackRecord: wref<Attack_Record>;
+    let attackRecord: ref<Attack_Record>;
     let attackID: TweakDBID;
     let gameInstance: GameInstance;
     let statsSystem: ref<StatsSystem>;
@@ -411,6 +411,7 @@ protected export function OnEnter(stateContext: ref<StateContext>, scriptInterfa
     let shellsFxScale: Float;
     let leftHandWeapon: String;
     let rightHandWeapon: String;
+    let emptyInvestigateData: stimInvestigateData;
 
     gameInstance = scriptInterface.GetGame();
     statsSystem = GameInstance.GetStatsSystem(gameInstance);
@@ -464,7 +465,7 @@ protected export function OnEnter(stateContext: ref<StateContext>, scriptInterfa
         if IsDefined(sqs) {
             let traceStatic: TraceResult;
             if sqs.SyncRaycastByCollisionPreset(muzzlePos, traceEnd, n"World Static", traceStatic) && TraceResult.IsValid(traceStatic) {
-                targetPt = new Vector4(traceStatic.position.X, traceStatic.position.Y, traceStatic.position.Z, 1.0);
+                targetPt = Vector4(traceStatic.position.X, traceStatic.position.Y, traceStatic.position.Z, 1.0);
             }
         }
 
@@ -490,8 +491,8 @@ protected export function OnEnter(stateContext: ref<StateContext>, scriptInterfa
                 EffectData.SetQuat(sharedData, GetAllBlackboardDefs().EffectSharedData.rotation, Transform.GetOrientation(muzzleTransform));
                 EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.raycastEnd, targetPt);
                 EffectData.SetFloat(sharedData, GetAllBlackboardDefs().EffectSharedData.range, maxRange);
-                EffectData.SetVariant(sharedData, GetAllBlackboardDefs().EffectSharedData.attack, attackObj);
-                EffectData.SetVariant(sharedData, GetAllBlackboardDefs().EffectSharedData.attackStatModList, statMods);
+                EffectData.SetVariant(sharedData, GetAllBlackboardDefs().EffectSharedData.attack, ToVariant(attackObj));
+                EffectData.SetVariant(sharedData, GetAllBlackboardDefs().EffectSharedData.attackStatModList, ToVariant(statMods));
                 EffectData.SetBool(sharedData, GetAllBlackboardDefs().EffectSharedData.playerOwnedWeapon, true);
                 gameEffectAttack.StartAttack();
             }
@@ -538,8 +539,8 @@ protected export function OnEnter(stateContext: ref<StateContext>, scriptInterfa
         if IsDefined(broadcaster) {
             broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.IllegalAction);
             broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.SilencedGunshot);
-            broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.SilencedGunshot, 10.0, , true);
-            if Equals(WeaponObject.GetWeaponType(weapon.GetItemID()), gamedataItemType.Wea_SniperRifle) {
+            broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.SilencedGunshot, 10.0, emptyInvestigateData, true);
+            if WeaponObject.GetWeaponType(weapon.GetItemID()) == gamedataItemType.Wea_SniperRifle {
                 broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, 10.0);
             }
         }
@@ -570,7 +571,7 @@ protected export function OnEnter(stateContext: ref<StateContext>, scriptInterfa
                     visualStimDistance = 50.0;
                 }
             }
-            broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, visualStimDistance, , true);
+            broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, visualStimDistance, emptyInvestigateData, true);
         }
         PlayerCoverHelper.BlockCoverVisibilityReduction(scriptInterface.executionOwner);
     }
@@ -579,7 +580,7 @@ protected export function OnEnter(stateContext: ref<StateContext>, scriptInterfa
     if numBurstTotal > 0.0 {
         fullAutoPenalty = 1.0 + (((numBurstTotal + 1.0) / magazineCapacity) * statsSystem.GetStatValue(GetPlayer(gameInstance).GetEntityID(), gamedataStatType.FullAutoStaminaCostPenalty));
     }
-    if Equals(RPGManager.GetWeaponEvolution(weapon.GetItemID()), gamedataWeaponEvolution.Tech) && scriptInterface.GetStatPoolsSystem().GetStatPoolValue(weapon.GetEntityID(), gamedataStatPoolType.WeaponCharge, false) >= WeaponObject.GetBaseMaxChargeThreshold(weapon) {
+    if RPGManager.GetWeaponEvolution(weapon.GetItemID()) == gamedataWeaponEvolution.Tech && scriptInterface.GetStatPoolsSystem().GetStatPoolValue(weapon.GetEntityID(), gamedataStatPoolType.WeaponCharge, false) >= WeaponObject.GetBaseMaxChargeThreshold(weapon) {
         fullChargePenalty = 1.5;
     }
     this.ConsumeStamina(scriptInterface, attackRecord, fullAutoPenalty, fullChargePenalty);
