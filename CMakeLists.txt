@@ -12,12 +12,18 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 include(FetchContent)
 
 # Fetch RED4ext.SDK
-FetchContent_Declare(
-    RED4ext.SDK
-    GIT_REPOSITORY https://github.com/WopsS/RED4ext.SDK.git
-    GIT_TAG        5246e6590bfa3cbf463b2fbe0eb9179978642055 # Patch 2.5 (#232)
-    GIT_SHALLOW    TRUE
-)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/build/_deps/red4ext.sdk-src")
+    FetchContent_Declare(
+        RED4ext.SDK
+        SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/_deps/red4ext.sdk-src"
+    )
+else()
+    FetchContent_Declare(
+        RED4ext.SDK
+        GIT_REPOSITORY https://github.com/WopsS/RED4ext.SDK.git
+        GIT_TAG        master
+    )
+endif()
 FetchContent_MakeAvailable(RED4ext.SDK)
 
 # Include directories

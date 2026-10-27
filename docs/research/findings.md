@@ -71,4 +71,20 @@
      - Experiment C (Direct EffectSystem Dispatch): Invoke `EffectSystem.CreateEffectStatic(n"weaponShoot", n"player_ray", ...)` explicitly overriding `EffectSharedData.position` and `EffectSharedData.forward` with physical muzzle vectors.
      - Experiment D (Continuous Attack Vector): Call `weapon.StartContinuousAttack(muzzlePos, normMuzzleFwd)` / `PrepareContinuousAttack`.
   2. Implemented round-robin cycling and CET hotkey/console mode selection with dedicated on-disk logging to `DetachedReticle.log`, outputting the exact experiment mode, vector inputs, and branch execution for every single shot.
-(user test timestamp: 2026-10-27 23:25:55 +0700)
+(user test timestamp: 2026-10-28 00:02:40 +0700)
+
+#iteration 8
+- error: All multi-mode ballistics experiments (Modes 1 through 6) still resulted in bullets hitting the camera reticle. Modes 1 to 5 did not animate the gun housing (recoil slide suppressed), while Mode 6 did. Crucially, in Mode 1—where all attack dispatches, animation events, and effect spawners were completely suppressed in `ShootEvents.OnEnter`—a bullet still fired natively and hit the camera reticle.
+- error cause:
+  1. REDengine's Ranged Weapon State Machine does not fire the hitscan bullet from `ShootEvents.OnEnter`. When the player pulls the trigger (`mouse_left`), the state machine executes `SemiAutoEvents.OnEnter` -> `SetupStandardShootingSequence` -> `StartShootingSequence`, which natively executes `GetWeaponObject(scriptInterface).SetTriggerDown(true)`. `ShootEvents.OnEnter` only handles cosmetic recoil animation (`PushAnimationEvent`), stamina deduction, audio, and ammo tracking.
+  2. `WeaponObject::SetTriggerDown(true)` natively dispatches the active attack bound during `ReadyEvents.OnUpdate` (`weapon.SetAttack(attackID)`). In REDengine 4, firearms evaluate their combat ray via the native C++ class `gameEffectObjectProvider_PhysicalRay::Execute`.
+  3. Inside `PhysicalRay::Execute`, the engine evaluates `inputPosition` and `inputForward` from the player's active camera gaze at verified callsites RVA `0x9507B7` and RVA `0x9507EC` (both calling the input evaluator at RVA `0x474BCC`). Because this evaluation occurs entirely in native C++ engine code, redscript and CET cannot intercept or redirect the ray.
+- fix:
+  1. Implement native callsite hooking in `src/Hooks/ShootingHook.cpp` inside `DetachedReticle.dll` (RED4ext native plugin):
+     - Patch callsite RVA `0x9507B7` (`CALL 0x474BCC`) to redirect the ray origin to `muzzlePosition`.
+     - Patch callsite RVA `0x9507EC` (`CALL 0x474BCC`) to redirect the ray direction to `muzzleForward`.
+     - Validate player ownership via effect shared data (`playerOwnedWeapon == true`) and distance gating to avoid affecting environmental probes or NPCs.
+     - Update effect blackboard shared data (`position` and `forward`) so downstream impact executors (`gameEffectExecutor_BulletImpact`, damage calculation, and decal spawners) register the physical hit along the gun barrel orientation.
+  2. Register native RTTI global function `SetMuzzleAimState(muzzlePos: Vector4, muzzleFwd: Vector4, isDecoupled: Bool)` in `DetachedReticle.dll`, continuously fed by `gameuiCrosshairContainerController.UpdateDetachedAim()` and `ShootEvents.OnEnter` in redscript.
+  3. Re-enable `PushAnimationEvent(n"RightShoot")` in redscript so normal weapon recoil slide animation functions seamlessly.
+(user test timestamp: not yet)

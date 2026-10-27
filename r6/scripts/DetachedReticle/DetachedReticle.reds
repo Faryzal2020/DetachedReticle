@@ -405,6 +405,9 @@ private func UpdateDetachedAim() -> Void {
         aimSys.SetAimState(this.m_gunForward, targetPoint, muzzlePos, camFwd3, screenOffset, angleDeg, yawLagDeg, pitchLagDeg, true);
     }
 
+    // Feed continuous live barrel tracking to native ShootingHook
+    SetMuzzleAimState(muzzlePos, this.m_gunForward, true);
+
     // Periodic telemetry log (every 3 seconds or during large divergence)
     this.m_telemetryTimer += dt;
     if this.m_telemetryTimer >= 3.0 || (angleDeg > 15.0 && this.m_telemetryTimer >= 0.5) {
@@ -487,6 +490,9 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
         }
         let normMuzzleFwd: Vector4 = Vector4.Normalize(muzzleFwd);
 
+        // Feed exact physical aim state to native C++ ShootingHook
+        SetMuzzleAimState(muzzlePos, normMuzzleFwd, true);
+
         let maxRange: Float = attackRecord.Range();
         if maxRange <= 0.0 {
             maxRange = 200.0;
@@ -502,86 +508,23 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
             }
         }
 
-        executedMode = IsDefined(aimSys) ? aimSys.GetNextTestMode() : 1;
-
-        if executedMode == 1 {
-            modeName = "Mode 1: Anim Suppressed Baseline";
-            // Do NOT call weapon.SetAttack, QueueEvent, PushAnimationEvent, or TriggerWeaponEffects
-            // This tests if the camera bullet originates solely from the animation event
-        } else if executedMode == 2 {
-            modeName = "Mode 2: AI_ShootForwards (Proper Context)";
-            AIWeapon.SetAttackBasedOnTimeDilation(scriptInterface.executionOwner, weapon, attackID);
-            let projParams: gameprojectileWeaponParams;
-            let ammoCost: Uint16 = Cast<Uint16>(1);
-            let projectilesPerShot: Uint8 = Cast<Uint8>(1);
-            let charge: Float = 1.0;
-            weapon.AI_ShootForwards(scriptInterface.executionOwner, ammoCost, projParams, projectilesPerShot, charge, muzzlePos, normMuzzleFwd);
-        } else if executedMode == 3 {
-            modeName = "Mode 3: Attack_GameEffect PrepareAttack & Run";
-            let attackContext: AttackInitContext;
-            attackContext.record = attackRecord;
-            attackContext.instigator = scriptInterface.executionOwner;
-            attackContext.source = scriptInterface.executionOwner;
-            attackContext.weapon = weapon;
-            let attackObj: ref<IAttack> = IAttack.Create(attackContext);
-            let gameEffectAttack: ref<Attack_GameEffect> = attackObj as Attack_GameEffect;
-            if IsDefined(gameEffectAttack) {
-                let statMods: array<ref<gameStatModifierData>>;
-                gameEffectAttack.GetStatModList(statMods);
-                let effectInstance: ref<EffectInstance> = gameEffectAttack.PrepareAttack(scriptInterface.executionOwner);
-                if IsDefined(effectInstance) {
-                    let effectData: EffectData = effectInstance.GetSharedData();
-                    EffectData.SetVector(effectData, GetAllBlackboardDefs().EffectSharedData.position, muzzlePos);
-                    EffectData.SetVector(effectData, GetAllBlackboardDefs().EffectSharedData.forward, normMuzzleFwd);
-                    EffectData.SetFloat(effectData, GetAllBlackboardDefs().EffectSharedData.range, maxRange);
-                    EffectData.SetVariant(effectData, GetAllBlackboardDefs().EffectSharedData.attack, ToVariant(attackObj));
-                    EffectData.SetVariant(effectData, GetAllBlackboardDefs().EffectSharedData.attackStatModList, ToVariant(statMods));
-                    effectInstance.Run();
-                }
-            }
-        } else if executedMode == 4 {
-            modeName = "Mode 4: GameEffectSystem Static weaponShoot";
-            let effectSys: ref<EffectSystem> = GameInstance.GetGameEffectSystem(gameInstance);
-            if IsDefined(effectSys) {
-                let effectInstance: ref<EffectInstance> = effectSys.CreateEffectStatic(n"weaponShoot", n"player_ray", scriptInterface.executionOwner, weapon);
-                if IsDefined(effectInstance) {
-                    let effectData: EffectData = effectInstance.GetSharedData();
-                    EffectData.SetVector(effectData, GetAllBlackboardDefs().EffectSharedData.position, muzzlePos);
-                    EffectData.SetVector(effectData, GetAllBlackboardDefs().EffectSharedData.forward, normMuzzleFwd);
-                    EffectData.SetFloat(effectData, GetAllBlackboardDefs().EffectSharedData.range, maxRange);
-                    effectInstance.Run();
-                }
-            }
-        } else if executedMode == 5 {
-            modeName = "Mode 5: Continuous Attack Vector";
-            weapon.PrepareContinuousAttack(muzzlePos, normMuzzleFwd);
-            weapon.StartPreparedContinuousAttack();
-        } else if executedMode == 6 {
-            modeName = "Mode 6: Vanilla Shoot with ShootStraight";
-            weapon.SetAttack(attackID);
-            weapon.QueueEvent(new WeaponPreFireEvent());
-            scriptInterface.PushAnimationEvent(this.IsRightWeaponLogic() ? n"RightShoot" : n"LeftShoot");
-            WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.Shoot, effectBlackboard);
-        }
+        // Standard vanilla sequence: native PhysicalRay hook in DetachedReticle.dll intercepts
+        // callsites @ 0x9507B7 & 0x9507EC and redirects ray origin and direction to muzzle
+        weapon.SetAttack(attackID);
+        weapon.QueueEvent(new WeaponPreFireEvent());
 
         if IsDefined(aimSys) {
-            aimSys.RecordShot(muzzlePos, normMuzzleFwd, targetPt, executedMode, modeName);
+            aimSys.RecordShot(muzzlePos, normMuzzleFwd, targetPt, 1, "Native PhysicalRay Redirection");
         }
 
         let shotIdx: Int32 = IsDefined(aimSys) ? aimSys.GetShotCount() : 1;
-        LogChannel(n"DetachedReticle", "[DECOUPLED SHOT #" + IntToString(shotIdx) + " FIRED] [" + modeName + "]"
+        LogChannel(n"DetachedReticle", "[DECOUPLED PHYSICAL SHOT #" + IntToString(shotIdx) + " FIRED]"
             + " | BarrelDir: (" + FloatToStringPrec(normMuzzleFwd.X, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Y, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Z, 3) + ")"
             + " | MuzzlePos: (" + FloatToStringPrec(muzzlePos.X, 2) + ", " + FloatToStringPrec(muzzlePos.Y, 2) + ", " + FloatToStringPrec(muzzlePos.Z, 2) + ")"
             + " | TargetPt: (" + FloatToStringPrec(targetPt.X, 2) + ", " + FloatToStringPrec(targetPt.Y, 2) + ", " + FloatToStringPrec(targetPt.Z, 2) + ")"
         );
-
-        let screenMsg: SimpleScreenMessage;
-        screenMsg.isShown = true;
-        screenMsg.isInstant = true;
-        screenMsg.duration = 2.5;
-        screenMsg.message = "Shot #" + IntToString(shotIdx) + " | " + modeName;
-        GameInstance.GetBlackboardSystem(gameInstance).Get(GetAllBlackboardDefs().UI_Notifications).SetVariant(GetAllBlackboardDefs().UI_Notifications.OnscreenMessage, ToVariant(screenMsg), true);
     } else {
+        SetMuzzleAimState(Vector4(0.0, 0.0, 0.0, 1.0), Vector4(0.0, 1.0, 0.0, 0.0), false);
         weapon.SetAttack(attackID);
         weapon.QueueEvent(new WeaponPreFireEvent());
     }
@@ -592,10 +535,8 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
         stateContext.SetPermanentBoolParameter(n"WeaponInSafe", false, true);
     }
 
-    // Only dispatch PushAnimationEvent if not in decoupled mode OR if mode explicitly requests it (Mode 6)
-    if !isDecoupledActive || executedMode == 6 {
-        scriptInterface.PushAnimationEvent(this.IsRightWeaponLogic() ? n"RightShoot" : n"LeftShoot");
-    }
+    // Always push recoil animation event so pistol slide kicks realistically!
+    scriptInterface.PushAnimationEvent(this.IsRightWeaponLogic() ? n"RightShoot" : n"LeftShoot");
 
     stateContext.SetPermanentFloatParameter(this.GetStoppedFiringTimestamp(), Cast<Float>(currentTime), true);
     if this.IsInValentinosFrenzy(scriptInterface) {
@@ -612,17 +553,13 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
                 broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, 10.0);
             }
         }
-        if !isDecoupledActive || executedMode == 6 {
-            WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.SilencedShoot, effectBlackboard);
-        }
+        WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.SilencedShoot, effectBlackboard);
         WeaponObject.SendAmmoUpdateEvent(scriptInterface.executionOwner, weapon);
     } else {
-        if !isDecoupledActive || executedMode == 6 {
-            if statsSystem.GetStatValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatType.HasMuzzleBrake) > 0.0 {
-                WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.MuzzleBrakeShoot, effectBlackboard);
-            } else {
-                WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.Shoot, effectBlackboard);
-            }
+        if statsSystem.GetStatValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatType.HasMuzzleBrake) > 0.0 {
+            WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.MuzzleBrakeShoot, effectBlackboard);
+        } else {
+            WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.Shoot, effectBlackboard);
         }
         WeaponObject.SendAmmoUpdateEvent(scriptInterface.executionOwner, weapon);
         if IsDefined(broadcaster) {
