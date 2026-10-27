@@ -38,6 +38,7 @@ static thread_local bool s_waPhysicalRayMine = false;
 static thread_local void* s_waPhysicalRayContext = nullptr;
 static thread_local float s_waPhysicalRayOrigin[3] = {};
 static thread_local float s_waPhysicalRayMuzzleForward[3] = {};
+static thread_local float s_waPhysicalRayCamForward[3] = {};
 
 static inline bool WaPlausiblePtr(uintptr_t p) {
     return p >= 0x10000ull && p < 0x00007FFFFFFFFFFFull && (p & 7ull) == 0;
@@ -100,7 +101,13 @@ static void* WaAllocRelayNear(uint8_t* target) {
 
 static void LogRayRedirection(const float* origin, const float* rawFwd, const float* outFwd) {
     try {
-        std::ofstream logFile("bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/DetachedReticle.log", std::ios::app);
+        std::ofstream logFile("plugins/cyber_engine_tweaks/mods/DetachedReticle/DetachedReticle.log", std::ios::app);
+        if (!logFile.is_open()) {
+            logFile.open("bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/DetachedReticle.log", std::ios::app);
+        }
+        if (!logFile.is_open()) {
+            logFile.open("DetachedReticle.log", std::ios::app);
+        }
         if (logFile.is_open()) {
             auto now = std::chrono::system_clock::now();
             auto time_t_now = std::chrono::system_clock::to_time_t(now);
@@ -116,12 +123,81 @@ static void LogRayRedirection(const float* origin, const float* rawFwd, const fl
     } catch (...) {}
 }
 
+static void RotateVectorFrame(const float* fromDir, const float* toDir, const float* inVec, float* outVec) {
+    // Computes rotation from unit vector 'fromDir' to unit vector 'toDir',
+    // and applies it to 'inVec', storing normalized result in 'outVec'.
+    const float fx = fromDir[0], fy = fromDir[1], fz = fromDir[2];
+    const float tx = toDir[0], ty = toDir[1], tz = toDir[2];
+    const float px = inVec[0], py = inVec[1], pz = inVec[2];
+
+    const float dot = fx * tx + fy * ty + fz * tz;
+
+    // If 'from' and 'to' are already virtually identical, no rotation needed
+    if (dot > 0.999999f) {
+        outVec[0] = px;
+        outVec[1] = py;
+        outVec[2] = pz;
+        return;
+    }
+
+    // Cross product: axis = fromDir x toDir
+    float vx = fy * tz - fz * ty;
+    float vy = fz * tx - fx * tz;
+    float vz = fx * ty - fy * tx;
+
+    // Quaternion w = 1 + dot
+    float w = 1.0f + dot;
+
+    // Normalize quaternion
+    float mag = std::sqrt(w * w + vx * vx + vy * vy + vz * vz);
+    if (mag < 1e-6f) {
+        // Nearly anti-parallel: invert vector
+        outVec[0] = -px;
+        outVec[1] = -py;
+        outVec[2] = -pz;
+        return;
+    }
+
+    const float invMag = 1.0f / mag;
+    w *= invMag;
+    vx *= invMag;
+    vy *= invMag;
+    vz *= invMag;
+
+    // Rotate vector p by unit quaternion q = (w, vx, vy, vz) using Rodrigues / quaternion formula:
+    // t = 2 * (v x p)
+    // p' = p + w * t + (v x t)
+    const float tx2 = 2.0f * (vy * pz - vz * py);
+    const float ty2 = 2.0f * (vz * px - vx * pz);
+    const float tz2 = 2.0f * (vx * py - vy * px);
+
+    const float rx = px + w * tx2 + (vy * tz2 - vz * ty2);
+    const float ry = py + w * ty2 + (vz * tx2 - vx * tz2);
+    const float rz = pz + w * tz2 + (vx * ty2 - vy * tx2);
+
+    // Normalize rotated vector
+    const float rLen = std::sqrt(rx * rx + ry * ry + rz * rz);
+    if (rLen > 1e-6f) {
+        const float invRLen = 1.0f / rLen;
+        outVec[0] = rx * invRLen;
+        outVec[1] = ry * invRLen;
+        outVec[2] = rz * invRLen;
+    } else {
+        outVec[0] = toDir[0];
+        outVec[1] = toDir[1];
+        outVec[2] = toDir[2];
+    }
+}
+
 extern "C" char Hooked_WaPhysicalRayOrigin(void* rcx, void* rdx, float* out) {
     s_waPhysicalRayMine = false;
     s_waPhysicalRayContext = nullptr;
     s_waPhysicalRayMuzzleForward[0] = 0.0f;
     s_waPhysicalRayMuzzleForward[1] = 0.0f;
     s_waPhysicalRayMuzzleForward[2] = 0.0f;
+    s_waPhysicalRayCamForward[0] = 0.0f;
+    s_waPhysicalRayCamForward[1] = 0.0f;
+    s_waPhysicalRayCamForward[2] = 0.0f;
 
     const char result = s_originalEval ? s_originalEval(rcx, rdx, out) : 0;
     if (!result || !out || !ShootingHook::s_isDecoupled) return result;
@@ -129,6 +205,7 @@ extern "C" char Hooked_WaPhysicalRayOrigin(void* rcx, void* rdx, float* out) {
     __try {
         const float muzzle[3] = { ShootingHook::s_muzzlePos.X, ShootingHook::s_muzzlePos.Y, ShootingHook::s_muzzlePos.Z };
         const float forward[3] = { ShootingHook::s_muzzleFwd.X, ShootingHook::s_muzzleFwd.Y, ShootingHook::s_muzzleFwd.Z };
+        const float cam[3] = { ShootingHook::s_camFwd.X, ShootingHook::s_camFwd.Y, ShootingHook::s_camFwd.Z };
 
         // Quick distance check between camera origin and weapon muzzle (must be within 3.0 m)
         const float dx = out[0] - muzzle[0];
@@ -148,6 +225,9 @@ extern "C" char Hooked_WaPhysicalRayOrigin(void* rcx, void* rdx, float* out) {
         s_waPhysicalRayMuzzleForward[0] = forward[0];
         s_waPhysicalRayMuzzleForward[1] = forward[1];
         s_waPhysicalRayMuzzleForward[2] = forward[2];
+        s_waPhysicalRayCamForward[0] = cam[0];
+        s_waPhysicalRayCamForward[1] = cam[1];
+        s_waPhysicalRayCamForward[2] = cam[2];
 
         // Override origin with muzzle position
         out[0] = muzzle[0];
@@ -170,10 +250,15 @@ extern "C" char Hooked_WaPhysicalRayForward(void* rcx, void* rdx, float* out) {
     const char result = s_originalEval ? s_originalEval(rcx, rdx, out) : 0;
     const bool redirect = s_waPhysicalRayMine;
     void* const sharedContext = s_waPhysicalRayContext;
-    const float forward[3] = {
+    const float barrelFwd[3] = {
         s_waPhysicalRayMuzzleForward[0],
         s_waPhysicalRayMuzzleForward[1],
         s_waPhysicalRayMuzzleForward[2]
+    };
+    const float camFwd[3] = {
+        s_waPhysicalRayCamForward[0],
+        s_waPhysicalRayCamForward[1],
+        s_waPhysicalRayCamForward[2]
     };
     const float finalOrigin[3] = { s_waPhysicalRayOrigin[0], s_waPhysicalRayOrigin[1], s_waPhysicalRayOrigin[2] };
 
@@ -185,14 +270,35 @@ extern "C" char Hooked_WaPhysicalRayForward(void* rcx, void* rdx, float* out) {
     __try {
         const float raw[3] = { out[0], out[1], out[2] };
 
-        // Redirect ray along the physical barrel forward direction
-        float l2 = forward[0]*forward[0] + forward[1]*forward[1] + forward[2]*forward[2];
-        if (l2 > 0.01f) {
-            const float invL = 1.0f / std::sqrt(l2);
-            out[0] = forward[0] * invL;
-            out[1] = forward[1] * invL;
-            out[2] = forward[2] * invL;
-            out[3] = 0.0f;
+        // Normalize barrel forward and camera forward
+        float bLen2 = barrelFwd[0]*barrelFwd[0] + barrelFwd[1]*barrelFwd[1] + barrelFwd[2]*barrelFwd[2];
+        float cLen2 = camFwd[0]*camFwd[0] + camFwd[1]*camFwd[1] + camFwd[2]*camFwd[2];
+
+        if (bLen2 > 0.01f) {
+            float bNorm[3] = { barrelFwd[0], barrelFwd[1], barrelFwd[2] };
+            const float invB = 1.0f / std::sqrt(bLen2);
+            bNorm[0] *= invB; bNorm[1] *= invB; bNorm[2] *= invB;
+
+            if (cLen2 > 0.01f) {
+                float cNorm[3] = { camFwd[0], camFwd[1], camFwd[2] };
+                const float invC = 1.0f / std::sqrt(cLen2);
+                cNorm[0] *= invC; cNorm[1] *= invC; cNorm[2] *= invC;
+
+                // Rotate the pellet's evaluated direction from camera gaze frame into weapon barrel frame!
+                // This preserves shotgun pellet dispersion cones and recoil spread patterns perfectly.
+                float rotated[3] = {};
+                RotateVectorFrame(cNorm, bNorm, raw, rotated);
+                out[0] = rotated[0];
+                out[1] = rotated[1];
+                out[2] = rotated[2];
+                out[3] = 0.0f;
+            } else {
+                // Fallback if camera vector not available: direct barrel direction
+                out[0] = bNorm[0];
+                out[1] = bNorm[1];
+                out[2] = bNorm[2];
+                out[3] = 0.0f;
+            }
         }
 
         // Write the physical ray back into the blackboard shared data so impact consumers
@@ -293,9 +399,10 @@ void ShootingHook::Shutdown() {
     }
 }
 
-void ShootingHook::SetMuzzleAimState(const RED4ext::Vector4& aMuzzlePos, const RED4ext::Vector4& aMuzzleFwd, bool aIsDecoupled) {
+void ShootingHook::SetMuzzleAimState(const RED4ext::Vector4& aMuzzlePos, const RED4ext::Vector4& aMuzzleFwd, const RED4ext::Vector4& aCamFwd, bool aIsDecoupled) {
     s_muzzlePos = aMuzzlePos;
     s_muzzleFwd = aMuzzleFwd;
+    s_camFwd = aCamFwd;
     s_isDecoupled = aIsDecoupled;
 }
 

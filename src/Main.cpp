@@ -18,15 +18,17 @@ void SetMuzzleAimState(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFr
 
     RED4ext::Vector4 muzzlePos;
     RED4ext::Vector4 muzzleFwd;
+    RED4ext::Vector4 camFwd;
     bool isDecoupled = false;
 
     RED4ext::GetParameter(aFrame, &muzzlePos);
     RED4ext::GetParameter(aFrame, &muzzleFwd);
+    RED4ext::GetParameter(aFrame, &camFwd);
     RED4ext::GetParameter(aFrame, &isDecoupled);
 
     aFrame->code++; // skip ParamEnd
 
-    DetachedReticle::ShootingHook::SetMuzzleAimState(muzzlePos, muzzleFwd, isDecoupled);
+    DetachedReticle::ShootingHook::SetMuzzleAimState(muzzlePos, muzzleFwd, camFwd, isDecoupled);
 }
 
 void RegisterTypes() {
@@ -40,6 +42,7 @@ void PostRegisterTypes() {
     func->flags = flags;
     func->AddParam("Vector4", "muzzlePos");
     func->AddParam("Vector4", "muzzleFwd");
+    func->AddParam("Vector4", "camFwd");
     func->AddParam("Bool", "isDecoupled");
     rtti->RegisterFunction(func);
 }

@@ -10,10 +10,11 @@ public:
     static bool Initialize(RED4ext::v1::PluginHandle aHandle, const RED4ext::v1::Sdk* aSdk);
     static void Shutdown();
 
-    static void SetMuzzleAimState(const RED4ext::Vector4& aMuzzlePos, const RED4ext::Vector4& aMuzzleFwd, bool aIsDecoupled);
+    static void SetMuzzleAimState(const RED4ext::Vector4& aMuzzlePos, const RED4ext::Vector4& aMuzzleFwd, const RED4ext::Vector4& aCamFwd, bool aIsDecoupled);
 
     static inline RED4ext::Vector4 s_muzzlePos{ 0.0f, 0.0f, 0.0f, 1.0f };
     static inline RED4ext::Vector4 s_muzzleFwd{ 0.0f, 1.0f, 0.0f, 0.0f };
+    static inline RED4ext::Vector4 s_camFwd{ 0.0f, 1.0f, 0.0f, 0.0f };
     static inline bool s_isDecoupled{ false };
 
 private:

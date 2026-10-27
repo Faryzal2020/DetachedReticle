@@ -298,7 +298,6 @@ private func UpdateDetachedAim() -> Void {
         LogChannel(n"DetachedReticle", "[DetachedReticle] Active ranged weapon equipped: " + TDBID.ToStringDEBUG(ItemID.GetTDBID(weapon.GetItemID())));
         this.m_detachedLoggedWeapon = true;
     }
-    weapon.ShootStraight(true);
 
     // Frame Delta Time calculation
     let currentEngineTime: Float = EngineTime.ToFloat(GameInstance.GetEngineTime(player.GetGame()));
@@ -406,7 +405,7 @@ private func UpdateDetachedAim() -> Void {
     }
 
     // Feed continuous live barrel tracking to native ShootingHook
-    SetMuzzleAimState(muzzlePos, this.m_gunForward, true);
+    SetMuzzleAimState(muzzlePos, this.m_gunForward, camFwd3, true);
 
     // Periodic telemetry log (every 3 seconds or during large divergence)
     this.m_telemetryTimer += dt;
@@ -477,8 +476,6 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
     let modeName: String = "Vanilla";
 
     if isDecoupledActive {
-        weapon.ShootStraight(true);
-
         let muzzleTransform: Transform = weapon.GetMuzzleSlotWorldTransform();
         let muzzlePos: Vector4 = Transform.GetPosition(muzzleTransform);
         let muzzleFwd: Vector4 = Transform.GetForward(muzzleTransform);
@@ -490,8 +487,15 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
         }
         let normMuzzleFwd: Vector4 = Vector4.Normalize(muzzleFwd);
 
+        let camTransform: Transform;
+        let camSys: ref<CameraSystem> = GameInstance.GetCameraSystem(gameInstance);
+        let camFwd: Vector4 = new Vector4(0.0, 1.0, 0.0, 0.0);
+        if IsDefined(camSys) && camSys.GetActiveCameraWorldTransform(camTransform) {
+            camFwd = Vector4.Normalize(Transform.GetForward(camTransform));
+        }
+
         // Feed exact physical aim state to native C++ ShootingHook
-        SetMuzzleAimState(muzzlePos, normMuzzleFwd, true);
+        SetMuzzleAimState(muzzlePos, normMuzzleFwd, camFwd, true);
 
         let maxRange: Float = attackRecord.Range();
         if maxRange <= 0.0 {
@@ -524,7 +528,7 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
             + " | TargetPt: (" + FloatToStringPrec(targetPt.X, 2) + ", " + FloatToStringPrec(targetPt.Y, 2) + ", " + FloatToStringPrec(targetPt.Z, 2) + ")"
         );
     } else {
-        SetMuzzleAimState(Vector4(0.0, 0.0, 0.0, 1.0), Vector4(0.0, 1.0, 0.0, 0.0), false);
+        SetMuzzleAimState(new Vector4(0.0, 0.0, 0.0, 1.0), new Vector4(0.0, 1.0, 0.0, 0.0), new Vector4(0.0, 1.0, 0.0, 0.0), false);
         weapon.SetAttack(attackID);
         weapon.QueueEvent(new WeaponPreFireEvent());
     }

@@ -196,9 +196,6 @@ registerForEvent("onUpdate", function(delta)
     local fpp = player:GetFPPCameraComponent()
 
     if isArmed and fpp then
-        -- Enforce native straight shooting on equipped ranged weapon
-        pcall(function() weapon:ShootStraight(true) end)
-
         -- Capture baseline transform and entry pitch once when first arming
         if not DetachedReticle.baselinePos then
             local pos = fpp:GetLocalPosition()

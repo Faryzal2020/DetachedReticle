@@ -87,4 +87,15 @@
      - Update effect blackboard shared data (`position` and `forward`) so downstream impact executors (`gameEffectExecutor_BulletImpact`, damage calculation, and decal spawners) register the physical hit along the gun barrel orientation.
   2. Register native RTTI global function `SetMuzzleAimState(muzzlePos: Vector4, muzzleFwd: Vector4, isDecoupled: Bool)` in `DetachedReticle.dll`, continuously fed by `gameuiCrosshairContainerController.UpdateDetachedAim()` and `ShootEvents.OnEnter` in redscript.
   3. Re-enable `PushAnimationEvent(n"RightShoot")` in redscript so normal weapon recoil slide animation functions seamlessly.
+(user test timestamp: 2026-10-28 01:46:19 +0700)
+
+#iteration 9
+- error: Shotgun bullet spread becomes one (all pellets collapse into a single trajectory point without spread).
+- error cause:
+  1. In `Hooked_WaPhysicalRayForward` (`ShootingHook.cpp`), the hook previously discarded the evaluated ray direction `out` (which contains the engine-evaluated spread cone offset for each individual shotgun pellet) and unconditionally overwrote `out` with the identical static muzzle forward vector `s_muzzleFwd` for every ray. Consequently, all 8–12 shotgun pellets were forced into the exact same trajectory line.
+  2. In `DetachedReticle.reds` and `init.lua`, `weapon.ShootStraight(true)` was previously called during earlier troubleshooting. `ShootStraight(true)` natively disables weapon spread and pellet dispersion in REDengine.
+- fix:
+  1. Removed `weapon.ShootStraight(true)` from `DetachedReticle.reds` and `init.lua` so natural weapon spread dispersion and shotgun pellet distribution remain fully active.
+  2. Implemented frame-relative spread vector rotation (`RotateVectorFrame`) in `ShootingHook.cpp`. Instead of clobbering the pellet's angular spread, the hook extracts the relative angular deviation between the vanilla ray and camera forward, and rotates that spread cone around the physical barrel forward direction using unit quaternion rotation ($q = \text{Normalize}(1 + \vec{c} \cdot \vec{b}, \vec{c} \times \vec{b})$).
+  3. Extended `SetMuzzleAimState` native RTTI global binding to pass `camFwd` alongside `muzzlePos` and `muzzleFwd`, ensuring mathematically exact rotation of the spread cone from camera space into barrel space for shotguns and all weapons.
 (user test timestamp: not yet)
