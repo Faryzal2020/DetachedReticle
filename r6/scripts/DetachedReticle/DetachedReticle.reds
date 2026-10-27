@@ -268,8 +268,10 @@ private func UpdateDetachedAim() -> Void {
 
     if !this.m_detachedLoggedWeapon {
         FTLog("[DetachedReticle] Active ranged weapon equipped: " + TDBID.ToStringDEBUG(ItemID.GetTDBID(weapon.GetItemID())) + " | Decoupled Gun Reticle active.");
+        LogChannel(n"DetachedReticle", "[DetachedReticle] Active ranged weapon equipped: " + TDBID.ToStringDEBUG(ItemID.GetTDBID(weapon.GetItemID())));
         this.m_detachedLoggedWeapon = true;
     }
+    weapon.ShootStraight(true);
 
     // Frame Delta Time calculation
     let currentEngineTime: Float = EngineTime.ToFloat(GameInstance.GetEngineTime(player.GetGame()));
@@ -440,9 +442,11 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
 
     let player: ref<PlayerPuppet> = scriptInterface.executionOwner as PlayerPuppet;
     let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(gameInstance);
-    let isDecoupledActive: Bool = IsDefined(player) && !GameObject.IsDualWielding(player) && IsDefined(weapon) && !weapon.IsMelee() && IsDefined(aimSys) && aimSys.IsDetachedActive();
+    let isDecoupledActive: Bool = IsDefined(player) && !GameObject.IsDualWielding(player) && IsDefined(weapon) && !weapon.IsMelee();
 
     if isDecoupledActive {
+        weapon.ShootStraight(true);
+
         let muzzleTransform: Transform = weapon.GetMuzzleSlotWorldTransform();
         let muzzlePos: Vector4 = Transform.GetPosition(muzzleTransform);
         let muzzleFwd: Vector4 = Transform.GetForward(muzzleTransform);
@@ -507,16 +511,16 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
             }
         }
 
-        aimSys.RecordShot(muzzlePos, normMuzzleFwd, targetPt);
+        if IsDefined(aimSys) {
+            aimSys.RecordShot(muzzlePos, normMuzzleFwd, targetPt);
+        }
 
-        let screenOffset: Vector2 = aimSys.GetScreenOffset();
-        FTLog("[DetachedReticle][DECOUPLED SHOT #" + IntToString(aimSys.GetShotCount()) + " FIRED]"
+        let shotIdx: Int32 = IsDefined(aimSys) ? aimSys.GetShotCount() : 1;
+        LogChannel(n"DetachedReticle", "[DECOUPLED SHOT #" + IntToString(shotIdx) + " FIRED]"
             + " Weapon: " + TDBID.ToStringDEBUG(ItemID.GetTDBID(weapon.GetItemID()))
-            + " | GunDivergence: " + FloatToStringPrec(aimSys.GetAngleLagDeg(), 2) + " deg"
-            + " | CrosshairOffset: (" + FloatToStringPrec(screenOffset.X, 1) + ", " + FloatToStringPrec(screenOffset.Y, 1) + ") px"
+            + " | BarrelDir: (" + FloatToStringPrec(normMuzzleFwd.X, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Y, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Z, 3) + ")"
             + " | MuzzlePos: (" + FloatToStringPrec(muzzlePos.X, 2) + ", " + FloatToStringPrec(muzzlePos.Y, 2) + ", " + FloatToStringPrec(muzzlePos.Z, 2) + ")"
             + " | TargetPt: (" + FloatToStringPrec(targetPt.X, 2) + ", " + FloatToStringPrec(targetPt.Y, 2) + ", " + FloatToStringPrec(targetPt.Z, 2) + ")"
-            + " | BarrelDir: (" + FloatToStringPrec(normMuzzleFwd.X, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Y, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Z, 3) + ")"
         );
     } else {
         weapon.SetAttack(attackID);

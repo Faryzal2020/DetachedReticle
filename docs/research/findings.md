@@ -33,4 +33,18 @@
 - error: `[NO_MATCHING_OVERLOAD] At r6\scripts\DetachedReticle\DetachedReticle.reds:543:16: if WeaponObject.GetWeaponType(weapon.GetItemID()) == gamedataItemType.Wea_SniperRifle; arguments passed to 'OperatorEqual' do not match any of the overloads: 1st argument: expected 'TweakDBID', given 'gamedataItemType' ...`
 - error cause: Redscript does not provide direct `==` operator overloads for game enums (`gamedataItemType`, `gamedataWeaponEvolution`); it requires the built-in intrinsic `Equals(enumA, enumB)`.
 - fix: Replaced `==` with `Equals(...)` on lines 543 and 583.
-(user test timestamp: pending user verification)
+(user test timestamp: 2026-10-27 22:35:50 +0700)
+(startup compilation crash fixed, iteration reset)
+
+#iteration 5
+- error: Bullet still travels toward the camera crosshair instead of the gun reticle; no shot or telemetry entries appear in on-disk log files.
+- error cause:
+  1. Log Visibility: `r6\logs\redscript_rCURRENT.log` is strictly an offline AST compilation log (it closes before the 3D game world loads). `red4ext\logs\` only logs plugin load events. `FTLog(...)` in REDengine retail builds routes to kernel/ETW debug traces (`OutputDebugString`), not to files on disk. CET's `print(...)` outputs solely to the interactive in-game console (`~`), not to disk.
+  2. Ballistics Pipeline: In `ShootEvents.OnEnter`, calling `scriptInterface.PushAnimationEvent(n"RightShoot")` and `WeaponObject.TriggerWeaponEffects` triggers REDengine's native animation track event callback. This natively evaluates the active camera transform and fires the engine's primary camera-centered raycast (`EffectObjectProvider_PhysicalRay`), bypassing or firing alongside any script-dispatched attack.
+  3. Decoupling Activation: `isDecoupledActive` relies on `aimSys.IsDetachedActive()`, which is set only when `gameuiCrosshairContainerController.UpdateDetachedAim()` is actively ticking. If the UI container has not ticked or is delayed, the weapon falls back to vanilla camera-driven firing.
+- fix:
+  1. File Logging: Added dedicated file logger in `init.lua` appending to `plugins/cyber_engine_tweaks/mods/DetachedReticle/DetachedReticle.log` and `scripting.log` via `io.open(...)`. Added input listener for `RangedAttack` / `mouse_left` to log all trigger presses. Added telemetry bridge polling `DetachedAimSystem` in CET `onUpdate` to record exact shot numbers, muzzle coordinates, divergence angle, and barrel direction to disk.
+  2. Activation Decoupling: In `ShootEvents.OnEnter`, removed the dependency on `aimSys.IsDetachedActive()`; `isDecoupledActive` now activates directly whenever an armed player holds a non-melee weapon (`IsDefined(player) && !GameObject.IsDualWielding(player) && IsDefined(weapon) && !weapon.IsMelee()`).
+  3. Straight Shooting Enforcement: Added native `weapon.ShootStraight(true)` calls in both CET `onUpdate` and redscript `ShootEvents.OnEnter` / `UpdateDetachedAim` to disable REDengine's native camera convergence.
+(user test timestamp: 2026-10-27 22:35:25 +0700)
+

@@ -16,11 +16,27 @@ local DetachedReticle = {
     baselineRot = nil,
     isActive = false,
     mouseScale = 0.07, -- degrees per mouse unit
-    registeredPlayer = nil
+    registeredPlayer = nil,
+    lastShotCount = 0
 }
 
 local function Log(msg)
+    local timestamp = os.date("%Y-%m-%d %H:%M:%S")
+    local line = string.format("[%s] [DetachedReticle] %s", timestamp, msg)
     print(string.format("[DetachedReticle] %s", msg))
+
+    local f = io.open("plugins/cyber_engine_tweaks/mods/DetachedReticle/DetachedReticle.log", "a")
+    if not f then
+        f = io.open("bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/DetachedReticle.log", "a")
+    end
+    if not f then
+        f = io.open("DetachedReticle.log", "a")
+    end
+    if f then
+        f:write(line .. "\n")
+        f:flush()
+        f:close()
+    end
 end
 
 -- Math Helpers for Quaternions & Vectors (CET Sol sandbox compatible)
@@ -74,6 +90,8 @@ local function registerInputListeners(player)
         player:RegisterInputListener(player, "CameraY")
         player:RegisterInputListener(player, "right_stick_x")
         player:RegisterInputListener(player, "right_stick_y")
+        player:RegisterInputListener(player, "RangedAttack")
+        player:RegisterInputListener(player, "mouse_left")
     end)
 
     DetachedReticle.registeredPlayer = player
@@ -92,6 +110,8 @@ local function unregisterInputListeners(player)
         player:UnregisterInputListener(player, "CameraY")
         player:UnregisterInputListener(player, "right_stick_x")
         player:UnregisterInputListener(player, "right_stick_y")
+        player:UnregisterInputListener(player, "RangedAttack")
+        player:UnregisterInputListener(player, "mouse_left")
     end)
 
     DetachedReticle.registeredPlayer = nil
@@ -137,7 +157,14 @@ registerForEvent("onInit", function()
 
         if not ok or not actionName or not actionValue then return end
 
-        -- Do NOT intercept mouse_left; left click must fire the gun!
+        if actionName == "RangedAttack" or actionName == "mouse_left" then
+            if actionValue > 0.5 then
+                Log(string.format("[FIRE INPUT DETECTED] Action=%s | FreeYaw=%.2f deg | FreePitch=%.2f deg | IsActive=%s",
+                    actionName, DetachedReticle.freeYaw, DetachedReticle.freePitch, tostring(DetachedReticle.isActive)))
+            end
+        end
+
+        -- Do NOT intercept mouse_left or RangedAttack; left click must fire the gun!
         if actionName == "CameraMouseX" or actionName == "CameraX" or actionName == "right_stick_x" then
             DetachedReticle.rawMouseX = DetachedReticle.rawMouseX + actionValue
             if consumer then
@@ -169,6 +196,9 @@ registerForEvent("onUpdate", function(delta)
     local fpp = player:GetFPPCameraComponent()
 
     if isArmed and fpp then
+        -- Enforce native straight shooting on equipped ranged weapon
+        pcall(function() weapon:ShootStraight(true) end)
+
         -- Capture baseline transform and entry pitch once when first arming
         if not DetachedReticle.baselinePos then
             local pos = fpp:GetLocalPosition()
@@ -213,9 +243,6 @@ registerForEvent("onUpdate", function(delta)
         DetachedReticle.rawMouseX = 0.0
         DetachedReticle.rawMouseY = 0.0
 
-        -- CRITICAL: NO DECAY! NO SPRING! NO AUTO-CENTERING!
-        -- The camera stays exactly where the mouse put it.
-
         -- Apply freelook camera orientation (cancelling parent entry pitch before yaw, then re-applying)
         if DetachedReticle.baselinePos and DetachedReticle.baselineRot then
             local cancelNativePitch = quatAxisAngle(1.0, 0.0, 0.0, -DetachedReticle.entryNativePitch)
@@ -244,6 +271,30 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.baselinePos = nil
             DetachedReticle.baselineRot = nil
             Log("[FREELOOK] Weapon holstered - Camera reset to baseline.")
+        end
+    end
+
+    -- Telemetry bridge: poll DetachedAimSystem for ballistics shot telemetry
+    local aimSys = nil
+    pcall(function()
+        aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
+    end)
+    if aimSys then
+        local okCount, shotCount = pcall(function() return aimSys:GetShotCount() end)
+        if okCount and shotCount and shotCount > (DetachedReticle.lastShotCount or 0) then
+            DetachedReticle.lastShotCount = shotCount
+            local mPos, bDir, tPt, angle = nil, nil, nil, 0.0
+            pcall(function()
+                mPos = aimSys:GetLastShotMuzzlePos()
+                bDir = aimSys:GetLastShotBulletDir()
+                tPt = aimSys:GetLastShotTargetPt()
+                angle = aimSys:GetLastShotAngleDeg()
+            end)
+            Log(string.format("[BALLISTICS RECORD #%d] GunDivergence=%.2f deg | FreeYaw=%.2f deg, FreePitch=%.2f deg | Muzzle=(%.2f, %.2f, %.2f) | BulletDir=(%.3f, %.3f, %.3f)",
+                shotCount, angle or 0.0, DetachedReticle.freeYaw, DetachedReticle.freePitch,
+                (mPos and (mPos.x or mPos.X)) or 0.0, (mPos and (mPos.y or mPos.Y)) or 0.0, (mPos and (mPos.z or mPos.Z)) or 0.0,
+                (bDir and (bDir.x or bDir.X)) or 0.0, (bDir and (bDir.y or bDir.Y)) or 0.0, (bDir and (bDir.z or bDir.Z)) or 0.0
+            ))
         end
     end
 
