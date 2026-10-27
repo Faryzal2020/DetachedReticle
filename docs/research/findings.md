@@ -119,14 +119,18 @@
      - Native Settings UI: Registered in-game menu tab `/detachedReticle` with live sliders and selectors under Pause Menu -> Settings -> Mods.
      - CET ImGui Overlay UI: Live popup window in CET overlay (`onDraw`) with sliders, algorithm radio buttons, and status monitors.
      - CET Console API: `DetachedReticle.SetCatchUpSpeed(val)`, `DetachedReticle.SetDeadzone(val)`, `DetachedReticle.SetMaxDivergence(val)`, `DetachedReticle.SetSmoothingMode(mode)`, `DetachedReticle.GetOptions()`.
-  4. Camera Reticle Isolation:
-     - Error observed in test: Moving mouse resulted in the camera being actively pulled back towards the aiming direction / center instead of the aiming direction turning toward the camera.
-     - Root cause:
-       a. `player:GetWorldYaw()` was called inside a `pcall`; this method does not exist on `PlayerPuppet` in REDengine, causing `teleFac:Teleport(...)` to silently never be called.
-       b. Consequently, the player body never turned, while `freeYaw = freeYaw - yawStep` decayed the camera's local angle back to zero every frame, dragging the camera away from the player's intended aim point.
-     - Fix:
-       a. Made `intendedWorldYaw`, `freeYaw`, and `freePitch` strictly and exclusively driven by raw mouse input. Under no circumstances does catch-up, decay, spring, or clamp touch or alter `freeYaw` or `intendedWorldYaw`.
-       b. Used valid REDengine API `Vector4.Heading(player:GetWorldForward())` / `atan2(fwd.y, fwd.x)` to measure current body yaw and teleport the player puppet towards `intendedWorldYaw` with the modular catch-up algorithm.
-       c. Set `fpp:SetLocalTransform` relative yaw to `normalizeDeg(intendedWorldYaw - currentBodyYaw)`. The camera in world space remains 100% stationary on the mouse aim point while the character body and weapon swivel smoothly into alignment.
-(user test timestamp: 2026-10-28 02:59:00 +0700)
+  4. Camera Reticle Stability: During the catch-up rotation step where the player puppet's world yaw advances by $\delta$, the camera's local offset decrements by $-\delta$. As a result, the camera view remains rock-solid in world space on the player's intended target, while the character body and weapon smoothly swivel into alignment.
+  (user test timestamp: 2026-10-28 03:00:19 +0700)
+
+#iteration 11
+- error: Camera was actively being pulled back towards the aiming direction / center when moving the mouse, fighting the player's look input instead of the aiming direction rotating toward the camera.
+- error cause:
+  1. In `init.lua`, `player:GetWorldYaw()` was called inside a `pcall`; `GetWorldYaw` does not exist on `PlayerPuppet` in REDengine, causing `teleFac:Teleport(...)` to silently fail and never be invoked to rotate the player puppet.
+  2. Because the puppet body never turned, `freeYaw = freeYaw - yawStep` decayed the camera's local angle back to zero every frame, actively dragging the camera freelook away from the player's intended aim point.
+- fix:
+  1. Isolated Camera Freelook: `intendedWorldYaw`, `freeYaw`, and `freePitch` are now strictly and exclusively driven by raw mouse input (`rawMouseX`, `rawMouseY`). Under no circumstances does catch-up, decay, spring, or clamp touch or alter `freeYaw` or `intendedWorldYaw`.
+  2. Valid Body Orientation API: Used valid REDengine API `Vector4.Heading(player:GetWorldForward())` / `math.atan2(fwd.y, fwd.x)` to measure current body yaw and rotate the player puppet towards `intendedWorldYaw` via `TeleportationFacility.Teleport`.
+  3. Stationary Camera in World Space: Set `fpp:SetLocalTransform` relative yaw to `normalizeDeg(intendedWorldYaw - currentBodyYaw)`. The camera in world space remains 100% stationary on the mouse aim point while the character body and weapon swivel smoothly into alignment.
+  4. Outward Divergence Clamp: Clamped max divergence by pulling the body along rather than pulling the camera back.
+(untested)
 
