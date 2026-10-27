@@ -1,24 +1,26 @@
 -- DetachedReticle - Cyber Engine Tweaks Module
--- Phase: Chained Aiming Direction to Camera Reticle
--- 1. Camera Reticle: Instant, mouse-controlled gaze center
--- 2. Aiming Direction: Base world heading of the player puppet & upper-body rig, smoothly chained toward Camera Reticle
--- 3. Gun Reticle: Physical weapon muzzle in 3D world space, naturally driven from Aiming Direction via vanilla sway, breathing, recoil, and ready animations
+-- Phase: Decoupled Chained Aiming System
+-- 1. Camera Freelook: 100% controllable ONLY with mouse. Nothing alters, clamps, decays, or pulls the camera back.
+-- 2. Aiming Direction: The base world heading of the player puppet & weapon rig, smoothly chained towards Camera Reticle via modular catch-up algorithms.
+-- 3. Gun Reticle: Physical weapon muzzle in 3D world space, naturally driven from Aiming Direction via vanilla animations, sway, recoil, and resting states.
 
 local Config = {
-    catchUpSpeed = 6.0,           -- Modular catch-up weight (1/s: higher = faster catch-up, lower = heavier lag)
+    catchUpSpeed = 6.0,           -- Modular catch-up weight (higher = faster catch-up, lower = heavier lag)
     deadzone = 0.0,               -- Degrees: zero deadzone by default (configurable via options)
     maxDivergence = 65.0,         -- Degrees: maximum angular separation before pulling body
     smoothingMode = "exponential" -- "exponential", "linear", "spring", or "power"
 }
 
 local DetachedReticle = {
-    version = "3.2.0-chained-aim",
+    version = "3.3.0-chained-aim",
     timer = 0,
     freeYaw = 0.0,
     freePitch = 0.0,
     rawMouseX = 0.0,
     rawMouseY = 0.0,
     entryNativePitch = 0.0,
+    intendedWorldYaw = 0.0,
+    bodyYaw = 0.0,
     baselinePos = nil,
     baselineRot = nil,
     isActive = false,
@@ -29,33 +31,40 @@ local DetachedReticle = {
     nativeSettingsInitAttempted = false
 }
 
+-- Math Helpers for Angle Normalization & Vectors
+local function normalizeDeg(angle)
+    while angle > 180.0 do angle = angle - 360.0 end
+    while angle < -180.0 do angle = angle + 360.0 end
+    return angle
+end
+
 -- Modular Catch-Up Smoothing Algorithms
--- Each algorithm takes (freeYaw, freePitch, divergenceMag, effectiveDivergence, dt, Config, DetachedReticle)
--- and returns (yawStep, pitchStep)
+-- Each algorithm takes (diffYaw, diffPitch, divergenceMag, effectiveDivergence, dt, Config, DetachedReticle)
+-- and returns (yawStep, pitchStep) to rotate the Aiming Direction towards the Camera Reticle
 local Algorithms = {
-    -- 1. Exponential decay: rate proportional to current angular distance
-    exponential = function(freeYaw, freePitch, divergenceMag, effectiveDivergence, dt, cfg, state)
+    -- 1. Exponential decay: rate proportional to current angular divergence
+    exponential = function(diffYaw, diffPitch, divergenceMag, effectiveDivergence, dt, cfg, state)
         local decay = 1.0 - math.exp(-cfg.catchUpSpeed * dt)
         decay = math.max(0.0, math.min(1.0, decay))
         if cfg.deadzone > 0.0 and divergenceMag > 0.001 then
             decay = decay * (effectiveDivergence / divergenceMag)
         end
-        return freeYaw * decay, freePitch * decay
+        return diffYaw * decay, diffPitch * decay
     end,
 
     -- 2. Linear rate limit: constant angular speed (catchUpSpeed * 15.0 deg/sec)
-    linear = function(freeYaw, freePitch, divergenceMag, effectiveDivergence, dt, cfg, state)
+    linear = function(diffYaw, diffPitch, divergenceMag, effectiveDivergence, dt, cfg, state)
         local rate = cfg.catchUpSpeed * 15.0 -- deg per second
         local maxStep = rate * dt
         local ratio = (divergenceMag > 0.001) and math.min(1.0, maxStep / divergenceMag) or 1.0
         if cfg.deadzone > 0.0 and divergenceMag > 0.001 then
             ratio = ratio * (effectiveDivergence / divergenceMag)
         end
-        return freeYaw * ratio, freePitch * ratio
+        return diffYaw * ratio, diffPitch * ratio
     end,
 
     -- 3. Critically damped spring (SmoothDamp approximation):
-    spring = function(freeYaw, freePitch, divergenceMag, effectiveDivergence, dt, cfg, state)
+    spring = function(diffYaw, diffPitch, divergenceMag, effectiveDivergence, dt, cfg, state)
         local omega = cfg.catchUpSpeed
         local expVal = 1.0 / (1.0 + omega * dt + 0.48 * omega * omega * dt * dt + 0.235 * omega * omega * omega * dt * dt * dt)
         local decay = 1.0 - expVal
@@ -63,16 +72,16 @@ local Algorithms = {
         if cfg.deadzone > 0.0 and divergenceMag > 0.001 then
             decay = decay * (effectiveDivergence / divergenceMag)
         end
-        return freeYaw * decay, freePitch * decay
+        return diffYaw * decay, diffPitch * decay
     end,
 
     -- 4. Power-curve ramp: progressive acceleration as angle widens
-    power = function(freeYaw, freePitch, divergenceMag, effectiveDivergence, dt, cfg, state)
+    power = function(diffYaw, diffPitch, divergenceMag, effectiveDivergence, dt, cfg, state)
         local norm = math.min(1.0, effectiveDivergence / math.max(1.0, cfg.maxDivergence))
         local ramp = norm ^ 1.5
         local decay = (1.0 - math.exp(-cfg.catchUpSpeed * dt)) * (0.2 + 0.8 * ramp)
         decay = math.max(0.0, math.min(1.0, decay))
-        return freeYaw * decay, freePitch * decay
+        return diffYaw * decay, diffPitch * decay
     end
 }
 
@@ -226,7 +235,7 @@ local function SetupNativeSettings()
             ns.addRangeFloat(
                 "/detachedReticle/aiming",
                 "Catch-up Speed",
-                "Speed at which the body & aiming direction rotate towards the camera reticle (0 = pure freelook, 6 = default realistic)",
+                "Speed at which the body turns to align with the camera reticle (0 = pure freelook, 6 = default realistic)",
                 0.0, 30.0, 0.5, "%.1f", Config.catchUpSpeed, 6.0,
                 function(val)
                     DetachedReticle.SetCatchUpSpeed(val)
@@ -306,8 +315,8 @@ registerForEvent("onInit", function()
     end)
 
     -- Intercept mouse look input:
-    -- 1. Consume from body so body and gun remain still in world space
-    -- 2. Accumulate delta for the camera
+    -- 1. Consume from body so raw mouse doesn't instantly snap the body
+    -- 2. Accumulate delta exclusively for the Camera Freelook
     Observe('PlayerPuppet', 'OnAction', function(first, second, third)
         if not DetachedReticle.isActive then return end
 
@@ -367,7 +376,17 @@ registerForEvent("onUpdate", function(delta)
     local fpp = player:GetFPPCameraComponent()
 
     if isArmed and fpp then
-        -- Capture baseline transform and entry pitch once when first arming
+        -- Read current player puppet world forward and yaw
+        local okFwd, fwd = pcall(function() return player:GetWorldForward() end)
+        local currentBodyYaw = 0.0
+        if okFwd and fwd and (fwd.x ~= 0 or fwd.y ~= 0) then
+            currentBodyYaw = math.deg(math.atan2(fwd.y, fwd.x))
+        else
+            currentBodyYaw = DetachedReticle.bodyYaw or 0.0
+        end
+        DetachedReticle.bodyYaw = currentBodyYaw
+
+        -- Capture baseline transform on first arming
         if not DetachedReticle.baselinePos then
             local pos = fpp:GetLocalPosition()
             local rot = fpp:GetLocalOrientation()
@@ -376,6 +395,7 @@ registerForEvent("onUpdate", function(delta)
                 DetachedReticle.baselineRot = toQuaternion(rot)
                 DetachedReticle.freeYaw = 0.0
                 DetachedReticle.freePitch = 0.0
+                DetachedReticle.intendedWorldYaw = currentBodyYaw
                 DetachedReticle.rawMouseX = 0.0
                 DetachedReticle.rawMouseY = 0.0
 
@@ -389,27 +409,12 @@ registerForEvent("onUpdate", function(delta)
                     end
                 end
 
-                Log(string.format("[FREELOOK] Freelook ACTIVE. EntryPitch=%.2f deg", DetachedReticle.entryNativePitch))
+                Log(string.format("[FREELOOK] Freelook ACTIVE. EntryPitch=%.2f deg | InitialBodyYaw=%.2f deg",
+                    DetachedReticle.entryNativePitch, currentBodyYaw))
             end
         end
 
         DetachedReticle.isActive = true
-
-        -- Apply mouse input directly to freeYaw and freePitch
-        local zoom = 1.0
-        pcall(function() zoom = fpp:GetZoom() or 1.0 end)
-        if zoom <= 0.001 then zoom = 1.0 end
-
-        local scale = DetachedReticle.mouseScale / zoom
-        DetachedReticle.freeYaw = DetachedReticle.freeYaw - (DetachedReticle.rawMouseX * scale)
-        DetachedReticle.freePitch = DetachedReticle.freePitch + (DetachedReticle.rawMouseY * scale)
-
-        -- Clamp pitch to prevent flipping upside down (-85 to +85 degrees)
-        DetachedReticle.freePitch = math.max(-85.0, math.min(85.0, DetachedReticle.freePitch))
-
-        -- Clear raw mouse accumulation for this frame
-        DetachedReticle.rawMouseX = 0.0
-        DetachedReticle.rawMouseY = 0.0
 
         -- Frame Delta Time
         local dt = delta
@@ -417,32 +422,53 @@ registerForEvent("onUpdate", function(delta)
             dt = 1.0 / 60.0
         end
 
-        -- Calculate current divergence magnitude between Camera and Aiming Direction
-        local divergenceMag = math.sqrt(DetachedReticle.freeYaw^2 + DetachedReticle.freePitch^2)
+        -- Apply mouse input EXCLUSIVELY to Camera Freelook (freeYaw, freePitch, intendedWorldYaw)
+        -- NOTHING ELSE in the codebase alters or decays these values!
+        local zoom = 1.0
+        pcall(function() zoom = fpp:GetZoom() or 1.0 end)
+        if zoom <= 0.001 then zoom = 1.0 end
 
-        -- 1. Enforce Config.maxDivergence (Clamp & pull excess immediately)
+        local scale = DetachedReticle.mouseScale / zoom
+        local mouseDeltaYaw = - (DetachedReticle.rawMouseX * scale)
+        local mouseDeltaPitch = (DetachedReticle.rawMouseY * scale)
+
+        -- Clear raw mouse accumulation for this frame
+        DetachedReticle.rawMouseX = 0.0
+        DetachedReticle.rawMouseY = 0.0
+
+        -- Update Camera Freelook state ONLY from mouse delta
+        DetachedReticle.freeYaw = DetachedReticle.freeYaw + mouseDeltaYaw
+        DetachedReticle.freePitch = DetachedReticle.freePitch + mouseDeltaPitch
+        DetachedReticle.freePitch = math.max(-85.0, math.min(85.0, DetachedReticle.freePitch))
+
+        DetachedReticle.intendedWorldYaw = normalizeDeg(DetachedReticle.intendedWorldYaw + mouseDeltaYaw)
+
+        -- Calculate divergence from Aiming Direction (body heading) to Camera Reticle
+        local diffYaw = normalizeDeg(DetachedReticle.intendedWorldYaw - currentBodyYaw)
+        local diffPitch = DetachedReticle.freePitch
+        local divergenceMag = math.sqrt(diffYaw^2 + diffPitch^2)
+
+        -- 1. Enforce Config.maxDivergence
+        -- If divergence exceeds max limit, drag the body along immediately
+        -- The Camera Freelook is NEVER pulled back or altered!
         if Config.maxDivergence > 0.0 and divergenceMag > Config.maxDivergence then
-            local clampFactor = Config.maxDivergence / divergenceMag
-            local excessYaw = DetachedReticle.freeYaw * (1.0 - clampFactor)
-            local excessPitch = DetachedReticle.freePitch * (1.0 - clampFactor)
-
-            DetachedReticle.freeYaw = DetachedReticle.freeYaw * clampFactor
-            DetachedReticle.freePitch = DetachedReticle.freePitch * clampFactor
-
-            local okYaw, curYaw = pcall(function() return player:GetWorldYaw() end)
-            if okYaw and curYaw then
-                local teleFac = Game.GetTeleportationFacility()
-                if teleFac then
-                    pcall(function()
-                        teleFac:Teleport(player, player:GetWorldPosition(), EulerAngles.new(0.0, 0.0, curYaw + excessYaw))
-                    end)
-                end
+            local excess = divergenceMag - Config.maxDivergence
+            local pullFactor = excess / divergenceMag
+            local dragStep = diffYaw * pullFactor
+            local draggedBodyYaw = normalizeDeg(currentBodyYaw + dragStep)
+            local teleFac = Game.GetTeleportationFacility()
+            if teleFac then
+                pcall(function()
+                    teleFac:Teleport(player, player:GetWorldPosition(), EulerAngles.new(0.0, 0.0, draggedBodyYaw))
+                end)
             end
-            DetachedReticle.entryNativePitch = DetachedReticle.entryNativePitch + excessPitch
+            currentBodyYaw = draggedBodyYaw
+            diffYaw = normalizeDeg(DetachedReticle.intendedWorldYaw - currentBodyYaw)
             divergenceMag = Config.maxDivergence
         end
 
         -- 2. Chained Catch-Up Smoothing (Aiming Direction turns toward Camera Reticle)
+        -- Advances the player puppet body toward the camera reticle; NEVER pulls camera backward!
         if Config.catchUpSpeed > 0.0 then
             local effectiveDivergence = divergenceMag
             if Config.deadzone > 0.0 then
@@ -451,31 +477,28 @@ registerForEvent("onUpdate", function(delta)
 
             if effectiveDivergence > 0.001 and divergenceMag > 0.001 then
                 local algoFn = Algorithms[Config.smoothingMode:lower()] or Algorithms["exponential"]
-                local yawStep, pitchStep = algoFn(DetachedReticle.freeYaw, DetachedReticle.freePitch, divergenceMag, effectiveDivergence, dt, Config, DetachedReticle)
+                local yawStep, pitchStep = algoFn(diffYaw, diffPitch, divergenceMag, effectiveDivergence, dt, Config, DetachedReticle)
 
-                -- Rotate puppet world yaw toward camera view
-                local okYaw, curYaw = pcall(function() return player:GetWorldYaw() end)
-                if okYaw and curYaw and math.abs(yawStep) > 0.0001 then
-                    local newYaw = curYaw + yawStep
+                if math.abs(yawStep) > 0.0001 then
+                    local targetBodyYaw = normalizeDeg(currentBodyYaw + yawStep)
                     local teleFac = Game.GetTeleportationFacility()
                     if teleFac then
                         pcall(function()
-                            teleFac:Teleport(player, player:GetWorldPosition(), EulerAngles.new(0.0, 0.0, newYaw))
+                            teleFac:Teleport(player, player:GetWorldPosition(), EulerAngles.new(0.0, 0.0, targetBodyYaw))
                         end)
                     end
                 end
-
-                -- Shift aiming pitch and reduce local camera divergence
-                DetachedReticle.entryNativePitch = DetachedReticle.entryNativePitch + pitchStep
-                DetachedReticle.freeYaw = DetachedReticle.freeYaw - yawStep
-                DetachedReticle.freePitch = DetachedReticle.freePitch - pitchStep
             end
         end
 
-        -- Apply freelook camera orientation (cancelling parent entry pitch before yaw, then re-applying)
+        -- 3. Render Camera Freelook Orientation
+        -- In world space, camera is locked onto intendedWorldYaw (mouse-controlled gaze)
+        -- Relative yaw from current body orientation to camera gaze:
         if DetachedReticle.baselinePos and DetachedReticle.baselineRot then
+            local relativeYaw = normalizeDeg(DetachedReticle.intendedWorldYaw - currentBodyYaw)
+
             local cancelNativePitch = quatAxisAngle(1.0, 0.0, 0.0, -DetachedReticle.entryNativePitch)
-            local qYaw = quatAxisAngle(0.0, 0.0, 1.0, DetachedReticle.freeYaw)
+            local qYaw = quatAxisAngle(0.0, 0.0, 1.0, relativeYaw)
             local qPitch = quatAxisAngle(1.0, 0.0, 0.0, DetachedReticle.entryNativePitch + DetachedReticle.freePitch)
 
             local orient = quatMultiply(cancelNativePitch, qYaw)
@@ -536,10 +559,9 @@ registerForEvent("onUpdate", function(delta)
     if DetachedReticle.timer >= 3.0 then
         DetachedReticle.timer = 0
         if DetachedReticle.isActive then
-            local curMode = 0
-            if aimSys then pcall(function() curMode = aimSys:GetTestMode() or 0 end) end
-            Log(string.format("[STATUS] Chained Aiming ACTIVE | Yaw=%.2f deg | Pitch=%.2f deg | Speed=%.1f | Deadzone=%.1f deg | Mode=%s",
-                DetachedReticle.freeYaw, DetachedReticle.freePitch, Config.catchUpSpeed, Config.deadzone, Config.smoothingMode))
+            local diffYaw = normalizeDeg(DetachedReticle.intendedWorldYaw - (DetachedReticle.bodyYaw or 0.0))
+            Log(string.format("[STATUS] Chained Aiming ACTIVE | CamYaw=%.2f deg | BodyYaw=%.2f deg | DiffYaw=%.2f deg | Pitch=%.2f deg | Speed=%.1f | Deadzone=%.1f deg | Mode=%s",
+                DetachedReticle.intendedWorldYaw, DetachedReticle.bodyYaw or 0.0, diffYaw, DetachedReticle.freePitch, Config.catchUpSpeed, Config.deadzone, Config.smoothingMode))
         end
     end
 end)
@@ -616,8 +638,10 @@ registerForEvent("onDraw", function()
 
         ImGui.Separator()
         -- Live telemetry preview
+        local diffYaw = normalizeDeg(DetachedReticle.intendedWorldYaw - (DetachedReticle.bodyYaw or 0.0))
         ImGui.Text(string.format("Status: %s", DetachedReticle.isActive and "ARMED & DECOUPLED" or "Holstered / Inactive"))
-        ImGui.Text(string.format("Camera Offset: Yaw = %.1f deg, Pitch = %.1f deg", DetachedReticle.freeYaw, DetachedReticle.freePitch))
+        ImGui.Text(string.format("Camera Freelook: Yaw = %.1f deg, Pitch = %.1f deg", DetachedReticle.freeYaw, DetachedReticle.freePitch))
+        ImGui.Text(string.format("Body Aim Divergence: DiffYaw = %.1f deg", diffYaw))
 
         ImGui.End()
     end
