@@ -160,8 +160,12 @@ registerForEvent("onUpdate", function(delta)
         registerInputListeners(player)
     end
 
+    local isDual = false
+    pcall(function()
+        isDual = GameObject.IsDualWielding(player)
+    end)
     local weapon = GameObject.GetRightActiveWeapon(player)
-    local isArmed = weapon and not weapon:IsMelee()
+    local isArmed = weapon and not weapon:IsMelee() and not isDual
     local fpp = player:GetFPPCameraComponent()
 
     if isArmed and fpp then

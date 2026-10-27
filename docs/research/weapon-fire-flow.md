@@ -2,7 +2,7 @@
 
 **Document Path:** `docs/research/weapon-fire-flow.md`  
 **Phase:** Phase 0 — Research (Read-Only)  
-**Game Version Reference:** Cyberpunk 2077 2.1x (via REDmod scripts and vanilla tweaks)  
+**Game Version Reference:** Cyberpunk 2077 2.50 (Build 3.0.88.46235) (via REDmod scripts and vanilla tweaks)  
 **Authoritative Reference Sources:**
 - Vanilla Scripts: `tools/redmod/scripts/` (`cyberpunk/`, `core/`)
 - Vanilla Tweaks: `tools/redmod/tweaks/`

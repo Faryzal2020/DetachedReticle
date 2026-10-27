@@ -39,8 +39,6 @@
 *.lib
 *.exp
 *.obj
-# Ship compiled dll of the mod
-!/red4ext/plugins/DetachedReticle/DetachedReticle.dll
 
 # Game data that must never be committed
 *.archive

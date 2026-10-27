@@ -2,6 +2,8 @@
 // Decoupled Aim Mod for Cyberpunk 2077
 // Camera freelook with decoupled gun reticle & ballistics redirection
 
+module DetachedReticle
+
 public class DetachedAimSystem extends ScriptableSystem {
     private let m_gunForward: Vector4;
     private let m_targetPoint: Vector4;
@@ -15,7 +17,12 @@ public class DetachedAimSystem extends ScriptableSystem {
     private let m_shotCount: Int32;
     private let m_lastShotMuzzlePos: Vector4;
     private let m_lastShotBulletDir: Vector4;
+    private let m_lastShotTargetPt: Vector4;
     private let m_lastShotAngleDeg: Float;
+
+    public static func GetInstance(game: GameInstance) -> ref<DetachedAimSystem> {
+        return GameInstance.GetScriptableSystemsContainer(game).Get(n"DetachedReticle.DetachedAimSystem") as DetachedAimSystem;
+    }
 
     public func SetAimState(gunFwd: Vector4, targetPt: Vector4, muzzlePos: Vector4, camFwd: Vector4, screenOffset: Vector2, angleLagDeg: Float, yawLagDeg: Float, pitchLagDeg: Float, isDetached: Bool) -> Void {
         this.m_gunForward = gunFwd;
@@ -29,11 +36,12 @@ public class DetachedAimSystem extends ScriptableSystem {
         this.m_isDetachedActive = isDetached;
     }
 
-    public func RecordShot(muzzlePos: Vector4, bulletDir: Vector4, angleDeg: Float) -> Void {
+    public func RecordShot(muzzlePos: Vector4, bulletDir: Vector4, targetPt: Vector4) -> Void {
         this.m_shotCount += 1;
         this.m_lastShotMuzzlePos = muzzlePos;
         this.m_lastShotBulletDir = bulletDir;
-        this.m_lastShotAngleDeg = angleDeg;
+        this.m_lastShotTargetPt = targetPt;
+        this.m_lastShotAngleDeg = this.m_angleLagDeg;
     }
 
     public func GetGunForward() -> Vector4 { return this.m_gunForward; }
@@ -48,6 +56,7 @@ public class DetachedAimSystem extends ScriptableSystem {
     public func GetShotCount() -> Int32 { return this.m_shotCount; }
     public func GetLastShotMuzzlePos() -> Vector4 { return this.m_lastShotMuzzlePos; }
     public func GetLastShotBulletDir() -> Vector4 { return this.m_lastShotBulletDir; }
+    public func GetLastShotTargetPt() -> Vector4 { return this.m_lastShotTargetPt; }
     public func GetLastShotAngleDeg() -> Float { return this.m_lastShotAngleDeg; }
 }
 
@@ -121,7 +130,7 @@ private func InitCameraCrosshair() -> Void {
     }
 
     if !this.m_detachedLoggedInit {
-        LogChannel(n"DEBUG", "[DetachedReticle] Initializing Camera Crosshair (Freelook Center Pip)...");
+        FTLog("[DetachedReticle] Initializing Camera Crosshair (Freelook Center Pip)...");
         this.m_detachedLoggedInit = true;
     }
 
@@ -129,38 +138,38 @@ private func InitCameraCrosshair() -> Void {
     let container: ref<inkCanvas> = new inkCanvas();
     container.SetName(n"CameraCrosshairFreelookCenter");
     container.SetAnchor(inkEAnchor.Centered);
-    container.SetAnchorPoint(Vector2(0.5, 0.5));
-    container.SetSize(Vector2(16.0, 16.0));
-    container.SetTranslation(Vector2(0.0, 0.0));
+    container.SetAnchorPoint(new Vector2(0.5, 0.5));
+    container.SetSize(new Vector2(16.0, 16.0));
+    container.SetTranslation(new Vector2(0.0, 0.0));
     container.SetVisible(false);
 
     // 1. Dark outer diamond border (12x12, 45 deg)
     let shadow: ref<inkRectangle> = new inkRectangle();
     shadow.SetName(n"CamReticleShadow");
     shadow.SetAnchor(inkEAnchor.Centered);
-    shadow.SetAnchorPoint(Vector2(0.5, 0.5));
-    shadow.SetSize(Vector2(12.0, 12.0));
+    shadow.SetAnchorPoint(new Vector2(0.5, 0.5));
+    shadow.SetSize(new Vector2(12.0, 12.0));
     shadow.SetRotation(45.0);
-    shadow.SetTintColor(HDRColor(0.0, 0.0, 0.0, 0.75));
+    shadow.SetTintColor(new HDRColor(0.0, 0.0, 0.0, 0.75));
     container.AddChildWidget(shadow);
 
     // 2. Cyan diamond (8x8, 45 deg)
     let cyanPip: ref<inkRectangle> = new inkRectangle();
     cyanPip.SetName(n"CamReticleCyan");
     cyanPip.SetAnchor(inkEAnchor.Centered);
-    cyanPip.SetAnchorPoint(Vector2(0.5, 0.5));
-    cyanPip.SetSize(Vector2(8.0, 8.0));
+    cyanPip.SetAnchorPoint(new Vector2(0.5, 0.5));
+    cyanPip.SetSize(new Vector2(8.0, 8.0));
     cyanPip.SetRotation(45.0);
-    cyanPip.SetTintColor(HDRColor(0.2, 0.95, 1.0, 0.90));
+    cyanPip.SetTintColor(new HDRColor(0.2, 0.95, 1.0, 0.90));
     container.AddChildWidget(cyanPip);
 
     // 3. Crisp white center dot (2x2)
     let core: ref<inkRectangle> = new inkRectangle();
     core.SetName(n"CamReticleCore");
     core.SetAnchor(inkEAnchor.Centered);
-    core.SetAnchorPoint(Vector2(0.5, 0.5));
-    core.SetSize(Vector2(2.0, 2.0));
-    core.SetTintColor(HDRColor(1.0, 1.0, 1.0, 1.0));
+    core.SetAnchorPoint(new Vector2(0.5, 0.5));
+    core.SetSize(new Vector2(2.0, 2.0));
+    core.SetTintColor(new HDRColor(1.0, 1.0, 1.0, 1.0));
     container.AddChildWidget(core);
 
     this.m_rootWidget.AddChildWidget(container);
@@ -176,9 +185,7 @@ private func StartDetachedReticleTick() -> Void {
     }
 
     if IsDefined(this.m_detachedTickProxy) {
-        this.m_detachedTickProxy.UnregisterFromAllCallbacks(inkanimEventType.OnStart);
         this.m_detachedTickProxy.UnregisterFromAllCallbacks(inkanimEventType.OnStartLoop);
-        this.m_detachedTickProxy.UnregisterFromAllCallbacks(inkanimEventType.OnEndLoop);
         this.m_detachedTickProxy.Stop();
         this.m_detachedTickProxy = null;
     }
@@ -197,18 +204,14 @@ private func StartDetachedReticleTick() -> Void {
 
     this.m_detachedTickProxy = this.m_cameraCrosshair.PlayAnimationWithOptions(tickAnimDef, tickOpts);
     if IsDefined(this.m_detachedTickProxy) {
-        this.m_detachedTickProxy.RegisterToCallback(inkanimEventType.OnStart, this, n"OnDetachedReticleTick");
         this.m_detachedTickProxy.RegisterToCallback(inkanimEventType.OnStartLoop, this, n"OnDetachedReticleTick");
-        this.m_detachedTickProxy.RegisterToCallback(inkanimEventType.OnEndLoop, this, n"OnDetachedReticleTick");
     }
 }
 
 @addMethod(gameuiCrosshairContainerController)
 private func UninitDetachedReticle() -> Void {
     if IsDefined(this.m_detachedTickProxy) {
-        this.m_detachedTickProxy.UnregisterFromAllCallbacks(inkanimEventType.OnStart);
         this.m_detachedTickProxy.UnregisterFromAllCallbacks(inkanimEventType.OnStartLoop);
-        this.m_detachedTickProxy.UnregisterFromAllCallbacks(inkanimEventType.OnEndLoop);
         this.m_detachedTickProxy.Stop();
         this.m_detachedTickProxy = null;
     }
@@ -219,7 +222,7 @@ private func UninitDetachedReticle() -> Void {
 
     let activeWidget: ref<inkWidget> = this.GetActiveCrosshairWidget();
     if IsDefined(activeWidget) {
-        activeWidget.SetTranslation(Vector2(0.0, 0.0));
+        activeWidget.SetTranslation(new Vector2(0.0, 0.0));
     }
 }
 
@@ -240,21 +243,31 @@ private func UpdateDetachedAim() -> Void {
         return;
     }
 
-    let aimSys: ref<DetachedAimSystem> = GameInstance.GetScriptableSystemsContainer(player.GetGame()).Get(n"DetachedAimSystem") as DetachedAimSystem;
+    let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(player.GetGame());
     let activeWidget: ref<inkWidget> = this.GetActiveCrosshairWidget();
+
+    // Guard against dual-wielding: fall back cleanly to vanilla behavior
+    if GameObject.IsDualWielding(player) {
+        if IsDefined(this.m_cameraCrosshair) { this.m_cameraCrosshair.SetVisible(false); }
+        if IsDefined(activeWidget) { activeWidget.SetTranslation(new Vector2(0.0, 0.0)); }
+        if IsDefined(aimSys) {
+            aimSys.SetAimState(new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector2(0.0, 0.0), 0.0, 0.0, 0.0, false);
+        }
+        return;
+    }
 
     let weapon: ref<WeaponObject> = GameObject.GetRightActiveWeapon(player);
     if !IsDefined(weapon) || weapon.IsMelee() {
         if IsDefined(this.m_cameraCrosshair) { this.m_cameraCrosshair.SetVisible(false); }
-        if IsDefined(activeWidget) { activeWidget.SetTranslation(Vector2(0.0, 0.0)); }
+        if IsDefined(activeWidget) { activeWidget.SetTranslation(new Vector2(0.0, 0.0)); }
         if IsDefined(aimSys) {
-            aimSys.SetAimState(Vector4(0.0, 0.0, 0.0, 0.0), Vector4(0.0, 0.0, 0.0, 0.0), Vector4(0.0, 0.0, 0.0, 0.0), Vector4(0.0, 0.0, 0.0, 0.0), Vector2(0.0, 0.0), 0.0, 0.0, 0.0, false);
+            aimSys.SetAimState(new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector2(0.0, 0.0), 0.0, 0.0, 0.0, false);
         }
         return;
     }
 
     if !this.m_detachedLoggedWeapon {
-        LogChannel(n"DEBUG", "[DetachedReticle] Active ranged weapon equipped: " + TDBID.ToStringDEBUG(weapon.GetItemID().GetTDBID()) + " | Decoupled Gun Reticle active.");
+        FTLog("[DetachedReticle] Active ranged weapon equipped: " + TDBID.ToStringDEBUG(ItemID.GetTDBID(weapon.GetItemID())) + " | Decoupled Gun Reticle active.");
         this.m_detachedLoggedWeapon = true;
     }
 
@@ -303,7 +316,7 @@ private func UpdateDetachedAim() -> Void {
     if IsDefined(sqs) {
         let traceStatic: TraceResult;
         if sqs.SyncRaycastByCollisionPreset(muzzlePos, traceEnd, n"World Static", traceStatic) && TraceResult.IsValid(traceStatic) {
-            targetPoint = Vector4(traceStatic.position.X, traceStatic.position.Y, traceStatic.position.Z, 1.0);
+            targetPoint = new Vector4(traceStatic.position.X, traceStatic.position.Y, traceStatic.position.Z, 1.0);
         }
     }
     this.m_targetPoint = targetPoint;
@@ -312,14 +325,23 @@ private func UpdateDetachedAim() -> Void {
     let toTarget: Vector4 = targetPoint - camPos;
     let toTargetDir: Vector4 = Vector4.Normalize(toTarget);
     let dotCam: Float = Vector4.Dot(toTargetDir, camFwd3);
-    let screenOffset: Vector2 = Vector2(0.0, 0.0);
+    let screenOffset: Vector2 = new Vector2(0.0, 0.0);
 
     // If target point is in front of camera (> 0.05 dot product), project onto screen
     if dotCam > 0.05 {
         let projection: Vector2 = this.ProjectWorldToScreen(targetPoint);
-        screenOffset = Vector2(
-            1920.0 * projection.X,
-            -1080.0 * projection.Y
+        let rootCanvas: ref<inkCanvas> = this.m_rootWidget;
+        if !IsDefined(rootCanvas) {
+            rootCanvas = this.GetRootWidget() as inkCanvas;
+        }
+        let rootSize: Vector2 = IsDefined(rootCanvas) ? rootCanvas.GetSize() : new Vector2(3840.0, 2160.0);
+        if rootSize.X <= 0.0 || rootSize.Y <= 0.0 {
+            rootSize = new Vector2(3840.0, 2160.0);
+        }
+
+        screenOffset = new Vector2(
+            rootSize.X * 0.5 * projection.X,
+            -rootSize.Y * 0.5 * projection.Y
         );
 
         if IsDefined(activeWidget) {
@@ -349,7 +371,7 @@ private func UpdateDetachedAim() -> Void {
     let clampedDot: Float = ClampF(dotCam, -1.0, 1.0);
     let angleDeg: Float = Rad2Deg(AcosF(clampedDot));
 
-    // Update global DetachedAimSystem for ballistics redirection
+    // Update global DetachedAimSystem for state query and telemetry
     if IsDefined(aimSys) {
         aimSys.SetAimState(this.m_gunForward, targetPoint, muzzlePos, camFwd3, screenOffset, angleDeg, yawLagDeg, pitchLagDeg, true);
     }
@@ -359,17 +381,18 @@ private func UpdateDetachedAim() -> Void {
     if this.m_telemetryTimer >= 3.0 || (angleDeg > 15.0 && this.m_telemetryTimer >= 0.5) {
         this.m_telemetryTimer = 0.0;
         let widgetNameStr: String = IsDefined(activeWidget) ? NameToString(activeWidget.GetName()) : "NULL";
-        LogChannel(n"DEBUG", "[DetachedReticle][DYNAMICS] Divergence: " + FloatToStringPrec(angleDeg, 2) + " deg (Yaw: " + FloatToStringPrec(yawLagDeg, 2) + " | Pitch: " + FloatToStringPrec(pitchLagDeg, 2) + ") | Offset: (" + FloatToStringPrec(screenOffset.X, 1) + ", " + FloatToStringPrec(screenOffset.Y, 1) + ") px | Widget: " + widgetNameStr);
+        FTLog("[DetachedReticle][DYNAMICS] Divergence: " + FloatToStringPrec(angleDeg, 2) + " deg (Yaw: " + FloatToStringPrec(yawLagDeg, 2) + " | Pitch: " + FloatToStringPrec(pitchLagDeg, 2) + ") | Offset: (" + FloatToStringPrec(screenOffset.X, 1) + ", " + FloatToStringPrec(screenOffset.Y, 1) + ") px | Widget: " + widgetNameStr);
     }
 }
 
 // Intercept pre-attack processing of player weapon attacks:
 // Overwrite EffectSharedData so the raycast originates from the physical muzzle
 // and shoots strictly along the 3D gun barrel towards targetPoint!
+// Self-contained raycast computation: does not depend on UI tick state.
 @wrapMethod(EffectPreAction_PreAttack)
 public const func Process(ctx: EffectScriptContext) -> Void {
     let instigator: ref<GameObject> = EffectScriptContext.GetInstigator(ctx) as GameObject;
-    if IsDefined(instigator) && instigator.IsPlayer() {
+    if IsDefined(instigator) && instigator.IsPlayer() && !GameObject.IsDualWielding(instigator) {
         let weapon: ref<WeaponObject> = EffectScriptContext.GetWeapon(ctx) as WeaponObject;
         if IsDefined(weapon) && !weapon.IsMelee() {
             let muzzleTransform: Transform = weapon.GetMuzzleSlotWorldTransform();
@@ -383,21 +406,32 @@ public const func Process(ctx: EffectScriptContext) -> Void {
             }
             let normMuzzleFwd: Vector4 = Vector4.Normalize(muzzleFwd);
 
+            // Compute atomic physical raycast directly at trigger pull
+            let maxRange: Float = 100.0;
+            let traceEnd: Vector4 = muzzlePos + (normMuzzleFwd * maxRange);
+            let targetPt: Vector4 = traceEnd;
+
+            let sqs: ref<SpatialQueriesSystem> = GameInstance.GetSpatialQueriesSystem(instigator.GetGame());
+            if IsDefined(sqs) {
+                let traceStatic: TraceResult;
+                if sqs.SyncRaycastByCollisionPreset(muzzlePos, traceEnd, n"World Static", traceStatic) && TraceResult.IsValid(traceStatic) {
+                    targetPt = new Vector4(traceStatic.position.X, traceStatic.position.Y, traceStatic.position.Z, 1.0);
+                }
+            }
+
             let sharedData: EffectData = EffectScriptContext.GetSharedData(ctx);
             EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.position, muzzlePos);
             EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.muzzlePosition, muzzlePos);
             EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.forward, normMuzzleFwd);
             EffectData.SetQuat(sharedData, GetAllBlackboardDefs().EffectSharedData.rotation, Transform.GetOrientation(muzzleTransform));
+            EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.raycastEnd, targetPt);
 
-            let aimSys: ref<DetachedAimSystem> = GameInstance.GetScriptableSystemsContainer(instigator.GetGame()).Get(n"DetachedAimSystem") as DetachedAimSystem;
+            let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(instigator.GetGame());
             if IsDefined(aimSys) {
-                let targetPt: Vector4 = aimSys.GetTargetPoint();
-                if !Vector4.IsZero(targetPt) {
-                    EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.raycastEnd, targetPt);
-                }
+                aimSys.RecordShot(muzzlePos, normMuzzleFwd, targetPt);
             }
 
-            LogChannel(n"DEBUG", "[DetachedReticle] Redirected shot to physical barrel: MuzzlePos=(" 
+            FTLog("[DetachedReticle] Redirected shot to physical barrel: MuzzlePos=(" 
                 + FloatToStringPrec(muzzlePos.X, 2) + ", " + FloatToStringPrec(muzzlePos.Y, 2) + ", " + FloatToStringPrec(muzzlePos.Z, 2) + ") | MuzzleFwd=(" 
                 + FloatToStringPrec(normMuzzleFwd.X, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Y, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Z, 3) + ")");
         }
@@ -407,43 +441,29 @@ public const func Process(ctx: EffectScriptContext) -> Void {
 
 @wrapMethod(ShootEvents)
 protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<StateGameScriptInterface>) -> Void {
-    let weapon: ref<WeaponObject> = this.GetWeaponObject(scriptInterface);
-    let player: ref<PlayerPuppet> = scriptInterface.executionOwner as PlayerPuppet;
-    let aimSys: ref<DetachedAimSystem>;
-
-    if IsDefined(player) {
-        aimSys = GameInstance.GetScriptableSystemsContainer(player.GetGame()).Get(n"DetachedAimSystem") as DetachedAimSystem;
-    }
-
-    if IsDefined(weapon) {
-        // Enforce straight shooting along barrel orientation rather than vanilla camera convergence
-        weapon.ShootStraight(true);
-
-        let targetingSys: ref<TargetingSystem> = scriptInterface.GetTargetingSystem();
-        if IsDefined(targetingSys) {
-            targetingSys.SetPlayerAimWeaponPositionProvider(scriptInterface.executionOwner, IPositionProvider.CreateSlotPositionProvider(weapon, n"Muzzle"));
-        }
-    }
-
     wrappedMethod(stateContext, scriptInterface);
 
-    // Shot Execution Telemetry and Verification:
-    if IsDefined(weapon) && IsDefined(aimSys) && aimSys.IsDetachedActive() {
-        let muzzleTransform: Transform = weapon.GetMuzzleSlotWorldTransform();
-        let muzzlePos: Vector4 = Transform.GetPosition(muzzleTransform);
-        let targetPt: Vector4 = aimSys.GetTargetPoint();
-        let gunFwd: Vector4 = aimSys.GetGunForward();
-        let screenOffset: Vector2 = aimSys.GetScreenOffset();
+    let player: ref<PlayerPuppet> = scriptInterface.executionOwner as PlayerPuppet;
+    if IsDefined(player) && !GameObject.IsDualWielding(player) {
+        let weapon: ref<WeaponObject> = this.GetWeaponObject(scriptInterface);
+        let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(player.GetGame());
 
-        aimSys.RecordShot(muzzlePos, gunFwd, aimSys.GetAngleLagDeg());
+        // Shot Execution Telemetry and Verification:
+        if IsDefined(weapon) && !weapon.IsMelee() && IsDefined(aimSys) && aimSys.IsDetachedActive() {
+            let muzzleTransform: Transform = weapon.GetMuzzleSlotWorldTransform();
+            let muzzlePos: Vector4 = Transform.GetPosition(muzzleTransform);
+            let targetPt: Vector4 = aimSys.GetTargetPoint();
+            let gunFwd: Vector4 = aimSys.GetGunForward();
+            let screenOffset: Vector2 = aimSys.GetScreenOffset();
 
-        LogChannel(n"DEBUG", "[DetachedReticle][SHOT #" + IntToString(aimSys.GetShotCount()) + " EXECUTED]"
-            + " Weapon: " + TDBID.ToStringDEBUG(weapon.GetItemID().GetTDBID())
-            + " | GunDivergence: " + FloatToStringPrec(aimSys.GetAngleLagDeg(), 2) + " deg"
-            + " | CrosshairOffset: (" + FloatToStringPrec(screenOffset.X, 1) + ", " + FloatToStringPrec(screenOffset.Y, 1) + ") px"
-            + " | MuzzlePos: (" + FloatToStringPrec(muzzlePos.X, 2) + ", " + FloatToStringPrec(muzzlePos.Y, 2) + ", " + FloatToStringPrec(muzzlePos.Z, 2) + ")"
-            + " | TargetPt: (" + FloatToStringPrec(targetPt.X, 2) + ", " + FloatToStringPrec(targetPt.Y, 2) + ", " + FloatToStringPrec(targetPt.Z, 2) + ")"
-            + " | BarrelDir: (" + FloatToStringPrec(gunFwd.X, 3) + ", " + FloatToStringPrec(gunFwd.Y, 3) + ", " + FloatToStringPrec(gunFwd.Z, 3) + ")"
-        );
+            FTLog("[DetachedReticle][SHOT #" + IntToString(aimSys.GetShotCount()) + " EXECUTED]"
+                + " Weapon: " + TDBID.ToStringDEBUG(ItemID.GetTDBID(weapon.GetItemID()))
+                + " | GunDivergence: " + FloatToStringPrec(aimSys.GetAngleLagDeg(), 2) + " deg"
+                + " | CrosshairOffset: (" + FloatToStringPrec(screenOffset.X, 1) + ", " + FloatToStringPrec(screenOffset.Y, 1) + ") px"
+                + " | MuzzlePos: (" + FloatToStringPrec(muzzlePos.X, 2) + ", " + FloatToStringPrec(muzzlePos.Y, 2) + ", " + FloatToStringPrec(muzzlePos.Z, 2) + ")"
+                + " | TargetPt: (" + FloatToStringPrec(targetPt.X, 2) + ", " + FloatToStringPrec(targetPt.Y, 2) + ", " + FloatToStringPrec(targetPt.Z, 2) + ")"
+                + " | BarrelDir: (" + FloatToStringPrec(gunFwd.X, 3) + ", " + FloatToStringPrec(gunFwd.Y, 3) + ", " + FloatToStringPrec(gunFwd.Z, 3) + ")"
+            );
+        }
     }
 }

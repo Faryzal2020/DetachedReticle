@@ -8,7 +8,7 @@
 
 // Plugin metadata
 constexpr auto PLUGIN_NAME = L"DetachedReticle";
-constexpr auto PLUGIN_AUTHOR = L"MayanoTopgun";
+constexpr auto PLUGIN_AUTHOR = L"Antigravity & User";
 
 RED4EXT_C_EXPORT bool RED4EXT_CALL Main(const RED4ext::v1::PluginHandle aHandle, const RED4ext::v1::EMainReason aReason, const RED4ext::v1::Sdk* aSdk) {
     switch (aReason) {

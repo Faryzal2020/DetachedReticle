@@ -1,23 +1,31 @@
 # DetachedReticle
 
-**DetachedReticle** decouples Cyberpunk 2077's camera freelook from the physical weapon orientation, introducing realistic angular inertia, delay, and weight to weapon aiming with true-to-crosshair ballistics.
+**DetachedReticle** decouples Cyberpunk 2077's camera look from the physical weapon orientation, allowing independent camera freelook while aiming and true physical barrel-directed ballistics.
 
-## Core Architecture
+## Minimum Requirements
 
-- **Camera Freelook:** The mouse freely controls camera rotation and freelook view. A subtle, centered **Camera Crosshair** marks the intended aim point.
-- **Weighted Gun Crosshair:** The active game crosshair (including spread, charge, and ammo UI) is physically decoupled from the camera view center. It moves across the screen governed by a 2nd-order angular spring-damper model simulating weight, mass, and delay.
-- **Dynamic Ballistic Redirection:** Bullets do not shoot from the screen center; native hitscan traces (`PhysicalRay::Execute`) and projectile vectors are dynamically redirected from the weapon's physical muzzle directly through the world target point that the Gun Crosshair is aimed at.
+- **Cyberpunk 2077:** 2.50 minimum (Build 3.0.88.46235)
+- [Cyber Engine Tweaks (CET)](https://www.nexusmods.com/cyberpunk2077/mods/107): 1.38.0 or later
+- [redscript](https://github.com/jac3km4/redscript): 0.5.32 or later
+- *(Note: RED4ext is not required for the Phase 1 MVP; native plugin sources under `src/` are reserved for Phase 2 procedural body/arm animation.)*
 
-## Requirements
+## MVP Features & Architecture
 
-- [redscript](https://github.com/jac3km4/redscript) (0.5.x or newer)
-- [Cyber Engine Tweaks (CET)](https://www.nexusmods.com/cyberpunk2077/mods/107) (for native hitscan raycast interception)
-- [RED4ext](https://github.com/WopsS/RED4ext)
-- Cyberpunk 2077 (v2.1x)
+This release establishes the baseline proof-of-concept detachment between camera view and weapon ballistics:
+
+1. **Independent Camera Freelook:** Moving the mouse rotates the first-person camera view only. The player's body and weapon model remain fixed in world space.
+2. **Dual Reticle UI:**
+   - **Camera Reticle (Center Pip):** A subtle static diamond pip at screen center marks where the camera is looking.
+   - **Gun Reticle (Dynamic Floating Crosshair):** The active weapon crosshair is projected onto the screen from the physical 3D weapon barrel raycast in world space.
+3. **Physical Barrel Ballistics:** Fired bullets leave the weapon's physical muzzle and travel along the 3D barrel orientation towards the Gun Reticle's impact point, not along the camera gaze.
+4. **Clean Fallbacks:** Unarmed and dual-wielding states seamlessly revert to vanilla controls and crosshairs.
+
+> [!NOTE]
+> **Known MVP Scope / Gap:** While an armed ranged weapon is held, the player cannot rotate their body facing (camera turns freely, arms and body stay locked). Upper-body procedural tracking, spring smoothing, and convergence are scheduled for Phase 2.
 
 ## Installation & Deployment
 
-Deploy the mod by copying `r6/` and `bin/` into your game root directory:
+Deploy the mod by copying `bin/` and `r6/` directly into your Cyberpunk 2077 root directory:
 
 ```
 <GAME_ROOT>/
@@ -29,18 +37,13 @@ Deploy the mod by copying `r6/` and `bin/` into your game root directory:
         └── DetachedReticle.reds
 ```
 
-## Diagnostic Verification & Logs
+## Telemetry & Verification Logs
 
-In accordance with our strict verification policy, every execution generates diagnostic proof in the logs:
+When active, the mod emits diagnostics via vanilla engine logging (`FTLog`):
 
-1. **Redscript Telemetry (`r6/logs/redscript_rCURRENT.log` / redscript console):**
-   - Telemetry logs angle lag ($\theta^\circ$), screen translation offset $(X, Y)\text{ px}$, and active widget name.
-   - On every shot fired, logs the exact muzzle position, target point, and calculated bullet divergence from camera center.
-2. **CET Log (`bin/x64/plugins/cyber_engine_tweaks/cyber_engine_tweaks.log`):**
-   - Verifies native memory allocation and hook installation at RVAs `0x9507B7` and `0x9507EC`.
-   - On every trigger pull, logs:
-     - `[SHOT VERIFICATION #N INTERCEPTED BY NATIVE HOOK]`
-     - Muzzle origin $(X, Y, Z)$
-     - Target point $(X, Y, Z)$
-     - Bullet forward vector vs Camera forward vector
-     - Divergence angle ($\text{deg}$) verifying off-center bullet redirection.
+- **Reticle Dynamics:** Logs angular divergence between camera look and weapon barrel, along with projected screen pixel offsets:
+  `[DetachedReticle][DYNAMICS] Divergence: X.XX deg (Yaw: ... | Pitch: ...) | Offset: (X, Y) px`
+- **Shot Redirection:** Logs atomic physical barrel origin and orientation at the exact instant of pre-attack processing:
+  `[DetachedReticle] Redirected shot to physical barrel: MuzzlePos=(X, Y, Z) | MuzzleFwd=(X, Y, Z)`
+- **Shot Telemetry:** Logs execution data per shot pull:
+  `[DetachedReticle][SHOT #N EXECUTED] Weapon: Items.Preset_... | GunDivergence: X.XX deg | CrosshairOffset: ...`
