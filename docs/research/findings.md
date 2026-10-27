@@ -21,4 +21,10 @@
 - error: `[NO_MATCHING_OVERLOAD] At r6\scripts\DetachedReticle\DetachedReticle.reds:424:21: muzzleFxScale = statsSystem.GetStatValue(weapon.GetEntityID(), ...); arguments passed to 'GetStatValue' do not match any of the overloads: 1st argument: expected 'StatsObjectID', given 'EntityID'`
 - error cause: Redscript is strictly typed and does not implicitly coerce `EntityID` to `StatsObjectID` when invoking `StatsSystem.GetStatValue` or `StatPoolsSystem.GetStatPoolValue`.
 - fix: Wrapped all entity ID parameters with `Cast<StatsObjectID>(...)` across lines 424, 428, 538, 550, 581, and 583.
+(user test timestamp: 2026-10-27 22:21:39 +0700)
+
+#iteration 3
+- error: `[NO_MATCHING_OVERLOAD] At r6\scripts\DetachedReticle\DetachedReticle.reds:484:13: gameEffectAttack.GetStatModList(statMods); arguments passed to 'GetStatModList' do not match any of the overloads: 1st argument: expected '[ref<gameStatModifierData>]', given '[gameStatModifierData]'`
+- error cause: `gameStatModifierData` is an engine class type, so redscript arrays of this type require the explicit reference wrapper `array<ref<gameStatModifierData>>`.
+- fix: Changed `let statMods: array<gameStatModifierData>;` to `let statMods: array<ref<gameStatModifierData>>;` on line 483.
 (user test timestamp: pending user verification)

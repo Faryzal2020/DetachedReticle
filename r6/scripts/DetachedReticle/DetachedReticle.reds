@@ -480,7 +480,7 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
         let projectileAttack: ref<Attack_Projectile> = attackObj as Attack_Projectile;
 
         if IsDefined(gameEffectAttack) {
-            let statMods: array<gameStatModifierData>;
+            let statMods: array<ref<gameStatModifierData>>;
             gameEffectAttack.GetStatModList(statMods);
             let effect: ref<EffectInstance> = gameEffectAttack.PrepareAttack(scriptInterface.executionOwner);
             if IsDefined(effect) {
