@@ -1,0 +1,6 @@
+{
+  "catchUpSpeed": 6.0,
+  "deadzone": 0.0,
+  "maxDivergence": 65.0,
+  "smoothingMode": "exponential"
+}

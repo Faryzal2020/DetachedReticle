@@ -98,4 +98,26 @@
   1. Removed `weapon.ShootStraight(true)` from `DetachedReticle.reds` and `init.lua` so natural weapon spread dispersion and shotgun pellet distribution remain fully active.
   2. Implemented frame-relative spread vector rotation (`RotateVectorFrame`) in `ShootingHook.cpp`. Instead of clobbering the pellet's angular spread, the hook extracts the relative angular deviation between the vanilla ray and camera forward, and rotates that spread cone around the physical barrel forward direction using unit quaternion rotation ($q = \text{Normalize}(1 + \vec{c} \cdot \vec{b}, \vec{c} \times \vec{b})$).
   3. Extended `SetMuzzleAimState` native RTTI global binding to pass `camFwd` alongside `muzzlePos` and `muzzleFwd`, ensuring mathematically exact rotation of the spread cone from camera space into barrel space for shotguns and all weapons.
-(user test timestamp: not yet)
+(user test timestamp: 2026-10-28 02:30:19 +0700)
+
+#iteration 10
+- requirement:
+  1. Catch-up speed must be modular and adjustable via options, allowing advanced algorithms to be plugged in dynamically.
+  2. Zero deadzone by default (any mouse movement immediately turns the body / aiming direction).
+  3. Deadzone, catch-up speed, max divergence, and algorithm selection must all be configurable via options.
+  4. Chained Aiming Direction: Camera reticle (mouse-controlled) chains the Aiming Direction (body heading & upper-body rig) smoothly toward the camera view, while the Gun Reticle (physical weapon barrel) naturally follows the Aiming Direction via vanilla skeletal animations, weapon sway, and recoil.
+- implementation:
+  1. Modular Algorithms Architecture: Created `Algorithms` table in `init.lua` with pluggable smoothing functions:
+     - `exponential`: Standard framerate-independent exponential approach ($1 - e^{-\lambda \cdot dt}$).
+     - `linear`: Constant angular rate-limited rotation ($\text{speed} \times 15.0^\circ/\text{s}$).
+     - `spring`: Critically damped smooth damp approximation preventing overshoot.
+     - `power`: Progressive power-curve acceleration ($(\theta/\theta_{\text{max}})^{1.5}$) for responsive wide swings.
+     - Registered extensible API: `DetachedReticle.RegisterAlgorithm(name, fn)` for runtime script registration.
+  2. Zero Deadzone: Default `deadzone = 0.0^\circ`, ensuring instant body response upon any mouse movement. Fully configurable from $0.0^\circ$ to $30.0^\circ$.
+  3. Comprehensive Options Interfaces:
+     - Persistent file storage: `config.json` auto-loaded on startup and auto-saved on edits.
+     - Native Settings UI: Registered in-game menu tab `/detachedReticle` with live sliders and selectors under Pause Menu -> Settings -> Mods.
+     - CET ImGui Overlay UI: Live popup window in CET overlay (`onDraw`) with sliders, algorithm radio buttons, and status monitors.
+     - CET Console API: `DetachedReticle.SetCatchUpSpeed(val)`, `DetachedReticle.SetDeadzone(val)`, `DetachedReticle.SetMaxDivergence(val)`, `DetachedReticle.SetSmoothingMode(mode)`, `DetachedReticle.GetOptions()`.
+  4. Camera Reticle Stability: During the catch-up rotation step where the player puppet's world yaw advances by $\delta$, the camera's local offset decrements by $-\delta$. As a result, the camera view remains rock-solid in world space on the player's intended target, while the character body and weapon smoothly swivel into alignment.
+
