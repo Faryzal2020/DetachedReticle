@@ -385,85 +385,208 @@ private func UpdateDetachedAim() -> Void {
     }
 }
 
-// Intercept pre-attack processing of player weapon attacks:
-// Overwrite EffectSharedData so the raycast originates from the physical muzzle
-// and shoots strictly along the 3D gun barrel towards targetPoint!
-// Self-contained raycast computation: does not depend on UI tick state.
-@wrapMethod(EffectPreAction_PreAttack)
-public const func Process(ctx: EffectScriptContext) -> Void {
-    let instigator: ref<GameObject> = EffectScriptContext.GetInstigator(ctx) as GameObject;
-    if IsDefined(instigator) && instigator.IsPlayer() && !GameObject.IsDualWielding(instigator) {
-        let weapon: ref<WeaponObject> = EffectScriptContext.GetWeapon(ctx) as WeaponObject;
-        if IsDefined(weapon) && !weapon.IsMelee() {
-            let muzzleTransform: Transform = weapon.GetMuzzleSlotWorldTransform();
-            let muzzlePos: Vector4 = Transform.GetPosition(muzzleTransform);
-            let muzzleFwd: Vector4 = Transform.GetForward(muzzleTransform);
-            if Vector4.IsZero(muzzleFwd) {
-                muzzleFwd = weapon.GetWorldForward();
-            }
-            if Vector4.IsZero(muzzlePos) {
-                muzzlePos = weapon.GetWorldPosition();
-            }
-            let normMuzzleFwd: Vector4 = Vector4.Normalize(muzzleFwd);
+// JUSTIFICATION FOR @replaceMethod:
+// In vanilla ShootEvents.OnEnter, weapon.SetAttack() and weapon.QueueEvent(new WeaponPreFireEvent)
+// are directly invoked, causing the native engine to cast a hitscan ray along the camera gaze vector.
+// Because these native calls are embedded mid-method without individual script hooks, @wrapMethod
+// cannot suppress the camera-centered ray. We replace OnEnter so that when DetachedReticle is active,
+// the attack is dispatched along the physical 3D muzzle orientation toward the gun reticle,
+// while preserving all vanilla behavior (animations, stamina, ammo, sounds, VFX) when inactive.
+@replaceMethod(ShootEvents)
+protected export function OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<StateGameScriptInterface>) -> Void {
+    let weapon: ref<WeaponObject>;
+    let attackRecord: wref<Attack_Record>;
+    let attackID: TweakDBID;
+    let gameInstance: GameInstance;
+    let statsSystem: ref<StatsSystem>;
+    let currentTime: Double;
+    let broadcaster: ref<StimBroadcasterComponent>;
+    let effectBlackboard: ref<worldEffectBlackboard>;
+    let numBurstTotal: Float;
+    let magazineCapacity: Float;
+    let fullAutoPenalty: Float;
+    let fullChargePenalty: Float;
+    let visualStimDistance: Float;
+    let muzzleFxScale: Float;
+    let shellsFxScale: Float;
+    let leftHandWeapon: String;
+    let rightHandWeapon: String;
 
-            // Compute atomic physical raycast directly at trigger pull
-            let maxRange: Float = 100.0;
-            let traceEnd: Vector4 = muzzlePos + (normMuzzleFwd * maxRange);
-            let targetPt: Vector4 = traceEnd;
-
-            let sqs: ref<SpatialQueriesSystem> = GameInstance.GetSpatialQueriesSystem(instigator.GetGame());
-            if IsDefined(sqs) {
-                let traceStatic: TraceResult;
-                if sqs.SyncRaycastByCollisionPreset(muzzlePos, traceEnd, n"World Static", traceStatic) && TraceResult.IsValid(traceStatic) {
-                    targetPt = new Vector4(traceStatic.position.X, traceStatic.position.Y, traceStatic.position.Z, 1.0);
-                }
-            }
-
-            let sharedData: EffectData = EffectScriptContext.GetSharedData(ctx);
-            EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.position, muzzlePos);
-            EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.muzzlePosition, muzzlePos);
-            EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.forward, normMuzzleFwd);
-            EffectData.SetQuat(sharedData, GetAllBlackboardDefs().EffectSharedData.rotation, Transform.GetOrientation(muzzleTransform));
-            EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.raycastEnd, targetPt);
-
-            let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(instigator.GetGame());
-            if IsDefined(aimSys) {
-                aimSys.RecordShot(muzzlePos, normMuzzleFwd, targetPt);
-            }
-
-            FTLog("[DetachedReticle] Redirected shot to physical barrel: MuzzlePos=(" 
-                + FloatToStringPrec(muzzlePos.X, 2) + ", " + FloatToStringPrec(muzzlePos.Y, 2) + ", " + FloatToStringPrec(muzzlePos.Z, 2) + ") | MuzzleFwd=(" 
-                + FloatToStringPrec(normMuzzleFwd.X, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Y, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Z, 3) + ")");
-        }
+    gameInstance = scriptInterface.GetGame();
+    statsSystem = GameInstance.GetStatsSystem(gameInstance);
+    currentTime = EngineTime.ToDouble(GameInstance.GetSimTime(gameInstance));
+    effectBlackboard = new worldEffectBlackboard();
+    fullAutoPenalty = 1.0;
+    fullChargePenalty = 1.0;
+    visualStimDistance = 50.0;
+    weapon = this.GetWeaponObject(scriptInterface);
+    muzzleFxScale = statsSystem.GetStatValue(weapon.GetEntityID(), gamedataStatType.WeaponVFX_MuzzleFxScale);
+    if muzzleFxScale >= 0.0 && muzzleFxScale != 1.0 {
+        effectBlackboard.SetValueUnclamped(n"muzzleFxScale", muzzleFxScale);
     }
-    wrappedMethod(ctx);
-}
-
-@wrapMethod(ShootEvents)
-protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<StateGameScriptInterface>) -> Void {
-    wrappedMethod(stateContext, scriptInterface);
+    shellsFxScale = statsSystem.GetStatValue(weapon.GetEntityID(), gamedataStatType.WeaponVFX_ShellsFxScale);
+    if shellsFxScale >= 0.0 && shellsFxScale != 1.0 {
+        effectBlackboard.SetValueUnclamped(n"shellsFxScale", shellsFxScale);
+    }
+    this.ForceDisableVisionMode(stateContext);
+    this.ShowAttackPreview(true, weapon, scriptInterface, stateContext);
+    if !scriptInterface.HasStatFlag(gamedataStatType.CanWeaponShootWhileSprinting) && scriptInterface.localBlackboard.GetInt(GetAllBlackboardDefs().PlayerStateMachine.Locomotion) == EnumInt(gamePSMLocomotionStates.Sprint) {
+        stateContext.SetTemporaryBoolParameter(n"InterruptSprint", true, true);
+    }
+    this.SetLastShotTime(stateContext, currentTime);
+    attackRecord = this.GetDesiredAttackRecord(stateContext, scriptInterface);
+    attackID = attackRecord.GetID();
 
     let player: ref<PlayerPuppet> = scriptInterface.executionOwner as PlayerPuppet;
-    if IsDefined(player) && !GameObject.IsDualWielding(player) {
-        let weapon: ref<WeaponObject> = this.GetWeaponObject(scriptInterface);
-        let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(player.GetGame());
+    let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(gameInstance);
+    let isDecoupledActive: Bool = IsDefined(player) && !GameObject.IsDualWielding(player) && IsDefined(weapon) && !weapon.IsMelee() && IsDefined(aimSys) && aimSys.IsDetachedActive();
 
-        // Shot Execution Telemetry and Verification:
-        if IsDefined(weapon) && !weapon.IsMelee() && IsDefined(aimSys) && aimSys.IsDetachedActive() {
-            let muzzleTransform: Transform = weapon.GetMuzzleSlotWorldTransform();
-            let muzzlePos: Vector4 = Transform.GetPosition(muzzleTransform);
-            let targetPt: Vector4 = aimSys.GetTargetPoint();
-            let gunFwd: Vector4 = aimSys.GetGunForward();
-            let screenOffset: Vector2 = aimSys.GetScreenOffset();
-
-            FTLog("[DetachedReticle][SHOT #" + IntToString(aimSys.GetShotCount()) + " EXECUTED]"
-                + " Weapon: " + TDBID.ToStringDEBUG(ItemID.GetTDBID(weapon.GetItemID()))
-                + " | GunDivergence: " + FloatToStringPrec(aimSys.GetAngleLagDeg(), 2) + " deg"
-                + " | CrosshairOffset: (" + FloatToStringPrec(screenOffset.X, 1) + ", " + FloatToStringPrec(screenOffset.Y, 1) + ") px"
-                + " | MuzzlePos: (" + FloatToStringPrec(muzzlePos.X, 2) + ", " + FloatToStringPrec(muzzlePos.Y, 2) + ", " + FloatToStringPrec(muzzlePos.Z, 2) + ")"
-                + " | TargetPt: (" + FloatToStringPrec(targetPt.X, 2) + ", " + FloatToStringPrec(targetPt.Y, 2) + ", " + FloatToStringPrec(targetPt.Z, 2) + ")"
-                + " | BarrelDir: (" + FloatToStringPrec(gunFwd.X, 3) + ", " + FloatToStringPrec(gunFwd.Y, 3) + ", " + FloatToStringPrec(gunFwd.Z, 3) + ")"
-            );
+    if isDecoupledActive {
+        let muzzleTransform: Transform = weapon.GetMuzzleSlotWorldTransform();
+        let muzzlePos: Vector4 = Transform.GetPosition(muzzleTransform);
+        let muzzleFwd: Vector4 = Transform.GetForward(muzzleTransform);
+        if Vector4.IsZero(muzzleFwd) {
+            muzzleFwd = weapon.GetWorldForward();
         }
+        if Vector4.IsZero(muzzlePos) {
+            muzzlePos = weapon.GetWorldPosition();
+        }
+        let normMuzzleFwd: Vector4 = Vector4.Normalize(muzzleFwd);
+
+        let maxRange: Float = attackRecord.Range();
+        if maxRange <= 0.0 {
+            maxRange = 200.0;
+        }
+        let traceEnd: Vector4 = muzzlePos + (normMuzzleFwd * maxRange);
+        let targetPt: Vector4 = traceEnd;
+
+        let sqs: ref<SpatialQueriesSystem> = GameInstance.GetSpatialQueriesSystem(gameInstance);
+        if IsDefined(sqs) {
+            let traceStatic: TraceResult;
+            if sqs.SyncRaycastByCollisionPreset(muzzlePos, traceEnd, n"World Static", traceStatic) && TraceResult.IsValid(traceStatic) {
+                targetPt = new Vector4(traceStatic.position.X, traceStatic.position.Y, traceStatic.position.Z, 1.0);
+            }
+        }
+
+        let attackContext: AttackInitContext;
+        attackContext.record = attackRecord;
+        attackContext.instigator = scriptInterface.executionOwner;
+        attackContext.source = scriptInterface.executionOwner;
+        attackContext.weapon = weapon;
+
+        let attackObj: ref<IAttack> = IAttack.Create(attackContext);
+        let gameEffectAttack: ref<Attack_GameEffect> = attackObj as Attack_GameEffect;
+        let projectileAttack: ref<Attack_Projectile> = attackObj as Attack_Projectile;
+
+        if IsDefined(gameEffectAttack) {
+            let statMods: array<gameStatModifierData>;
+            gameEffectAttack.GetStatModList(statMods);
+            let effect: ref<EffectInstance> = gameEffectAttack.PrepareAttack(scriptInterface.executionOwner);
+            if IsDefined(effect) {
+                let sharedData: EffectData = effect.GetSharedData();
+                EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.position, muzzlePos);
+                EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.muzzlePosition, muzzlePos);
+                EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.forward, normMuzzleFwd);
+                EffectData.SetQuat(sharedData, GetAllBlackboardDefs().EffectSharedData.rotation, Transform.GetOrientation(muzzleTransform));
+                EffectData.SetVector(sharedData, GetAllBlackboardDefs().EffectSharedData.raycastEnd, targetPt);
+                EffectData.SetFloat(sharedData, GetAllBlackboardDefs().EffectSharedData.range, maxRange);
+                EffectData.SetVariant(sharedData, GetAllBlackboardDefs().EffectSharedData.attack, attackObj);
+                EffectData.SetVariant(sharedData, GetAllBlackboardDefs().EffectSharedData.attackStatModList, statMods);
+                EffectData.SetBool(sharedData, GetAllBlackboardDefs().EffectSharedData.playerOwnedWeapon, true);
+                gameEffectAttack.StartAttack();
+            }
+        } else if IsDefined(projectileAttack) {
+            let launchEvt: ref<gameprojectileSpawnerLaunchEvent> = projectileAttack.PrepareAttack(scriptInterface.executionOwner);
+            if IsDefined(launchEvt) {
+                launchEvt.launchParams.logicalPositionProvider = IPositionProvider.CreateSlotPositionProvider(weapon, n"Muzzle");
+                launchEvt.launchParams.logicalOrientationProvider = IOrientationProvider.CreateStaticOrientationProvider(Quaternion.BuildFromDirectionVector(normMuzzleFwd));
+                launchEvt.launchParams.visualPositionProvider = launchEvt.launchParams.logicalPositionProvider;
+                launchEvt.launchParams.visualOrientationProvider = launchEvt.launchParams.logicalOrientationProvider;
+                weapon.QueueEvent(launchEvt);
+            }
+        }
+
+        aimSys.RecordShot(muzzlePos, normMuzzleFwd, targetPt);
+
+        let screenOffset: Vector2 = aimSys.GetScreenOffset();
+        FTLog("[DetachedReticle][DECOUPLED SHOT #" + IntToString(aimSys.GetShotCount()) + " FIRED]"
+            + " Weapon: " + TDBID.ToStringDEBUG(ItemID.GetTDBID(weapon.GetItemID()))
+            + " | GunDivergence: " + FloatToStringPrec(aimSys.GetAngleLagDeg(), 2) + " deg"
+            + " | CrosshairOffset: (" + FloatToStringPrec(screenOffset.X, 1) + ", " + FloatToStringPrec(screenOffset.Y, 1) + ") px"
+            + " | MuzzlePos: (" + FloatToStringPrec(muzzlePos.X, 2) + ", " + FloatToStringPrec(muzzlePos.Y, 2) + ", " + FloatToStringPrec(muzzlePos.Z, 2) + ")"
+            + " | TargetPt: (" + FloatToStringPrec(targetPt.X, 2) + ", " + FloatToStringPrec(targetPt.Y, 2) + ", " + FloatToStringPrec(targetPt.Z, 2) + ")"
+            + " | BarrelDir: (" + FloatToStringPrec(normMuzzleFwd.X, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Y, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Z, 3) + ")"
+        );
+    } else {
+        weapon.SetAttack(attackID);
+        weapon.QueueEvent(new WeaponPreFireEvent());
     }
+
+    stateContext.SetPermanentIntParameter(this.GetLastChargePressCount(), Cast<Int32>(scriptInterface.GetActionPressCount(n"RangedAttack")), true);
+    stateContext.SetPermanentFloatParameter(this.GetTurnOffPublicSafeTimeStamp(), Cast<Float>(currentTime), true);
+    if this.IsRightWeaponLogic() {
+        stateContext.SetPermanentBoolParameter(n"WeaponInSafe", false, true);
+    }
+    scriptInterface.PushAnimationEvent(this.IsRightWeaponLogic() ? n"RightShoot" : n"LeftShoot");
+    stateContext.SetPermanentFloatParameter(this.GetStoppedFiringTimestamp(), Cast<Float>(currentTime), true);
+    if this.IsInValentinosFrenzy(scriptInterface) {
+        stateContext.SetPermanentIntParameter(n"LastShotInValentinosFrenzy", this.IsRightWeaponLogic() ? EnumInt(gamePSMShootStates.LeftWeapon) : EnumInt(gamePSMShootStates.RightWeapon), true);
+    }
+    this.SetBlackboardIntVariable(scriptInterface, this.GetBlackboardID(scriptInterface), EnumInt(gamePSMRangedWeaponStates.Shoot));
+    broadcaster = scriptInterface.executionOwner.GetStimBroadcasterComponent();
+    if statsSystem.GetStatValue(weapon.GetEntityID(), gamedataStatType.CanSilentKill) > 0.0 {
+        if IsDefined(broadcaster) {
+            broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.IllegalAction);
+            broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.SilencedGunshot);
+            broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.SilencedGunshot, 10.0, , true);
+            if Equals(WeaponObject.GetWeaponType(weapon.GetItemID()), gamedataItemType.Wea_SniperRifle) {
+                broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, 10.0);
+            }
+        }
+        WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.SilencedShoot, effectBlackboard);
+        WeaponObject.SendAmmoUpdateEvent(scriptInterface.executionOwner, weapon);
+    } else {
+        if statsSystem.GetStatValue(weapon.GetEntityID(), gamedataStatType.HasMuzzleBrake) > 0.0 {
+            WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.MuzzleBrakeShoot, effectBlackboard);
+            WeaponObject.SendAmmoUpdateEvent(scriptInterface.executionOwner, weapon);
+        } else {
+            WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.Shoot, effectBlackboard);
+            WeaponObject.SendAmmoUpdateEvent(scriptInterface.executionOwner, weapon);
+        }
+        if IsDefined(broadcaster) {
+            GameInstance.GetQuestsSystem(gameInstance).SetFact(n"player_fired_a_weapon", 1);
+            if IsEntityInInteriorArea(GetPlayer(gameInstance)) {
+                broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, 25.0);
+                visualStimDistance = 45.0;
+            } else {
+                broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, GetPlayer(gameInstance).GetGunshotRange());
+                if weapon.GetPreventionSystem().GetCurrentDistrict().IsDogTown() {
+                    if scriptInterface.localBlackboard.GetInt(GetAllBlackboardDefs().PlayerStateMachine.Combat) == EnumInt(gamePSMCombat.InCombat) {
+                        visualStimDistance = 30.0;
+                    } else {
+                        visualStimDistance = 40.0;
+                    }
+                } else {
+                    visualStimDistance = 50.0;
+                }
+            }
+            broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, visualStimDistance, , true);
+        }
+        PlayerCoverHelper.BlockCoverVisibilityReduction(scriptInterface.executionOwner);
+    }
+    numBurstTotal = Cast<Float>(stateContext.GetIntParameter(this.GetShootingNumBurstTotalName(), true));
+    magazineCapacity = Cast<Float>(WeaponObject.GetMagazineCapacity(weapon));
+    if numBurstTotal > 0.0 {
+        fullAutoPenalty = 1.0 + (((numBurstTotal + 1.0) / magazineCapacity) * statsSystem.GetStatValue(GetPlayer(gameInstance).GetEntityID(), gamedataStatType.FullAutoStaminaCostPenalty));
+    }
+    if Equals(RPGManager.GetWeaponEvolution(weapon.GetItemID()), gamedataWeaponEvolution.Tech) && scriptInterface.GetStatPoolsSystem().GetStatPoolValue(weapon.GetEntityID(), gamedataStatPoolType.WeaponCharge, false) >= WeaponObject.GetBaseMaxChargeThreshold(weapon) {
+        fullChargePenalty = 1.5;
+    }
+    this.ConsumeStamina(scriptInterface, attackRecord, fullAutoPenalty, fullChargePenalty);
+    this.SendDataTrackingRequest(scriptInterface, ETelemetryData.RangedAttacksMade, 1);
+    this.ChangeStatPoolValue(scriptInterface, scriptInterface.ownerEntityID, gamedataStatPoolType.WeaponOverheat, this.GetStaticFloatParameterDefault("overheatValAdd", 10.0));
+    this.ShootingSequencePostShoot(stateContext);
+    GameObject.GetDualWieldWeaponNames(scriptInterface.executionOwner, leftHandWeapon, rightHandWeapon);
+    GameInstance.GetTelemetrySystem(scriptInterface.owner.GetGame()).LogWeaponAttackPerformed(this.GetWeaponObject(scriptInterface), leftHandWeapon, rightHandWeapon);
 }
+
