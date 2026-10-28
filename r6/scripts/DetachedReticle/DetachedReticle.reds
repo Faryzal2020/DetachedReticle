@@ -295,7 +295,6 @@ private func UpdateDetachedAim() -> Void {
 
     if !this.m_detachedLoggedWeapon {
         FTLog("[DetachedReticle] Active ranged weapon equipped: " + TDBID.ToStringDEBUG(ItemID.GetTDBID(weapon.GetItemID())) + " | Decoupled Gun Reticle active.");
-        LogChannel(n"DetachedReticle", "[DetachedReticle] Active ranged weapon equipped: " + TDBID.ToStringDEBUG(ItemID.GetTDBID(weapon.GetItemID())));
         this.m_detachedLoggedWeapon = true;
     }
 
@@ -416,64 +415,13 @@ private func UpdateDetachedAim() -> Void {
     }
 }
 
-// JUSTIFICATION FOR @replaceMethod:
-// In vanilla ShootEvents.OnEnter, weapon.SetAttack() and weapon.QueueEvent(new WeaponPreFireEvent)
-// are directly invoked, causing the native engine to cast a hitscan ray along the camera gaze vector.
-// Because these native calls are embedded mid-method without individual script hooks, @wrapMethod
-// cannot suppress the camera-centered ray. We replace OnEnter so that when DetachedReticle is active,
-// the attack is dispatched along the physical 3D muzzle orientation toward the gun reticle,
-// while preserving all vanilla behavior (animations, stamina, ammo, sounds, VFX) when inactive.
-@replaceMethod(ShootEvents)
+// In ShootEvents.OnEnter, SetMuzzleAimState prepares the physical muzzle trajectory
+// before the vanilla shooting pipeline runs. PhysicalRay callsites are intercepted natively.
+@wrapMethod(ShootEvents)
 protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<StateGameScriptInterface>) -> Void {
-    let weapon: ref<WeaponObject>;
-    let attackRecord: ref<Attack_Record>;
-    let attackID: TweakDBID;
-    let gameInstance: GameInstance;
-    let statsSystem: ref<StatsSystem>;
-    let currentTime: Double;
-    let broadcaster: ref<StimBroadcasterComponent>;
-    let effectBlackboard: ref<worldEffectBlackboard>;
-    let numBurstTotal: Float;
-    let magazineCapacity: Float;
-    let fullAutoPenalty: Float;
-    let fullChargePenalty: Float;
-    let visualStimDistance: Float;
-    let muzzleFxScale: Float;
-    let shellsFxScale: Float;
-    let leftHandWeapon: String;
-    let rightHandWeapon: String;
-    let emptyInvestigateData: stimInvestigateData;
-
-    gameInstance = scriptInterface.GetGame();
-    statsSystem = GameInstance.GetStatsSystem(gameInstance);
-    currentTime = EngineTime.ToDouble(GameInstance.GetSimTime(gameInstance));
-    effectBlackboard = new worldEffectBlackboard();
-    fullAutoPenalty = 1.0;
-    fullChargePenalty = 1.0;
-    visualStimDistance = 50.0;
-    weapon = this.GetWeaponObject(scriptInterface);
-    muzzleFxScale = statsSystem.GetStatValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatType.WeaponVFX_MuzzleFxScale);
-    if muzzleFxScale >= 0.0 && muzzleFxScale != 1.0 {
-        effectBlackboard.SetValueUnclamped(n"muzzleFxScale", muzzleFxScale);
-    }
-    shellsFxScale = statsSystem.GetStatValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatType.WeaponVFX_ShellsFxScale);
-    if shellsFxScale >= 0.0 && shellsFxScale != 1.0 {
-        effectBlackboard.SetValueUnclamped(n"shellsFxScale", shellsFxScale);
-    }
-    this.ForceDisableVisionMode(stateContext);
-    this.ShowAttackPreview(true, weapon, scriptInterface, stateContext);
-    if !scriptInterface.HasStatFlag(gamedataStatType.CanWeaponShootWhileSprinting) && scriptInterface.localBlackboard.GetInt(GetAllBlackboardDefs().PlayerStateMachine.Locomotion) == EnumInt(gamePSMLocomotionStates.Sprint) {
-        stateContext.SetTemporaryBoolParameter(n"InterruptSprint", true, true);
-    }
-    this.SetLastShotTime(stateContext, currentTime);
-    attackRecord = this.GetDesiredAttackRecord(stateContext, scriptInterface);
-    attackID = attackRecord.GetID();
-
+    let weapon: ref<WeaponObject> = this.GetWeaponObject(scriptInterface);
     let player: ref<PlayerPuppet> = scriptInterface.executionOwner as PlayerPuppet;
-    let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(gameInstance);
     let isDecoupledActive: Bool = IsDefined(player) && !GameObject.IsDualWielding(player) && IsDefined(weapon) && !weapon.IsMelee();
-    let executedMode: Int32 = 0;
-    let modeName: String = "Vanilla";
 
     if isDecoupledActive {
         let muzzleTransform: Transform = weapon.GetMuzzleSlotWorldTransform();
@@ -488,7 +436,7 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
         let normMuzzleFwd: Vector4 = Vector4.Normalize(muzzleFwd);
 
         let camTransform: Transform;
-        let camSys: ref<CameraSystem> = GameInstance.GetCameraSystem(gameInstance);
+        let camSys: ref<CameraSystem> = GameInstance.GetCameraSystem(scriptInterface.GetGame());
         let camFwd: Vector4 = new Vector4(0.0, 1.0, 0.0, 0.0);
         if IsDefined(camSys) && camSys.GetActiveCameraWorldTransform(camTransform) {
             camFwd = Vector4.Normalize(Transform.GetForward(camTransform));
@@ -497,109 +445,30 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
         // Feed exact physical aim state to native C++ ShootingHook
         SetMuzzleAimState(muzzlePos, normMuzzleFwd, camFwd, true);
 
-        let maxRange: Float = attackRecord.Range();
-        if maxRange <= 0.0 {
-            maxRange = 200.0;
-        }
-        let traceEnd: Vector4 = muzzlePos + (normMuzzleFwd * maxRange);
-        let targetPt: Vector4 = traceEnd;
-
-        let sqs: ref<SpatialQueriesSystem> = GameInstance.GetSpatialQueriesSystem(gameInstance);
-        if IsDefined(sqs) {
-            let traceStatic: TraceResult;
-            if sqs.SyncRaycastByCollisionPreset(muzzlePos, traceEnd, n"World Static", traceStatic) && TraceResult.IsValid(traceStatic) {
-                targetPt = Vector4(traceStatic.position.X, traceStatic.position.Y, traceStatic.position.Z, 1.0);
-            }
-        }
-
-        // Standard vanilla sequence: native PhysicalRay hook in DetachedReticle.dll intercepts
-        // callsites @ 0x9507B7 & 0x9507EC and redirects ray origin and direction to muzzle
-        weapon.SetAttack(attackID);
-        weapon.QueueEvent(new WeaponPreFireEvent());
-
+        let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(scriptInterface.GetGame());
         if IsDefined(aimSys) {
-            aimSys.RecordShot(muzzlePos, normMuzzleFwd, targetPt, 1, "Native PhysicalRay Redirection");
-        }
-
-        let shotIdx: Int32 = IsDefined(aimSys) ? aimSys.GetShotCount() : 1;
-        LogChannel(n"DetachedReticle", "[DECOUPLED PHYSICAL SHOT #" + IntToString(shotIdx) + " FIRED]"
-            + " | BarrelDir: (" + FloatToStringPrec(normMuzzleFwd.X, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Y, 3) + ", " + FloatToStringPrec(normMuzzleFwd.Z, 3) + ")"
-            + " | MuzzlePos: (" + FloatToStringPrec(muzzlePos.X, 2) + ", " + FloatToStringPrec(muzzlePos.Y, 2) + ", " + FloatToStringPrec(muzzlePos.Z, 2) + ")"
-            + " | TargetPt: (" + FloatToStringPrec(targetPt.X, 2) + ", " + FloatToStringPrec(targetPt.Y, 2) + ", " + FloatToStringPrec(targetPt.Z, 2) + ")"
-        );
-    } else {
-        SetMuzzleAimState(new Vector4(0.0, 0.0, 0.0, 1.0), new Vector4(0.0, 1.0, 0.0, 0.0), new Vector4(0.0, 1.0, 0.0, 0.0), false);
-        weapon.SetAttack(attackID);
-        weapon.QueueEvent(new WeaponPreFireEvent());
-    }
-
-    stateContext.SetPermanentIntParameter(this.GetLastChargePressCount(), Cast<Int32>(scriptInterface.GetActionPressCount(n"RangedAttack")), true);
-    stateContext.SetPermanentFloatParameter(this.GetTurnOffPublicSafeTimeStamp(), Cast<Float>(currentTime), true);
-    if this.IsRightWeaponLogic() {
-        stateContext.SetPermanentBoolParameter(n"WeaponInSafe", false, true);
-    }
-
-    // Always push recoil animation event so pistol slide kicks realistically!
-    scriptInterface.PushAnimationEvent(this.IsRightWeaponLogic() ? n"RightShoot" : n"LeftShoot");
-
-    stateContext.SetPermanentFloatParameter(this.GetStoppedFiringTimestamp(), Cast<Float>(currentTime), true);
-    if this.IsInValentinosFrenzy(scriptInterface) {
-        stateContext.SetPermanentIntParameter(n"LastShotInValentinosFrenzy", this.IsRightWeaponLogic() ? EnumInt(gamePSMShootStates.LeftWeapon) : EnumInt(gamePSMShootStates.RightWeapon), true);
-    }
-    this.SetBlackboardIntVariable(scriptInterface, this.GetBlackboardID(scriptInterface), EnumInt(gamePSMRangedWeaponStates.Shoot));
-    broadcaster = scriptInterface.executionOwner.GetStimBroadcasterComponent();
-    if statsSystem.GetStatValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatType.CanSilentKill) > 0.0 {
-        if IsDefined(broadcaster) {
-            broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.IllegalAction);
-            broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.SilencedGunshot);
-            broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.SilencedGunshot, 10.0, emptyInvestigateData, true);
-            if Equals(WeaponObject.GetWeaponType(weapon.GetItemID()), gamedataItemType.Wea_SniperRifle) {
-                broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, 10.0);
+            let attackRecord: ref<Attack_Record> = this.GetDesiredAttackRecord(stateContext, scriptInterface);
+            let maxRange: Float = IsDefined(attackRecord) ? attackRecord.Range() : 200.0;
+            if maxRange <= 0.0 {
+                maxRange = 200.0;
             }
-        }
-        WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.SilencedShoot, effectBlackboard);
-        WeaponObject.SendAmmoUpdateEvent(scriptInterface.executionOwner, weapon);
-    } else {
-        if statsSystem.GetStatValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatType.HasMuzzleBrake) > 0.0 {
-            WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.MuzzleBrakeShoot, effectBlackboard);
-        } else {
-            WeaponObject.TriggerWeaponEffects(weapon, gamedataFxAction.Shoot, effectBlackboard);
-        }
-        WeaponObject.SendAmmoUpdateEvent(scriptInterface.executionOwner, weapon);
-        if IsDefined(broadcaster) {
-            GameInstance.GetQuestsSystem(gameInstance).SetFact(n"player_fired_a_weapon", 1);
-            if IsEntityInInteriorArea(GetPlayer(gameInstance)) {
-                broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, 25.0);
-                visualStimDistance = 45.0;
-            } else {
-                broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, GetPlayer(gameInstance).GetGunshotRange());
-                if weapon.GetPreventionSystem().GetCurrentDistrict().IsDogTown() {
-                    if scriptInterface.localBlackboard.GetInt(GetAllBlackboardDefs().PlayerStateMachine.Combat) == EnumInt(gamePSMCombat.InCombat) {
-                        visualStimDistance = 30.0;
-                    } else {
-                        visualStimDistance = 40.0;
-                    }
-                } else {
-                    visualStimDistance = 50.0;
+            let traceEnd: Vector4 = muzzlePos + (normMuzzleFwd * maxRange);
+            let targetPt: Vector4 = traceEnd;
+
+            let sqs: ref<SpatialQueriesSystem> = GameInstance.GetSpatialQueriesSystem(scriptInterface.GetGame());
+            if IsDefined(sqs) {
+                let traceStatic: TraceResult;
+                if sqs.SyncRaycastByCollisionPreset(muzzlePos, traceEnd, n"World Static", traceStatic) && TraceResult.IsValid(traceStatic) {
+                    targetPt = new Vector4(traceStatic.position.X, traceStatic.position.Y, traceStatic.position.Z, 1.0);
                 }
             }
-            broadcaster.TriggerSingleBroadcast(scriptInterface.executionOwner, gamedataStimType.Gunshot, visualStimDistance, emptyInvestigateData, true);
+
+            aimSys.RecordShot(muzzlePos, normMuzzleFwd, targetPt, 1, "Native PhysicalRay Redirection");
         }
-        PlayerCoverHelper.BlockCoverVisibilityReduction(scriptInterface.executionOwner);
+    } else {
+        SetMuzzleAimState(new Vector4(0.0, 0.0, 0.0, 1.0), new Vector4(0.0, 1.0, 0.0, 0.0), new Vector4(0.0, 1.0, 0.0, 0.0), false);
     }
-    numBurstTotal = Cast<Float>(stateContext.GetIntParameter(this.GetShootingNumBurstTotalName(), true));
-    magazineCapacity = Cast<Float>(WeaponObject.GetMagazineCapacity(weapon));
-    if numBurstTotal > 0.0 {
-        fullAutoPenalty = 1.0 + (((numBurstTotal + 1.0) / magazineCapacity) * statsSystem.GetStatValue(Cast<StatsObjectID>(GetPlayer(gameInstance).GetEntityID()), gamedataStatType.FullAutoStaminaCostPenalty));
-    }
-    if Equals(RPGManager.GetWeaponEvolution(weapon.GetItemID()), gamedataWeaponEvolution.Tech) && scriptInterface.GetStatPoolsSystem().GetStatPoolValue(Cast<StatsObjectID>(weapon.GetEntityID()), gamedataStatPoolType.WeaponCharge, false) >= WeaponObject.GetBaseMaxChargeThreshold(weapon) {
-        fullChargePenalty = 1.5;
-    }
-    this.ConsumeStamina(scriptInterface, attackRecord, fullAutoPenalty, fullChargePenalty);
-    this.SendDataTrackingRequest(scriptInterface, ETelemetryData.RangedAttacksMade, 1);
-    this.ChangeStatPoolValue(scriptInterface, scriptInterface.ownerEntityID, gamedataStatPoolType.WeaponOverheat, this.GetStaticFloatParameterDefault("overheatValAdd", 10.0));
-    this.ShootingSequencePostShoot(stateContext);
-    GameObject.GetDualWieldWeaponNames(scriptInterface.executionOwner, leftHandWeapon, rightHandWeapon);
-    GameInstance.GetTelemetrySystem(scriptInterface.owner.GetGame()).LogWeaponAttackPerformed(this.GetWeaponObject(scriptInterface), leftHandWeapon, rightHandWeapon);
+
+    wrappedMethod(stateContext, scriptInterface);
 }
 

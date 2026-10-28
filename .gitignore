@@ -35,6 +35,7 @@
 
 # Compiled / built artifacts
 *.dll
+!/red4ext/plugins/DetachedReticle/DetachedReticle.dll
 *.pdb
 *.lib
 *.exp

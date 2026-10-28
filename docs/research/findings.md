@@ -137,5 +137,33 @@
 (user test timestamp: 2026-10-28 03:23:19 +0700)
 
 #iteration 12
-- error: the camera now rotates 90 degree to the left and tilted (rolling) to the left when gun unholstered, with shaking left to right every frame.
+- error: The camera rotates ~90 degrees to the left and tilts (rolls) to the left when gun is unholstered, with severe shaking left-to-right every frame.
+- error cause:
+  1. Angle Convention Mismatch: `init.lua` measured body yaw as `math.deg(math.atan2(fwd.y, fwd.x))` (cartesian 0° at +X, 90° at +Y), but wrote heading via `Teleport(player, pos, EulerAngles.new(0, 0, yaw))` where engine forward is +Y (0°). Teleporting shifted the body by 90°, producing cyclical divergence and per-frame shaking.
+  2. Gimbal Roll in Compound Transform: `Rx(-entryPitch) * Rz(yaw) * Rx(entryPitch + freePitch) * baselineRot` rotates around an axis tilted by entry pitch, introducing camera roll proportional to `sin(entryPitch) * yaw`.
+  3. Pitch Divergence Affecting Yaw: Pitch was included in `divergenceMag`, causing vertical mouse looks to yank body yaw via Teleport.
+  4. Architectural Limits of Teleportation: `PlayerPuppet` in REDengine has no world pitch (cannot pitch the body). `Teleport` also disrupts character controller locomotion, physics velocity integration, and footstep timing.
+- fix (architectural pivot):
+  - Transition from Teleportation to "Chase the Mouse" input smoothing (Round 4 design). Feed smoothed deltas to vanilla's native input integrator so body yaw and arm pitch are handled natively and seamlessly by REDengine, while the camera receives the residual offset.
+
+---
+
+## Assumptions Ledger
+
+| # | Assumption | Status | Evidence |
+|---|---|---|---|
+| A1 | `ShootEvents.OnEnter` is where the bullet is fired, so suppressing its calls stops the camera ray | **Refuted** (iteration 8) | Mode 1 suppressed everything in `OnEnter` and the bullet still fired. The ray comes from native `SetTriggerDown` to `gameEffectObjectProvider_PhysicalRay`. |
+| A2 | `EffectPreAction_PreAttack.Process` overrides of `position`/`forward`/`raycastEnd` redirect the ray | **Refuted** (iterations 5 to 7) | Blackboard writes did not move the hitscan ray. |
+| A3 | `weapon.ShootStraight(true)` redirects along the barrel | **Refuted**, and harmful | Disables spread (iteration 9). Removed. |
+| A4 | `AI_ShootForwards`, `StartContinuousAttack`, `CreateEffectStatic(n"weaponShoot")` from script fire along a given vector for the player | **Refuted** (iterations 6 to 8) | All modes hit the camera reticle. |
+| A5 | `TriggerWeaponEffects(..., Shoot)` generates the camera-converging tracer | **Refuted** | Suppressing it did not change where the bullet hit (iteration 8). |
+| A6 | Native callsite patch of the PhysicalRay input evaluator redirects origin and direction | **Confirmed empirically** by owner (iteration 8) | Build-specific RVAs; hook checks `E8` and call target before patching. |
+| A7 | `GetWorldYaw` does not exist on `PlayerPuppet` | **Refuted** | `core/entity/entity.script:26`, `PlayerPuppet` inherits `Entity.GetWorldYaw()`. |
+| A8 | `math.atan2(fwd.y, fwd.x)` equals engine yaw | **Refuted** (iteration 12) | Engine forward is +Y, cartesian atan2 is 90° out of phase. |
+| A9 | `EulerAngles.new(0, 0, yaw)` sets yaw | **Confirmed** | CET `BasicTypes.h`: `EulerAngles(roll, pitch, yaw)`. |
+| A10 | `Rx(-p) * Rz(yaw) * Rx(p + free) * baseline` is a pure yaw plus pitch | **Refuted** | Introduces roll proportional to `sin(p) * yaw`. |
+| A11 | Per-frame `TeleportationFacility.Teleport` is a viable way to rotate the player body | **Refuted as viable design** | Causes locomotion, physics, and footstep issues; cannot actuate pitch. |
+| A12 | The anim graph makes the gun follow the camera pitch set through `SetLocalTransform` | **Refuted** (MVP 1) | The gun stayed fixed while the camera pitched via script. |
+| A13 | `redscript_rCURRENT.log` and `FTLog` can show runtime telemetry | **Refuted** (iteration 5) | File logging via CET `io.open` and native hook's `ofstream` is what works. |
+| A14 | Bare `Vector4(...)` and `EulerAngles` struct construction compile on redscript 0.5.32 | **Confirmed** | Redscript 0.5.32 handles struct construction without `new`. |
 

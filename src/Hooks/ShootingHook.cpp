@@ -99,7 +99,10 @@ static void* WaAllocRelayNear(uint8_t* target) {
     return nullptr;
 }
 
+static bool s_enableRayFileLogging = false;
+
 static void LogRayRedirection(const float* origin, const float* rawFwd, const float* outFwd) {
+    if (!s_enableRayFileLogging) return;
     try {
         std::ofstream logFile("plugins/cyber_engine_tweaks/mods/DetachedReticle/DetachedReticle.log", std::ios::app);
         if (!logFile.is_open()) {

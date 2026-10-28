@@ -16,7 +16,7 @@ bool AnimationHook::Initialize(RED4ext::v1::PluginHandle aHandle, const RED4ext:
     s_sdk = aSdk;
 
     if (s_sdk && s_sdk->logger) {
-        s_sdk->logger->Info(s_handle, "Setting up AnimationHook for 3D arm decoupling...");
+        s_sdk->logger->Info(s_handle, "AnimationHook initialized (standby).");
     }
 
     s_isHooked = true;

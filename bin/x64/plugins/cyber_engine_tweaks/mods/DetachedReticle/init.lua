@@ -12,8 +12,11 @@ local Config = {
 }
 
 local DetachedReticle = {
-    version = "3.3.0-chained-aim",
+    version = "4.0.0-chase-probe",
     timer = 0,
+    frameCounter = 0,
+    probeMode = "L1", -- "L1" (pure observation, no teleport/camera writes), "L3" (camera yaw lock test), or "off"
+    lockedYaw = nil,
     freeYaw = 0.0,
     freePitch = 0.0,
     rawMouseX = 0.0,
@@ -134,6 +137,22 @@ local function Log(msg)
     end
     if f then
         f:write(line .. "\n")
+        f:flush()
+        f:close()
+    end
+end
+
+local function LogProbe(rawLine)
+    print(rawLine)
+    local f = io.open("plugins/cyber_engine_tweaks/mods/DetachedReticle/DetachedReticle.log", "a")
+    if not f then
+        f = io.open("bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/DetachedReticle.log", "a")
+    end
+    if not f then
+        f = io.open("DetachedReticle.log", "a")
+    end
+    if f then
+        f:write(rawLine .. "\n")
         f:flush()
         f:close()
     end
@@ -343,12 +362,12 @@ registerForEvent("onInit", function()
         -- Do NOT intercept mouse_left or RangedAttack; left click must fire the gun!
         if actionName == "CameraMouseX" or actionName == "CameraX" or actionName == "right_stick_x" then
             DetachedReticle.rawMouseX = DetachedReticle.rawMouseX + actionValue
-            if consumer then
+            if DetachedReticle.probeMode == "off" and consumer then
                 pcall(function() consumer:ConsumeSingleAction() end)
             end
         elseif actionName == "CameraMouseY" or actionName == "CameraY" or actionName == "right_stick_y" then
             DetachedReticle.rawMouseY = DetachedReticle.rawMouseY + actionValue
-            if consumer then
+            if DetachedReticle.probeMode == "off" and consumer then
                 pcall(function() consumer:ConsumeSingleAction() end)
             end
         end
@@ -376,153 +395,97 @@ registerForEvent("onUpdate", function(delta)
     local fpp = player:GetFPPCameraComponent()
 
     if isArmed and fpp then
-        -- Read current player puppet world forward and yaw
-        local okFwd, fwd = pcall(function() return player:GetWorldForward() end)
-        local currentBodyYaw = 0.0
-        if okFwd and fwd and (fwd.x ~= 0 or fwd.y ~= 0) then
-            currentBodyYaw = math.deg(math.atan2(fwd.y, fwd.x))
+        DetachedReticle.isActive = true
+        DetachedReticle.frameCounter = (DetachedReticle.frameCounter or 0) + 1
+
+        -- 1. Read player puppet world yaw in engine convention
+        local bodyYaw = 0.0
+        local okYaw, valYaw = pcall(function() return player:GetWorldYaw() end)
+        if okYaw and valYaw then
+            bodyYaw = valYaw
         else
-            currentBodyYaw = DetachedReticle.bodyYaw or 0.0
+            local okFwd, fwd = pcall(function() return player:GetWorldForward() end)
+            if okFwd and fwd then
+                local okHead, head = pcall(function() return Vector4.Heading(fwd) end)
+                if okHead and head then bodyYaw = head end
+            end
         end
-        DetachedReticle.bodyYaw = currentBodyYaw
+        DetachedReticle.bodyYaw = bodyYaw
 
-        -- Capture baseline transform on first arming
-        if not DetachedReticle.baselinePos then
-            local pos = fpp:GetLocalPosition()
-            local rot = fpp:GetLocalOrientation()
-            if pos and rot then
-                DetachedReticle.baselinePos = toVector(pos)
-                DetachedReticle.baselineRot = toQuaternion(rot)
-                DetachedReticle.freeYaw = 0.0
-                DetachedReticle.freePitch = 0.0
-                DetachedReticle.intendedWorldYaw = currentBodyYaw
-                DetachedReticle.rawMouseX = 0.0
-                DetachedReticle.rawMouseY = 0.0
-
-                -- Capture native parent pitch at entry
-                DetachedReticle.entryNativePitch = 0.0
-                local okMat, worldMatrix = pcall(function() return fpp:GetLocalToWorld() end)
-                if okMat and worldMatrix then
-                    local okRot, euler = pcall(function() return Matrix.GetRotation(worldMatrix) end)
-                    if okRot and euler and euler.Pitch then
-                        DetachedReticle.entryNativePitch = euler.Pitch
-                    end
-                end
-
-                Log(string.format("[FREELOOK] Freelook ACTIVE. EntryPitch=%.2f deg | InitialBodyYaw=%.2f deg",
-                    DetachedReticle.entryNativePitch, currentBodyYaw))
+        -- 2. Read camera component local orientation Euler angles
+        local localPitch, localYaw, localRoll = 0.0, 0.0, 0.0
+        local okRot, localRot = pcall(function() return fpp:GetLocalOrientation() end)
+        if okRot and localRot then
+            local euler = nil
+            pcall(function() euler = localRot:ToEulerAngles() end)
+            if not euler then
+                pcall(function() euler = Quaternion.ToEulerAngles(localRot) end)
+            end
+            if euler then
+                localPitch = euler.pitch or euler.Pitch or 0.0
+                localYaw = euler.yaw or euler.Yaw or 0.0
+                localRoll = euler.roll or euler.Roll or 0.0
             end
         end
 
-        DetachedReticle.isActive = true
-
-        -- Frame Delta Time
-        local dt = delta
-        if not dt or dt <= 0.0001 or dt > 0.2 then
-            dt = 1.0 / 60.0
+        -- 3. Read camera component world yaw
+        local camWorldYaw = 0.0
+        local okMat, worldMatrix = pcall(function() return fpp:GetLocalToWorld() end)
+        if okMat and worldMatrix then
+            local okWorldRot, worldEuler = pcall(function() return Matrix.GetRotation(worldMatrix) end)
+            if okWorldRot and worldEuler then
+                camWorldYaw = worldEuler.yaw or worldEuler.Yaw or 0.0
+            end
         end
 
-        -- Apply mouse input EXCLUSIVELY to Camera Freelook (freeYaw, freePitch, intendedWorldYaw)
-        -- NOTHING ELSE in the codebase alters or decays these values!
-        local zoom = 1.0
-        pcall(function() zoom = fpp:GetZoom() or 1.0 end)
-        if zoom <= 0.001 then zoom = 1.0 end
-
-        local scale = DetachedReticle.mouseScale / zoom
-        local mouseDeltaYaw = - (DetachedReticle.rawMouseX * scale)
-        local mouseDeltaPitch = (DetachedReticle.rawMouseY * scale)
-
-        -- Clear raw mouse accumulation for this frame
+        local rawX = DetachedReticle.rawMouseX or 0.0
+        local rawY = DetachedReticle.rawMouseY or 0.0
         DetachedReticle.rawMouseX = 0.0
         DetachedReticle.rawMouseY = 0.0
 
-        -- Update Camera Freelook state ONLY from mouse delta
-        DetachedReticle.freeYaw = DetachedReticle.freeYaw + mouseDeltaYaw
-        DetachedReticle.freePitch = DetachedReticle.freePitch + mouseDeltaPitch
-        DetachedReticle.freePitch = math.max(-85.0, math.min(85.0, DetachedReticle.freePitch))
+        if DetachedReticle.probeMode == "L1" then
+            -- PROBE L1: Observe raw mouse routing. Zero SetLocalTransform, zero Teleport.
+            -- Vanilla natively rotates body in yaw and camera in pitch.
+            local line = string.format("[F=%d] [L1] bodyYaw=%.4f camLocalPitch=%.4f camLocalYaw=%.4f camLocalRoll=%.4f camWorldYaw=%.4f rawX=%.4f rawY=%.4f",
+                DetachedReticle.frameCounter, bodyYaw, localPitch, localYaw, localRoll, camWorldYaw, rawX, rawY)
+            LogProbe(line)
 
-        DetachedReticle.intendedWorldYaw = normalizeDeg(DetachedReticle.intendedWorldYaw + mouseDeltaYaw)
+        elseif DetachedReticle.probeMode == "L3" then
+            -- PROBE L3: Script-side camera world-lock test.
+            if not DetachedReticle.lockedYaw then
+                DetachedReticle.lockedYaw = bodyYaw
+                LogProbe(string.format("[F=%d] [L3] Baseline captured: lockedYaw=%.4f", DetachedReticle.frameCounter, DetachedReticle.lockedYaw))
+            end
 
-        -- Calculate divergence from Aiming Direction (body heading) to Camera Reticle
-        local diffYaw = normalizeDeg(DetachedReticle.intendedWorldYaw - currentBodyYaw)
-        local diffPitch = DetachedReticle.freePitch
-        local divergenceMag = math.sqrt(diffYaw^2 + diffPitch^2)
-
-        -- 1. Enforce Config.maxDivergence
-        -- If divergence exceeds max limit, drag the body along immediately
-        -- The Camera Freelook is NEVER pulled back or altered!
-        if Config.maxDivergence > 0.0 and divergenceMag > Config.maxDivergence then
-            local excess = divergenceMag - Config.maxDivergence
-            local pullFactor = excess / divergenceMag
-            local dragStep = diffYaw * pullFactor
-            local draggedBodyYaw = normalizeDeg(currentBodyYaw + dragStep)
-            local teleFac = Game.GetTeleportationFacility()
-            if teleFac then
+            if okRot and localRot then
+                local relYaw = normalizeDeg(DetachedReticle.lockedYaw - bodyYaw)
+                local qRz = quatAxisAngle(0.0, 0.0, 1.0, relYaw)
+                local targetRot = quatMultiply(qRz, localRot)
                 pcall(function()
-                    teleFac:Teleport(player, player:GetWorldPosition(), EulerAngles.new(0.0, 0.0, draggedBodyYaw))
+                    fpp:SetLocalTransform(fpp:GetLocalPosition(), targetRot)
                 end)
             end
-            currentBodyYaw = draggedBodyYaw
-            diffYaw = normalizeDeg(DetachedReticle.intendedWorldYaw - currentBodyYaw)
-            divergenceMag = Config.maxDivergence
-        end
 
-        -- 2. Chained Catch-Up Smoothing (Aiming Direction turns toward Camera Reticle)
-        -- Advances the player puppet body toward the camera reticle; NEVER pulls camera backward!
-        if Config.catchUpSpeed > 0.0 then
-            local effectiveDivergence = divergenceMag
-            if Config.deadzone > 0.0 then
-                effectiveDivergence = math.max(0.0, divergenceMag - Config.deadzone)
-            end
-
-            if effectiveDivergence > 0.001 and divergenceMag > 0.001 then
-                local algoFn = Algorithms[Config.smoothingMode:lower()] or Algorithms["exponential"]
-                local yawStep, pitchStep = algoFn(diffYaw, diffPitch, divergenceMag, effectiveDivergence, dt, Config, DetachedReticle)
-
-                if math.abs(yawStep) > 0.0001 then
-                    local targetBodyYaw = normalizeDeg(currentBodyYaw + yawStep)
-                    local teleFac = Game.GetTeleportationFacility()
-                    if teleFac then
-                        pcall(function()
-                            teleFac:Teleport(player, player:GetWorldPosition(), EulerAngles.new(0.0, 0.0, targetBodyYaw))
-                        end)
-                    end
+            -- Re-read camera world transform after write
+            local postWorldYaw = camWorldYaw
+            local okPostMat, postMatrix = pcall(function() return fpp:GetLocalToWorld() end)
+            if okPostMat and postMatrix then
+                local okPostRot, postEuler = pcall(function() return Matrix.GetRotation(postMatrix) end)
+                if okPostRot and postEuler then
+                    postWorldYaw = postEuler.yaw or postEuler.Yaw or 0.0
                 end
             end
-        end
-
-        -- 3. Render Camera Freelook Orientation
-        -- In world space, camera is locked onto intendedWorldYaw (mouse-controlled gaze)
-        -- Relative yaw from current body orientation to camera gaze:
-        if DetachedReticle.baselinePos and DetachedReticle.baselineRot then
-            local relativeYaw = normalizeDeg(DetachedReticle.intendedWorldYaw - currentBodyYaw)
-
-            local cancelNativePitch = quatAxisAngle(1.0, 0.0, 0.0, -DetachedReticle.entryNativePitch)
-            local qYaw = quatAxisAngle(0.0, 0.0, 1.0, relativeYaw)
-            local qPitch = quatAxisAngle(1.0, 0.0, 0.0, DetachedReticle.entryNativePitch + DetachedReticle.freePitch)
-
-            local orient = quatMultiply(cancelNativePitch, qYaw)
-            orient = quatMultiply(orient, qPitch)
-            local targetRot = quatMultiply(orient, DetachedReticle.baselineRot)
-
-            pcall(function()
-                fpp:SetLocalTransform(DetachedReticle.baselinePos, targetRot)
-            end)
+            local err = normalizeDeg(postWorldYaw - DetachedReticle.lockedYaw)
+            local line = string.format("[F=%d] [L3] bodyYaw=%.4f camWorldYaw=%.4f err=%.4f",
+                DetachedReticle.frameCounter, bodyYaw, postWorldYaw, err)
+            LogProbe(line)
         end
     else
-        -- Reset camera to baseline when unequipped or inactive
-        if DetachedReticle.isActive and fpp and DetachedReticle.baselinePos and DetachedReticle.baselineRot then
-            pcall(function()
-                fpp:SetLocalTransform(DetachedReticle.baselinePos, DetachedReticle.baselineRot)
-            end)
+        if DetachedReticle.isActive then
             DetachedReticle.isActive = false
-            DetachedReticle.freeYaw = 0.0
-            DetachedReticle.freePitch = 0.0
+            DetachedReticle.lockedYaw = nil
             DetachedReticle.rawMouseX = 0.0
             DetachedReticle.rawMouseY = 0.0
-            DetachedReticle.baselinePos = nil
-            DetachedReticle.baselineRot = nil
-            Log("[FREELOOK] Weapon holstered - Camera reset to baseline.")
         end
     end
 
@@ -636,16 +599,44 @@ registerForEvent("onDraw", function()
         end
         ImGui.NewLine()
 
+        -- Round 4 Probe Selector
+        ImGui.Separator()
+        ImGui.Text("Round 4 Probe Mode:")
+        local probeList = { "L1", "L3", "off" }
+        for _, pMode in ipairs(probeList) do
+            local isSelected = (DetachedReticle.probeMode == pMode)
+            local label = (pMode == "L1") and "Probe L1 (Observation)" or ((pMode == "L3") and "Probe L3 (Camera Lock)" or "Off")
+            if ImGui.RadioButton(label, isSelected) then
+                DetachedReticle.SetProbeMode(pMode)
+            end
+            ImGui.SameLine()
+        end
+        ImGui.NewLine()
+
         ImGui.Separator()
         -- Live telemetry preview
-        local diffYaw = normalizeDeg(DetachedReticle.intendedWorldYaw - (DetachedReticle.bodyYaw or 0.0))
-        ImGui.Text(string.format("Status: %s", DetachedReticle.isActive and "ARMED & DECOUPLED" or "Holstered / Inactive"))
-        ImGui.Text(string.format("Camera Freelook: Yaw = %.1f deg, Pitch = %.1f deg", DetachedReticle.freeYaw, DetachedReticle.freePitch))
-        ImGui.Text(string.format("Body Aim Divergence: DiffYaw = %.1f deg", diffYaw))
+        ImGui.Text(string.format("Status: %s", DetachedReticle.isActive and "ARMED" or "Holstered / Inactive"))
+        ImGui.Text(string.format("Active Probe: %s | Frame: %d", DetachedReticle.probeMode, DetachedReticle.frameCounter or 0))
+        ImGui.Text(string.format("Current Body Yaw: %.2f deg", DetachedReticle.bodyYaw or 0.0))
+        if DetachedReticle.probeMode == "L3" and DetachedReticle.lockedYaw then
+            ImGui.Text(string.format("Locked Yaw: %.2f deg", DetachedReticle.lockedYaw))
+        end
 
         ImGui.End()
     end
 end)
+
+-- Console helper for switching probe modes from CET console:
+DetachedReticle.SetProbeMode = function(mode)
+    local m = tostring(mode):upper()
+    if m == "L1" or m == "L3" or m == "OFF" then
+        DetachedReticle.probeMode = (m == "OFF") and "off" or m
+        DetachedReticle.lockedYaw = nil
+        Log(string.format("[PROBE] Probe mode changed to: %s", DetachedReticle.probeMode))
+    else
+        Log(string.format("[PROBE] Unknown probe mode '%s'. Options: L1, L3, off", tostring(mode)))
+    end
+end
 
 -- Console helper for switching test modes from CET console:
 DetachedReticle.SetMode = function(mode)

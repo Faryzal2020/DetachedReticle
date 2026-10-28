@@ -1,49 +1,57 @@
 # DetachedReticle
 
-**DetachedReticle** decouples Cyberpunk 2077's camera look from the physical weapon orientation, allowing independent camera freelook while aiming and true physical barrel-directed ballistics.
+**DetachedReticle** decouples Cyberpunk 2077's camera look from the physical weapon orientation, allowing independent camera aiming while bullets originate from and travel along the weapon barrel's physical orientation.
 
-## Minimum Requirements
+## Requirements
 
-- **Cyberpunk 2077:** 2.50 minimum (Build 3.0.88.46235)
-- [Cyber Engine Tweaks (CET)](https://www.nexusmods.com/cyberpunk2077/mods/107): 1.38.0 or later
-- [redscript](https://github.com/jac3km4/redscript): 0.5.32 or later
-- *(Note: RED4ext is not required for the Phase 1 MVP; native plugin sources under `src/` are reserved for Phase 2 procedural body/arm animation.)*
+- **Cyberpunk 2077:** Version 2.50 (Build 3.0.88.46235) exactly. *(Native callsite RVAs in `DetachedReticle.dll` are build-specific; if loaded on an untested game build, the plugin safely refuses to patch and logs a warning in `red4ext/logs/DetachedReticle.log`).*
+- [RED4ext](https://github.com/WopsS/RED4ext): 1.25.0 or later (Required for native ballistics interception and RTTI bridge).
+- [redscript](https://github.com/jac3km4/redscript): 0.5.32 or later.
+- [Cyber Engine Tweaks (CET)](https://www.nexusmods.com/cyberpunk2077/mods/107): 1.38.0 or later.
+- [Native Settings UI](https://www.nexusmods.com/cyberpunk2077/mods/3518): Optional (provides in-game configuration menu under Settings -> Mods).
 
-## MVP Features & Architecture
+## Build Provenance
 
-This release establishes the baseline proof-of-concept detachment between camera view and weapon ballistics:
+- **Binary:** `red4ext/plugins/DetachedReticle/DetachedReticle.dll`
+- **Game Build:** Cyberpunk 2077 2.50 (Build 3.0.88.46235)
+- **Compiler:** MSVC 19.38+ (Visual Studio 2022 / C++20)
+- **SDK Dependency:** [RED4ext.SDK](https://github.com/WopsS/RED4ext.SDK) commit `5246e659d783e5834cc08a90e56c8932c9ed3449`
+- **Plugin Author:** `Antigravity & User`
 
-1. **Independent Camera Freelook:** Moving the mouse rotates the first-person camera view only. The player's body and weapon model remain fixed in world space.
-2. **Dual Reticle UI:**
-   - **Camera Reticle (Center Pip):** A subtle static diamond pip at screen center marks where the camera is looking.
-   - **Gun Reticle (Dynamic Floating Crosshair):** The active weapon crosshair is projected onto the screen from the physical 3D weapon barrel raycast in world space.
-3. **Physical Barrel Ballistics:** Fired bullets leave the weapon's physical muzzle and travel along the 3D barrel orientation towards the Gun Reticle's impact point, not along the camera gaze.
-4. **Clean Fallbacks:** Unarmed and dual-wielding states seamlessly revert to vanilla controls and crosshairs.
+## Architecture & Features
 
-> [!NOTE]
-> **Known MVP Scope / Gap:** While an armed ranged weapon is held, the player cannot rotate their body facing (camera turns freely, arms and body stay locked). Upper-body procedural tracking, spring smoothing, and convergence are scheduled for Phase 2.
+1. **Dual Reticle System:**
+   - **Camera Reticle (Center Diamond):** Indicates the intended aim point driven instantly by mouse input.
+   - **Gun Reticle (Floating Crosshair):** Represents where the weapon barrel is physically pointing in 3D world space.
+2. **Physical Barrel Ballistics:** Fired bullets originate at the weapon's muzzle transform and travel along the physical barrel vector via native C++ callsite hooks (`PhysicalRay::Execute` origin @ RVA `0x9507B7` and forward @ RVA `0x9507EC`). Shotgun pellet spread and dispersion cones are preserved and rotated into barrel space.
+3. **Chained Aiming Model ("Chase the Mouse"):**
+   - The camera target moves instantly with mouse input.
+   - Mouse deltas are smoothed and fed to vanilla's native input integrator, so character body yaw, arm pitch, sway, and recoil track naturally.
+   - The residual offset is applied to the camera, holding the view rock-solid on target while the body and weapon swivel into alignment.
+4. **Clean Fallbacks:** Melee weapons, unarmed states, vehicles, and scanning automatically revert to 100% vanilla behavior.
 
 ## Installation & Deployment
 
-Deploy the mod by copying `bin/` and `r6/` directly into your Cyberpunk 2077 root directory:
+Copy `bin/`, `r6/`, and `red4ext/` directly into your Cyberpunk 2077 root directory:
 
 ```
 <GAME_ROOT>/
 ├── bin/x64/plugins/cyber_engine_tweaks/mods/
 │   └── DetachedReticle/
-│       └── init.lua
-└── r6/scripts/
+│       ├── init.lua
+│       └── config.json
+├── r6/scripts/
+│   └── DetachedReticle/
+│       ├── DetachedReticle.reds
+│       └── NativeBridge.reds
+└── red4ext/plugins/
     └── DetachedReticle/
-        └── DetachedReticle.reds
+        └── DetachedReticle.dll
 ```
 
-## Telemetry & Verification Logs
+## Logging & Diagnostics
 
-When active, the mod emits diagnostics via vanilla engine logging (`FTLog`):
+Diagnostics and telemetry are written to:
+- `<GAME_ROOT>/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/DetachedReticle.log` (CET script diagnostics and shot logs).
+- `<GAME_ROOT>/red4ext/logs/DetachedReticle.log` (RED4ext native plugin initialization and callsite patch status).
 
-- **Reticle Dynamics:** Logs angular divergence between camera look and weapon barrel, along with projected screen pixel offsets:
-  `[DetachedReticle][DYNAMICS] Divergence: X.XX deg (Yaw: ... | Pitch: ...) | Offset: (X, Y) px`
-- **Shot Redirection:** Logs atomic physical barrel origin and orientation at the exact instant of pre-attack processing:
-  `[DetachedReticle] Redirected shot to physical barrel: MuzzlePos=(X, Y, Z) | MuzzleFwd=(X, Y, Z)`
-- **Shot Telemetry:** Logs execution data per shot pull:
-  `[DetachedReticle][SHOT #N EXECUTED] Weapon: Items.Preset_... | GunDivergence: X.XX deg | CrosshairOffset: ...`

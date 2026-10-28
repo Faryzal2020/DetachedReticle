@@ -21,7 +21,7 @@ else()
     FetchContent_Declare(
         RED4ext.SDK
         GIT_REPOSITORY https://github.com/WopsS/RED4ext.SDK.git
-        GIT_TAG        master
+        GIT_TAG        5246e659d783e5834cc08a90e56c8932c9ed3449
     )
 endif()
 FetchContent_MakeAvailable(RED4ext.SDK)
