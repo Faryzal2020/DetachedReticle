@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(DetachedReticle VERSION 1.0.0 LANGUAGES CXX)
+project(DetachedReticle VERSION 1.0.0 LANGUAGES CXX ASM_MASM)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,6 +37,9 @@ set(SOURCES
     src/Main.cpp
     src/Hooks/AnimationHook.cpp
     src/Hooks/AnimationHook.hpp
+    src/Hooks/InputHook.cpp
+    src/Hooks/InputHook.hpp
+    src/Hooks/MouseLookRelay.asm
     src/Hooks/ShootingHook.cpp
     src/Hooks/ShootingHook.hpp
 )

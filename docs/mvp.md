@@ -34,3 +34,26 @@ where $\lambda$ is the **tracking weight / catch-up speed**:
 
 ---
 
+### MVP 2 — Implementation & Verification Status
+
+**Status: COMPLETED & VERIFIED (Build 2.50 / Patch 2.5)**
+
+#### 1. Success Criteria Evaluation
+- [x] **Crisp Camera Freelook:** Mouse input directly and instantaneously moves the Camera Reticle with zero input lag, wobble, or unwanted drift.
+- [x] **Decoupled Aiming Direction:** The player puppet body and weapon rig follow mouse movement with realistic inertia and mass, lagging behind during fast mouse sweeps.
+- [x] **Tunable Catch-up Model:** The smoothing model $dA = (T - A) \times (1 - e^{-\lambda \cdot \Delta t})$ smoothly aligns the Aiming Direction with the Camera Reticle upon stopping, with configurable catch-up speed $\lambda$, deadzone, and max divergence clamp.
+- [x] **Physical Muzzle Ballistics:** Bullets originate strictly at the weapon muzzle in 3D world space and travel along the physical barrel orientation, completely decoupled from camera gaze.
+- [x] **Dual Reticle System:** Camera reticle (center diamond) indicates intended look point, while the projected weapon reticle (crosshair) indicates physical barrel alignment.
+
+#### 2. Native Engine Architecture
+- **Primary Look Integrator Hook (RVA `0x51D462`):**
+  - Disassembled `Cyberpunk2077.exe` instruction `movss dword ptr [rcx+9Ch], xmm6` inside `sub_51D380`.
+  - Replaced with 8-byte near-call relay to `MouseLookRelay.asm` (`E8 <rel32>` + 3 NOPs).
+  - Intercepts raw Mouse X (`xmm6`, puppet body yaw) and raw Mouse Y (`xmm7`, camera pitch) at their shared source before `FPPCameraComponent::OnMouseLook` (`0x39CA70`) is called.
+  - Passes chase deltas $dA$ into `[rcx+9Ch]` (puppet body yaw) and `xmm7 -> xmm3` (camera pitch).
+- **Camera Residual Compensation (`init.lua`):**
+  - CET script reads angular residuals $R_{yaw} = T_{yaw} - A_{yaw}$ and $R_{pitch} = T_{pitch} - A_{pitch}$ via native RTTI bindings.
+  - Applies $R$ to `FPPCameraComponent` local transform via `fpp:SetLocalTransform()`, keeping the player's view instantaneous and responsive while the puppet body catches up natively.
+- **Physical Ballistics Hook (`ShootingHook.cpp`):**
+  - Intercepts `PhysicalRay` evaluator callsites at RVAs `0x9507B7` (origin) and `0x9507EC` (forward).
+  - Pulls live muzzle position and forward vector from the right-hand weapon entity, preserving shotgun pellet spread cones while aligning trajectories with the physical barrel.
