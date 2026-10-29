@@ -116,11 +116,11 @@ void InputHook::Shutdown() {
     s_isHooked = false;
 }
 
-void InputHook::ResetChase() {
+void InputHook::ResetChase(float aInitialPitch) {
     s_targetYaw = 0.0f;
-    s_targetPitch = 0.0f;
+    s_targetPitch = aInitialPitch;
     s_aimYaw = 0.0f;
-    s_aimPitch = 0.0f;
+    s_aimPitch = aInitialPitch;
     s_residualYaw = 0.0f;
     s_residualPitch = 0.0f;
     s_displayTargetYaw = 0.0f;
@@ -134,7 +134,7 @@ void InputHook::SetSmoothing(float aLambda, int32_t aMode, float aMaxDiv, float 
     s_maxDiv = aMaxDiv;
     s_deadzone = aDeadzone;
     if (aEnabled && !s_enabled) {
-        ResetChase();
+        ResetChase(s_aimPitch);
     }
     s_enabled = aEnabled;
 }
@@ -192,6 +192,7 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
     // 6. Advance Aim A
     s_aimYaw += dAYaw;
     s_aimPitch += dAPitch;
+    s_aimPitch = std::clamp(s_aimPitch, -85.0f, 85.0f);
 
     // 7. Residual for camera offset: R = T - A
     s_residualYaw = s_targetYaw - s_aimYaw;
@@ -199,11 +200,12 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
     s_displayTargetYaw = s_targetYaw;
     s_displayAimYaw = s_aimYaw;
 
-    // Keep state bounded to prevent float overflow over time
+    // Keep yaw state bounded to prevent float overflow over time (yaw wraps around 360)
     s_targetYaw -= s_aimYaw;
     s_aimYaw = 0.0f;
-    s_targetPitch -= s_aimPitch;
-    s_aimPitch = 0.0f;
+
+    // NOTE: Pitch does NOT wrap around 360; it remains bounded in [-85, +85] degrees absolute.
+    // s_aimPitch represents continuous native camera pitch for roll-free yaw projection.
 
     // 8. Output chase deltas to engine
     outYaw = dAYaw;

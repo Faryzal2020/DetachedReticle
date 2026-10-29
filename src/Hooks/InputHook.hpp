@@ -54,7 +54,7 @@ public:
     static inline float s_displayTargetYaw{ 0.0f };
     static inline float s_displayAimYaw{ 0.0f };
 
-    static void ResetChase();
+    static void ResetChase(float aInitialPitch = 0.0f);
     static void ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, float& outYaw, float& outPitch);
 
 private:

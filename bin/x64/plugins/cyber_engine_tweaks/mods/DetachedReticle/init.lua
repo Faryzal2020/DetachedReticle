@@ -10,7 +10,7 @@ local Config = {
     deadzone = 0.0,               -- Degrees: zero deadzone by default (turns immediately)
     maxDivergence = 65.0,         -- Degrees: maximum angular separation before pulling body
     smoothingMode = "exponential",-- "exponential", "linear", "spring", or "power"
-    debugLogging = false          -- Verbose telemetry logging to DetachedReticle.log
+    debugLogging = true           -- Verbose telemetry logging to DetachedReticle.log
 }
 
 local DetachedReticle = {
@@ -304,8 +304,26 @@ registerForEvent("onUpdate", function(delta)
             local okHead, headLocked = pcall(function() return Game.DR_GetHeadingLocked(fpp) end)
             DetachedReticle.origHeadingLocked = (okHead and headLocked) or false
 
-            -- Reset native chase state and activate native look smoothing
-            pcall(function() Game.DR_ResetChase() end)
+            -- Get initial camera pitch before chase begins
+            local initPitch = 0.0
+            pcall(function()
+                local aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
+                if aimSys then
+                    local fwd = aimSys:GetCameraForward()
+                    if fwd and (fwd.x ~= 0 or fwd.y ~= 0 or fwd.z ~= 0) then
+                        local fx = fwd.x or fwd.X or 0.0
+                        local fy = fwd.y or fwd.Y or 0.0
+                        local fz = fwd.z or fwd.Z or 0.0
+                        local xy = math.sqrt(fx * fx + fy * fy)
+                        if xy > 0.0001 or math.abs(fz) > 0.0001 then
+                            initPitch = math.deg(math.atan2(fz, xy))
+                        end
+                    end
+                end
+            end)
+
+            -- Reset native chase state with initial pitch and activate native look smoothing
+            pcall(function() Game.DR_ResetChasePitch(initPitch) end)
             pcall(function() Game.DR_SetSmoothing(Config.catchUpSpeed, 0, Config.maxDivergence, Config.deadzone, true) end)
 
             -- Ensure heading lock is FALSE so engine actuates native chase deltas
@@ -317,8 +335,8 @@ registerForEvent("onUpdate", function(delta)
             pcall(function() fpp.sensitivityMultX = DetachedReticle.origSensX end)
             pcall(function() fpp.sensitivityMultY = DetachedReticle.origSensY end)
 
-            Log(string.format("Decoupled Aim ACTIVE: speed=%.1f maxDiv=%.1f deadzone=%.1f",
-                Config.catchUpSpeed, Config.maxDivergence, Config.deadzone))
+            Log(string.format("Decoupled Aim ACTIVE: speed=%.1f maxDiv=%.1f deadzone=%.1f initPitch=%.2f",
+                Config.catchUpSpeed, Config.maxDivergence, Config.deadzone, initPitch))
         end
 
         -- Read native camera residuals (R = T - A)
@@ -327,10 +345,19 @@ registerForEvent("onUpdate", function(delta)
         pcall(function() rYaw = Game.DR_GetResidualYaw() end)
         pcall(function() rPitch = Game.DR_GetResidualPitch() end)
 
-        -- Compose residual onto camera local orientation
+        -- Read native continuous camera pitch angle (tracked smoothly in C++ from raw mouse input)
+        local nativePitch = 0.0
+        pcall(function() nativePitch = Game.DR_GetAimPitch() end)
+        local pitchRad = math.rad(nativePitch)
+        local fwdZ = math.sin(pitchRad)
+        local fwdXY = math.cos(pitchRad)
+
+        -- Compose residual onto camera local orientation without gimbal roll:
+        -- 1. qRx: pitch around local horizontal right axis (1, 0, 0)
+        -- 2. qRz: yaw around true gravity-up axis (0, fwdZ, fwdXY) in parent coordinate frame
         local baseline = DetachedReticle.baselineRot or Quaternion.new(0, 0, 0, 1)
-        local qRz = quatAxisAngle(0.0, 0.0, 1.0, rYaw)
         local qRx = quatAxisAngle(1.0, 0.0, 0.0, rPitch)
+        local qRz = quatAxisAngle(0.0, fwdZ, fwdXY, rYaw)
         local qRel = quatMultiply(qRz, qRx)
         local targetRot = quatMultiply(qRel, baseline)
         pcall(function()
@@ -340,10 +367,14 @@ registerForEvent("onUpdate", function(delta)
         if Config.debugLogging and (DetachedReticle.frameCounter % 30 == 0 or math.abs(rYaw) > 0.05 or math.abs(rPitch) > 0.05) then
             local tYaw = 0.0
             local aYaw = 0.0
+            local tPitch = 0.0
+            local aPitch = 0.0
             pcall(function() tYaw = Game.DR_GetTargetYaw() end)
             pcall(function() aYaw = Game.DR_GetAimYaw() end)
-            local line = string.format("[F=%d] bodyYaw=%.4f rYaw=%.4f rPitch=%.4f tYaw=%.4f aYaw=%.4f",
-                DetachedReticle.frameCounter, bodyYaw, rYaw, rPitch, tYaw, aYaw)
+            pcall(function() tPitch = Game.DR_GetTargetPitch() end)
+            pcall(function() aPitch = Game.DR_GetAimPitch() end)
+            local line = string.format("[F=%d] bodyYaw=%.4f rYaw=%.4f rPitch=%.4f tPitch=%.4f aPitch=%.4f fwdZ=%.4f fwdXY=%.4f",
+                DetachedReticle.frameCounter, bodyYaw, rYaw, rPitch, tPitch, aPitch, fwdZ, fwdXY)
             Log(line)
         end
     else

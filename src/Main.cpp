@@ -111,7 +111,17 @@ void DR_ResetChase(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame,
     RED4EXT_UNUSED_PARAMETER(aOut);
     RED4EXT_UNUSED_PARAMETER(a4);
     aFrame->code++;
-    DetachedReticle::InputHook::ResetChase();
+    DetachedReticle::InputHook::ResetChase(0.0f);
+}
+
+void DR_ResetChasePitch(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(aOut);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    float initPitch = 0.0f;
+    RED4ext::GetParameter(aFrame, &initPitch);
+    aFrame->code++;
+    DetachedReticle::InputHook::ResetChase(initPitch);
 }
 
 
@@ -232,6 +242,11 @@ void PostRegisterTypes() {
     auto funcResetChase = RED4ext::CGlobalFunction::Create("DR_ResetChase", "DR_ResetChase", &DR_ResetChase);
     funcResetChase->flags = flags;
     rtti->RegisterFunction(funcResetChase);
+
+    auto funcResetChasePitch = RED4ext::CGlobalFunction::Create("DR_ResetChasePitch", "DR_ResetChasePitch", &DR_ResetChasePitch);
+    funcResetChasePitch->flags = flags;
+    funcResetChasePitch->AddParam("Float", "initPitch");
+    rtti->RegisterFunction(funcResetChasePitch);
 
 
     auto funcSetSens = RED4ext::CGlobalFunction::Create("DR_SetSensitivityMult", "DR_SetSensitivityMult", &DR_SetSensitivityMult);
