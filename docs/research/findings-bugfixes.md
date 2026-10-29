@@ -271,7 +271,7 @@ Post-MVP 2 research, bug diagnoses, and iteration tracking for polish and edge-c
      - Added `isHolsteringOrDrawing` detection triggering `DR_StartReturnToT2A(0.30)`.
      - Integrated `aimSys:GetPitchLagDeg()`, `aimSys:GetYawLagDeg()`, and screen-space trim.
      - Deployed updated `init.lua` to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
-- status: tested, broken, iteration 31 solution is not working because it undo the previous MVPs. implementation of iteration 31 requirement from iteration 30 state is advised.
+- test: tested, broken, iteration 31 solution is not working because it undo the previous MVPs. implementation of iteration 31 requirement from iteration 30 state is advised.
 
 # iteration 32
 - requirement:
@@ -314,7 +314,118 @@ Post-MVP 2 research, bug diagnoses, and iteration tracking for polish and edge-c
   5. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`: Restored `weapon`/`fpp`, added `settling` gate, implemented body-relative offsets, ready stance gating, slow integral trim, and default `debugLogging = false`. Deployed to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
   6. `r6/scripts/DetachedReticle/DetachedReticle.reds`: Cleaned up HMG hierarchy dumper and `FTLog` noise. Deployed to `E:\Cyberpunk 2077\r6\scripts\DetachedReticle\DetachedReticle.reds`.
   7. `docs/research/convergence-design.md`: Documented parallax decision.
-- status: tested 2026-10-29 18:40, everything works and looks good.
+- test: tested 2026-10-29 18:40, everything works and looks good.
+
+# iteration 32
+- requirement:
+  1. Make Tier 2B (T2B-to-T2A) movement speed, settling curve, and max angular speed fully configurable.
+  2. Resolve T2B movement being too slow, slowing down too soon on the exponential tail, and max angular speed being artificially constrained.
+- cause:
+  1. The Tier 2B compensation loop previously hardcoded settling rate to 4.5 s^-1 and moving rate to 1.0 s^-1.
+  2. The exponential decay formula dC = diff * (1 - exp(-rate * dt)) caused the step to asymptotically crawl as the remaining error dropped below 1.0 deg, creating a sluggish feeling ("slowing down too soon").
+  3. Max angular speed was previously hardcoded via a per-frame clamp of +-2.5 deg/frame, which lacked true framerate independence and capped wide-angle compensation speed.
+- implementation:
+  1. `src/Hooks/InputHook.hpp` & `src/Hooks/InputHook.cpp`:
+     - Added configurable static parameters:
+       - `s_t2bSettlingRate` (default 8.0 s^-1, range 0.5 - 30.0 s^-1).
+       - `s_t2bMovingRate` (default 2.0 s^-1, range 0.0 - 20.0 s^-1).
+       - `s_t2bThreshold` (default 5.0 deg, range 0.5 - 20.0 deg).
+       - `s_t2bMaxSpeed` (default 240.0 deg/s, range 30.0 - 720.0 deg/s).
+       - `s_t2bMinSpeed` (default 3.0 deg/s, range 0.0 - 30.0 deg/s).
+     - In `ProcessMouseAim`, implemented framerate-independent angular speed clamping via `maxStep = s_t2bMaxSpeed * dt`.
+     - Implemented minimum angular step `minStep = s_t2bMinSpeed * dt` when `|dC| < minStep`, preventing the exponential tail from crawling when close to the target.
+     - Implemented `SetT2BParams` and getters (`GetT2BSettlingRate`, `GetT2BMovingRate`, `GetT2BThreshold`, `GetT2BMaxSpeed`, `GetT2BMinSpeed`).
+  2. `src/Main.cpp`:
+     - Registered native RTTI global function `DR_SetT2BParams(settlingRate, movingRate, threshold, maxSpeed, minSpeed)`.
+     - Registered RTTI getters for all 5 parameters.
+  3. Recompiled `DetachedReticle.dll` and deployed to `red4ext/plugins/DetachedReticle/DetachedReticle.dll` and `E:\Cyberpunk 2077\red4ext\plugins\DetachedReticle\DetachedReticle.dll`.
+  4. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Added `t2bSettlingRate`, `t2bMovingRate`, `t2bThreshold`, `t2bMaxSpeed`, and `t2bMinSpeed` to `Config`.
+     - Added `SyncT2BParams()` helper and hooked it into `onInit`, `LoadConfig`, and chase activation.
+     - Registered new Native Settings subcategory `/detachedReticle/t2b` ("Tier 2B Alignment (T2B-to-T2A)") with live sliders.
+     - Added Tier 2B controls to the CET ImGui overlay window (`onDraw`).
+     - Added CET Console Options API (`SetT2BSettlingRate`, `SetT2BMovingRate`, `SetT2BThreshold`, `SetT2BMaxSpeed`, `SetT2BMinSpeed`, `GetOptions`).
+     - Deployed to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
+- test: tested by user
+
+# iteration 33
+- requirement:
+  1. Fix engine watchdog timeout crash (`engineWatchdog.cpp(224)`) and freeze/hang when loading save games (e.g. `AutoSave-16`).
+  2. Protect against unattached entity/camera component access during save state restoration.
+  3. Ensure player-only scope for heavy weapon attack record modifications and prevent effector flooding on NPC weapons.
+- cause:
+  1. During save restoration, REDengine creates the `PlayerPuppet` instance before attaching it to the entity hierarchy (`player:IsAttached()` is false, and state machines are not yet registered).
+  2. UI tick animations (`OnDetachedReticleTick` in `gameuiCrosshairContainerController`) and CET `onUpdate` were invoking `fpp:SetLocalTransform`, `player:GetWorldYaw()`, and synchronous spatial queries (`SyncRaycastByCollisionPreset`) on unattached entities and uninitialized weapon transforms (`Vector4.IsZero`), causing worker thread stalls and watchdog timeout deadlocks.
+  3. `@wrapMethod(WeaponTransition) GetDesiredAttackRecord` was intercepted globally without checking `executionOwner.IsPlayerControlled() && player.IsAttached()`. This inadvertently replaced attack records of NPC heavy weapons (e.g. Royce/Maelstrom exosuit in `q003_before_deal_combat`) with `Attacks.ExplodingBulletMediumEffect`, flooding the engine's `EffectorSystem/Tick` with exploding bullet effectors.
+  4. `ShootEvents.OnEnter` lacked attachment checks on the player and weapon.
+- implementation:
+  1. `r6/scripts/DetachedReticle/DetachedReticle.reds`:
+     - Added strict guard `if !IsDefined(player) || !player.IsAttached() { ... return; }` to `UpdateDetachedAim()`.
+     - Added `!weapon.IsAttached()` and `Vector4.IsZero(muzzlePos) || Vector4.IsZero(muzzleFwd)` validation before spatial raycasting.
+     - Strictly restricted `ShootEvents.OnEnter` to `IsDefined(player) && player.IsPlayerControlled() && player.IsAttached()`.
+     - Strictly restricted `WeaponTransition.GetDesiredAttackRecord` to player-only: returning `wrappedMethod` immediately for all NPCs.
+  2. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Added `if not player or not player:IsAttached() then return end` to `onUpdate`.
+     - Added `if not fpp or not fpp:IsAttached() then return end` and `weapon:IsAttached()` checks.
+     - Added `fpp:IsAttached()` guards in deactivation and `onShutdown` before applying transforms.
+  3. Deployed updated `DetachedReticle.reds` to `E:\Cyberpunk 2077\r6\scripts\DetachedReticle\DetachedReticle.reds` and `init.lua` to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
+- test: tested by user
+
+# iteration 34
+- requirement:
+  1. Fix Lua runtime error in CET: `init.lua:348: attempt to call method 'IsAttached' (a nil value)`.
+  2. Restore execution of `onUpdate` loop so decoupled aim and barrel offset calculations can run.
+- cause:
+  1. In iteration 33, `fpp:IsAttached()` was added to `init.lua:348`, `:681`, and `:736`.
+  2. `fpp` is a `gameFPPCameraComponent` (subclass of `entIComponent`), NOT an `entEntity`. In REDengine RTTI / CET, components do not have an `IsAttached()` method (only entities like `PlayerPuppet` and `WeaponObject` do).
+  3. Calling the non-existent method threw a runtime error on every frame, immediately aborting `onUpdate` before any aiming, camera transform, or telemetry logic could execute.
+- implementation:
+  1. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Removed `fpp:IsAttached()` check on line 348 (retained `player:IsAttached()` on line 340 and `if not fpp then return end`).
+     - Added defensive check for `weapon:IsAttached()`: `local isWeaponAttached = weapon and (not weapon.IsAttached or weapon:IsAttached())`.
+     - Removed `fpp:IsAttached()` on deactivation (line 681) and `onShutdown` (line 735), safely checking `if fpp then`.
+  2. Deployed updated `init.lua` to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
+  test: tested by user
+
+# iteration 35
+- requirement:
+  1. Fix game freeze / watchdog deadlock when loading a different save game from in-game (pause menu -> Load Game).
+  2. Properly handle player detach lifecycle in crosshair UI controller and silence raycasts during loading/pause states.
+- cause:
+  1. `gameuiCrosshairContainerController` persists across save reloads and did not implement `OnPlayerDetach`. The 60 Hz looping UI animation proxy (`m_detachedTickProxy`) was never stopped when the player detached or when loading a different save.
+  2. While the old world and PhysX scene were being torn down, `m_detachedTickProxy` continued calling `UpdateDetachedAim()`, which invoked `sqs.SyncRaycastByCollisionPreset(muzzlePos, traceEnd, n"World Static", ...)` and camera queries every 16ms against tearing-down collision meshes, creating a thread deadlock between PhysX scene write-locks and the main thread.
+  3. `UpdateDetachedAim()` used cached `this.m_Player` instead of live `this.GetPlayerControlledObject()`, holding stale references during transition.
+  4. Neither `DetachedReticle.reds` nor `init.lua` checked `GetSystemRequestsHandler().IsPreGame()` or `IsGamePaused()`, allowing UI raycasts and camera transform mutations to run inside the pause menu and loading screens.
+  5. `InitCameraCrosshair()` prematurely started `StartDetachedReticleTick()` during `OnInitialize` before `OnPlayerAttach` verified the player entity.
+- implementation:
+  1. `r6/scripts/DetachedReticle/DetachedReticle.reds`:
+     - Added `@wrapMethod(gameuiCrosshairContainerController) protected cb func OnPlayerDetach(playerGameObject: ref<GameObject>) -> Bool`: calls `this.UninitDetachedReticle()` to stop the tick animation proxy, clear callbacks, and reset crosshair translations when player detaches.
+     - Removed premature `this.StartDetachedReticleTick()` from `InitCameraCrosshair()`, ensuring the tick loop only starts inside `OnPlayerAttach`.
+     - In `UpdateDetachedAim()`, added `srh.IsPreGame() || srh.IsGamePaused()` guards to immediately abort and silence raycasts during loading screens or pause menus.
+     - Replaced `this.m_Player` lookup with `this.GetPlayerControlledObject() as PlayerPuppet`.
+  2. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Added `srh:IsPreGame() or srh:IsGamePaused()` guards to `onUpdate` to immediately abort before any camera or entity calculations run.
+  3. Deployed both updated files to `E:\Cyberpunk 2077` and verified SHA-256 integrity.
+- test: tested by user (game froze for 120s during in-game save load at 00:36:04; Watchdog breakpoint triggered)
+
+# iteration 36
+- requirement:
+  1. Diagnose persistent game freeze and 120s engine Watchdog timeout when loading a save from in-game (Pause Menu -> Load Game).
+  2. Analyze crash report `20261030-003604-crash-tid406300-01.txt`, minidump `Cyberpunk2077.dmp`, and evaluate why previous fixes in iterations 33–35 failed.
+  3. Produce a full diagnostic report in `docs/research/save-load-freeze-analysis.md`.
+- cause:
+  1. **Disassembly & Minidump Analysis (`Cyberpunk2077.dmp`):**
+     - Out of 133 threads in the process, 132 were asleep in standard NT kernel waits (`NtWaitForSingleObject` / `NtWaitForMultipleObjects`).
+     - Main GameThread (`TID 397708`) was waiting for engine dispatcher jobs in `gsm::State_SessionLoading` (`job::prv::Dispatcher::FlushCounter`).
+     - Exactly ONE worker thread (`TID 401756` / `redDispatcher10`) was trapped in a 100% CPU infinite loop inside `game::EffectorSystem::ApplyEffectors` (RVA `0x21937BF`), burning 142.3 seconds of CPU time until the 120-second Watchdog timeout killed the game (`CWatchdogThread::OnCheckStatus+0xA6`).
+     - At RVA `0x21937BF`, `ApplyEffectors` pops 48-byte requests from the queue at `gameEffectorSystem + 0x94`. Inside `0x2193DB0` -> `0x2193F00` -> `0x2194260`, processing requests for `PlayerPuppet` (`entityID = 1`) and scene entities (`9003197..9003201`) pushes new requests back into the queue while it is being drained, causing infinite buffer growth (allocations resizing up to 425 entries).
+  2. **Why Iterations 33–35 Failed:**
+     - **False State Assumption:** Iteration 35 guarded with `srh.IsGamePaused()` and `srh.IsPreGame()`. In `gsm::State_SessionLoading` during an in-game save reload, `IsPreGame()` is `false` (only true in the initial main menu) and `IsGamePaused()` is `false` (the game unpauses the pause menu as soon as the session load operation begins). Therefore, neither CET `onUpdate` nor Redscript `UpdateDetachedAim()` were silenced during the loading screen.
+     - **Mismatched Event Signature:** Iteration 35 declared `@wrapMethod(gameuiCrosshairContainerController) protected cb func OnPlayerDetach(...) -> Bool`. In vanilla `crosshairContainerController.script:53`, `OnPlayerDetach` is an event returning `Void`. Returning `Bool` clobbered the engine callback trampoline.
+     - **Global TweakDB Effector Mutation (`hmg_attack.yaml`):** `r6/tweaks/DetachedReticle/hmg_attack.yaml` remained active in `<GAME_ROOT>`, rewriting `Attacks.ExplodingBulletHMG.playerAttack` to `Attacks.ExplodingBulletMediumEffect` in TweakDB. In `q003_after_deal_shootout` where Maelstrom enemies wield HMGs, weapon restoration during save loading triggered recursive effector registration cycles across player and NPC entities.
+- implementation:
+  1. Created full diagnostic analysis report in [`docs/research/save-load-freeze-analysis.md`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/docs/research/save-load-freeze-analysis.md).
+- test: diagnostic complete; awaiting user review of report before applying corrective patches
 
 # next iteration above this line
 

@@ -11,8 +11,19 @@ local Config = {
     deadzone = 0.0,               -- Degrees: zero deadzone by default (turns immediately)
     maxDivergence = 65.0,         -- Degrees: maximum angular separation before pulling body
     smoothingMode = "exponential",-- "exponential", "linear", "spring", or "power"
+    t2bSettlingRate = 8.0,        -- Tier 2B: Settling speed rate (s^-1) when near rest (< threshold)
+    t2bMovingRate = 2.0,          -- Tier 2B: Moving speed rate (s^-1) during active swings (> threshold)
+    t2bThreshold = 5.0,           -- Tier 2B: Dynamic gap threshold (deg) between moving and settling
+    t2bMaxSpeed = 240.0,          -- Tier 2B: Max angular speed (deg/s)
+    t2bMinSpeed = 3.0,            -- Tier 2B: Min angular speed (deg/s) preventing crawling too soon
     debugLogging = false          -- Verbose telemetry logging to DetachedReticle.log
 }
+
+local function SyncT2BParams()
+    pcall(function()
+        Game.DR_SetT2BParams(Config.t2bSettlingRate, Config.t2bMovingRate, Config.t2bThreshold, Config.t2bMaxSpeed, Config.t2bMinSpeed)
+    end)
+end
 
 local DetachedReticle = {
     version = "2.0.0",
@@ -99,6 +110,11 @@ local function LoadConfig()
                 if data.deadzone ~= nil then Config.deadzone = tonumber(data.deadzone) or Config.deadzone end
                 if data.maxDivergence ~= nil then Config.maxDivergence = tonumber(data.maxDivergence) or Config.maxDivergence end
                 if data.smoothingMode ~= nil then Config.smoothingMode = tostring(data.smoothingMode):lower() end
+                if data.t2bSettlingRate ~= nil then Config.t2bSettlingRate = tonumber(data.t2bSettlingRate) or Config.t2bSettlingRate end
+                if data.t2bMovingRate ~= nil then Config.t2bMovingRate = tonumber(data.t2bMovingRate) or Config.t2bMovingRate end
+                if data.t2bThreshold ~= nil then Config.t2bThreshold = tonumber(data.t2bThreshold) or Config.t2bThreshold end
+                if data.t2bMaxSpeed ~= nil then Config.t2bMaxSpeed = tonumber(data.t2bMaxSpeed) or Config.t2bMaxSpeed end
+                if data.t2bMinSpeed ~= nil then Config.t2bMinSpeed = tonumber(data.t2bMinSpeed) or Config.t2bMinSpeed end
                 if data.debugLogging ~= nil then Config.debugLogging = (data.debugLogging == true) end
             end
         end
@@ -250,6 +266,58 @@ local function SetupNativeSettings()
                 end
             )
 
+            ns.addSubcategory("/detachedReticle/t2b", "Tier 2B Alignment (T2B-to-T2A)")
+
+            ns.addRangeFloat(
+                "/detachedReticle/t2b",
+                "Settling Speed",
+                "Speed rate at which the barrel offset compensation settles near rest (higher = snappier)",
+                0.5, 30.0, 0.5, "%.1f", Config.t2bSettlingRate, 8.0,
+                function(val)
+                    DetachedReticle.SetT2BSettlingRate(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/t2b",
+                "Moving Speed",
+                "Speed rate of barrel offset compensation while actively swinging the camera",
+                0.0, 20.0, 0.5, "%.1f", Config.t2bMovingRate, 2.0,
+                function(val)
+                    DetachedReticle.SetT2BMovingRate(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/t2b",
+                "Gap Threshold",
+                "Angle gap between camera and body where settling speed engages",
+                0.5, 20.0, 0.5, "%.1f deg", Config.t2bThreshold, 5.0,
+                function(val)
+                    DetachedReticle.SetT2BThreshold(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/t2b",
+                "Max Angular Speed",
+                "Maximum angular speed limit of barrel compensation in degrees/second",
+                30.0, 720.0, 10.0, "%.0f deg/s", Config.t2bMaxSpeed, 240.0,
+                function(val)
+                    DetachedReticle.SetT2BMaxSpeed(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/t2b",
+                "Min Angular Speed",
+                "Minimum speed when approaching center, preventing the reticle from slowing down too soon",
+                0.0, 30.0, 0.5, "%.1f deg/s", Config.t2bMinSpeed, 3.0,
+                function(val)
+                    DetachedReticle.SetT2BMinSpeed(val)
+                end
+            )
+
             Log("[SETTINGS] NativeSettings tab '/detachedReticle' successfully initialized.")
         end
     end)
@@ -260,15 +328,28 @@ end
 
 registerForEvent("onInit", function()
     LoadConfig()
-    Log(string.format("Initializing Decoupled Aiming System v%s | Enabled=%s | Speed=%.1f | Deadzone=%.1f deg | MaxDiv=%.1f deg | Algorithm=%s",
-        DetachedReticle.version, tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode))
+    SyncT2BParams()
+    Log(string.format("Initializing Decoupled Aiming System v%s | Enabled=%s | Speed=%.1f | Deadzone=%.1f deg | MaxDiv=%.1f deg | Algorithm=%s | T2BSettling=%.1f | T2BMaxSpd=%.0f deg/s",
+        DetachedReticle.version, tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode, Config.t2bSettlingRate, Config.t2bMaxSpeed))
 
     SetupNativeSettings()
 end)
 
 registerForEvent("onUpdate", function(delta)
+    local srh = nil
+    pcall(function() srh = Game.GetSystemRequestsHandler() end)
+    if srh then
+        local isPre = false
+        local isPaused = false
+        pcall(function() isPre = srh:IsPreGame() end)
+        pcall(function() isPaused = srh:IsGamePaused() end)
+        if isPre or isPaused then
+            return
+        end
+    end
+
     local player = Game.GetPlayer()
-    if not player then return end
+    if not player or not player:IsAttached() then return end
 
     if not DetachedReticle.nativeSettingsInitAttempted then
         SetupNativeSettings()
@@ -276,12 +357,14 @@ registerForEvent("onUpdate", function(delta)
 
     local weapon = GameObject.GetRightActiveWeapon(player)
     local fpp = player:GetFPPCameraComponent()
+    if not fpp then return end
 
     local isDual = false
     pcall(function()
         isDual = GameObject.IsDualWielding(player)
     end)
-    local isArmed = weapon and not weapon:IsMelee() and not isDual
+    local isWeaponAttached = weapon and (not weapon.IsAttached or weapon:IsAttached())
+    local isArmed = weapon and isWeaponAttached and not weapon:IsMelee() and not isDual
 
     -- Residual and compensation settling state:
     -- Keeps decoupled camera active until compensation and residual smoothly reach 0.0,
@@ -356,6 +439,7 @@ registerForEvent("onUpdate", function(delta)
             -- Reset native chase state with initial pitch and activate native look smoothing
             pcall(function() Game.DR_ResetChasePitch(initPitch) end)
             pcall(function() Game.DR_SetSmoothing(Config.catchUpSpeed, 0, Config.maxDivergence, Config.deadzone, true) end)
+            SyncT2BParams()
 
             -- Ensure heading lock is FALSE so engine actuates native chase deltas
             pcall(function() Game.DR_SetHeadingLocked(fpp, false) end)
@@ -660,7 +744,7 @@ end)
 
 registerForEvent("onShutdown", function()
     local player = Game.GetPlayer()
-    local fpp = player and player:GetFPPCameraComponent()
+    local fpp = player and player:IsAttached() and player:GetFPPCameraComponent()
     if fpp then
         if DetachedReticle.baselineRot then
             pcall(function()
@@ -751,6 +835,29 @@ registerForEvent("onDraw", function()
         end
         ImGui.NewLine()
 
+        -- Tier 2B Controls
+        ImGui.Separator()
+        ImGui.Text("Tier 2B Alignment (T2B-to-T2A):")
+        local newSettling, settlingChanged = ImGui.SliderFloat("T2B Settling Speed", Config.t2bSettlingRate, 0.5, 30.0, "%.1f")
+        if settlingChanged then DetachedReticle.SetT2BSettlingRate(newSettling) end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip("Speed rate at which barrel offset compensation settles near rest.") end
+
+        local newMoving, movingChanged = ImGui.SliderFloat("T2B Moving Speed", Config.t2bMovingRate, 0.0, 20.0, "%.1f")
+        if movingChanged then DetachedReticle.SetT2BMovingRate(newMoving) end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip("Speed rate of barrel compensation while actively swinging the camera.") end
+
+        local newThresh, threshChanged = ImGui.SliderFloat("T2B Gap Threshold", Config.t2bThreshold, 0.5, 20.0, "%.1f deg")
+        if threshChanged then DetachedReticle.SetT2BThreshold(newThresh) end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip("Angle gap between camera and body where settling speed engages.") end
+
+        local newMaxSpd, maxSpdChanged = ImGui.SliderFloat("T2B Max Speed", Config.t2bMaxSpeed, 30.0, 720.0, "%.0f deg/s")
+        if maxSpdChanged then DetachedReticle.SetT2BMaxSpeed(newMaxSpd) end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip("Maximum angular speed limit of barrel compensation (deg/s).") end
+
+        local newMinSpd, minSpdChanged = ImGui.SliderFloat("T2B Min Speed", Config.t2bMinSpeed, 0.0, 30.0, "%.1f deg/s")
+        if minSpdChanged then DetachedReticle.SetT2BMinSpeed(newMinSpd) end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip("Minimum speed when approaching center, preventing reticle from slowing down too soon.") end
+
         -- Debug Telemetry Checkbox
         local newDebug, debugChanged = ImGui.Checkbox("Verbose Debug Logging", Config.debugLogging)
         if debugChanged then
@@ -837,6 +944,41 @@ DetachedReticle.SetSmoothingMode = function(mode)
     end
 end
 
+DetachedReticle.SetT2BSettlingRate = function(val)
+    Config.t2bSettlingRate = math.max(0.1, tonumber(val) or 8.0)
+    SaveConfig()
+    SyncT2BParams()
+    Log(string.format("[OPTIONS] t2bSettlingRate set to: %.2f", Config.t2bSettlingRate))
+end
+
+DetachedReticle.SetT2BMovingRate = function(val)
+    Config.t2bMovingRate = math.max(0.0, tonumber(val) or 2.0)
+    SaveConfig()
+    SyncT2BParams()
+    Log(string.format("[OPTIONS] t2bMovingRate set to: %.2f", Config.t2bMovingRate))
+end
+
+DetachedReticle.SetT2BThreshold = function(val)
+    Config.t2bThreshold = math.max(0.1, tonumber(val) or 5.0)
+    SaveConfig()
+    SyncT2BParams()
+    Log(string.format("[OPTIONS] t2bThreshold set to: %.2f deg", Config.t2bThreshold))
+end
+
+DetachedReticle.SetT2BMaxSpeed = function(val)
+    Config.t2bMaxSpeed = math.max(1.0, tonumber(val) or 240.0)
+    SaveConfig()
+    SyncT2BParams()
+    Log(string.format("[OPTIONS] t2bMaxSpeed set to: %.2f deg/s", Config.t2bMaxSpeed))
+end
+
+DetachedReticle.SetT2BMinSpeed = function(val)
+    Config.t2bMinSpeed = math.max(0.0, tonumber(val) or 3.0)
+    SaveConfig()
+    SyncT2BParams()
+    Log(string.format("[OPTIONS] t2bMinSpeed set to: %.2f deg/s", Config.t2bMinSpeed))
+end
+
 DetachedReticle.SetDebugLogging = function(val)
     Config.debugLogging = val and true or false
     SaveConfig()
@@ -844,8 +986,8 @@ DetachedReticle.SetDebugLogging = function(val)
 end
 
 DetachedReticle.GetOptions = function()
-    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s",
-        tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode))
+    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | t2bSettling=%.1f | t2bMoving=%.1f | t2bThresh=%.1f deg | t2bMaxSpd=%.0f deg/s | t2bMinSpd=%.1f deg/s",
+        tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode, Config.t2bSettlingRate, Config.t2bMovingRate, Config.t2bThreshold, Config.t2bMaxSpeed, Config.t2bMinSpeed))
     return Config
 end
 

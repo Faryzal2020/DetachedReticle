@@ -142,6 +142,12 @@ protected cb func OnWeaponSwap(value: Variant) -> Bool {
 }
 
 @wrapMethod(gameuiCrosshairContainerController)
+protected cb func OnPlayerDetach(playerGameObject: ref<GameObject>) -> Bool {
+    this.UninitDetachedReticle();
+    return wrappedMethod(playerGameObject);
+}
+
+@wrapMethod(gameuiCrosshairContainerController)
 protected cb func OnUninitialize() -> Bool {
     this.UninitDetachedReticle();
     wrappedMethod();
@@ -201,8 +207,6 @@ private func InitCameraCrosshair() -> Void {
 
     this.m_rootWidget.AddChildWidget(container);
     this.m_cameraCrosshair = container;
-
-    this.StartDetachedReticleTick();
 }
 
 @addMethod(gameuiCrosshairContainerController)
@@ -261,11 +265,14 @@ protected cb func OnDetachedReticleTick(anim: ref<inkAnimProxy>) -> Bool {
 
 @addMethod(gameuiCrosshairContainerController)
 private func UpdateDetachedAim() -> Void {
-    let player: ref<PlayerPuppet> = this.m_Player;
-    if !IsDefined(player) {
-        player = this.GetPlayerControlledObject() as PlayerPuppet;
+    let srh: ref<inkISystemRequestsHandler> = GameInstance.GetSystemRequestsHandler();
+    if IsDefined(srh) && (srh.IsPreGame() || srh.IsGamePaused()) {
+        if IsDefined(this.m_cameraCrosshair) { this.m_cameraCrosshair.SetVisible(false); }
+        return;
     }
-    if !IsDefined(player) {
+
+    let player: ref<PlayerPuppet> = this.GetPlayerControlledObject() as PlayerPuppet;
+    if !IsDefined(player) || !player.IsAttached() {
         if IsDefined(this.m_cameraCrosshair) { this.m_cameraCrosshair.SetVisible(false); }
         return;
     }
@@ -284,7 +291,7 @@ private func UpdateDetachedAim() -> Void {
     }
 
     let weapon: ref<WeaponObject> = GameObject.GetRightActiveWeapon(player);
-    if !IsDefined(weapon) || weapon.IsMelee() {
+    if !IsDefined(weapon) || !weapon.IsAttached() || weapon.IsMelee() {
         if IsDefined(this.m_cameraCrosshair) { this.m_cameraCrosshair.SetVisible(false); }
         if IsDefined(activeWidget) { activeWidget.SetTranslation(new Vector2(0.0, 0.0)); }
         if IsDefined(aimSys) {
@@ -330,6 +337,9 @@ private func UpdateDetachedAim() -> Void {
     }
     if Vector4.IsZero(muzzlePos) {
         muzzlePos = weapon.GetWorldPosition();
+    }
+    if Vector4.IsZero(muzzlePos) || Vector4.IsZero(muzzleFwd) {
+        return;
     }
     this.m_gunForward = Vector4.Normalize(muzzleFwd);
     this.m_muzzlePos = muzzlePos;
@@ -459,9 +469,10 @@ private func UpdateDetachedAim() -> Void {
 // before the vanilla shooting pipeline runs. PhysicalRay callsites are intercepted natively.
 @wrapMethod(ShootEvents)
 protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<StateGameScriptInterface>) -> Void {
-    let weapon: ref<WeaponObject> = this.GetWeaponObject(scriptInterface);
     let player: ref<PlayerPuppet> = scriptInterface.executionOwner as PlayerPuppet;
-    let isDecoupledActive: Bool = IsDefined(player) && !GameObject.IsDualWielding(player) && IsDefined(weapon) && !weapon.IsMelee();
+    let isPlayerOwned: Bool = IsDefined(player) && player.IsPlayerControlled() && player.IsAttached();
+    let weapon: ref<WeaponObject> = isPlayerOwned ? this.GetWeaponObject(scriptInterface) : null;
+    let isDecoupledActive: Bool = isPlayerOwned && !GameObject.IsDualWielding(player) && IsDefined(weapon) && weapon.IsAttached() && !weapon.IsMelee();
 
     if isDecoupledActive {
         let muzzleTransform: Transform = weapon.GetMuzzleSlotWorldTransform();
@@ -512,6 +523,7 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
     wrappedMethod(stateContext, scriptInterface);
 
     // Re-assert HMG attack record right after vanilla OnEnter has run GetDesiredAttackRecord and SetAttack
+    // STRICTLY PLAYER-CONTROLLED ONLY to prevent mutating NPC weapons or effectors
     if isDecoupledActive && (weapon.IsHeavyWeapon() || EnumInt(WeaponObject.GetWeaponType(weapon.GetItemID())) == EnumInt(gamedataItemType.Wea_HeavyMachineGun)) {
         weapon.SetAttack(t"Attacks.ExplodingBulletMediumEffect");
     }
@@ -519,8 +531,14 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
 
 // Intercept attack resolution for Heavy Machine Guns so they use the unified
 // PhysicalRay game effect pipeline instead of unguided screen-center projectiles.
+// STRICTLY PLAYER-CONTROLLED ONLY
 @wrapMethod(WeaponTransition)
 protected func GetDesiredAttackRecord(stateContext: ref<StateContext>, scriptInterface: ref<StateGameScriptInterface>) -> ref<Attack_Record> {
+    let player: ref<PlayerPuppet> = scriptInterface.executionOwner as PlayerPuppet;
+    if !IsDefined(player) || !player.IsPlayerControlled() || !player.IsAttached() {
+        return wrappedMethod(stateContext, scriptInterface);
+    }
+
     let weapon: ref<WeaponObject> = this.GetWeaponObject(scriptInterface);
     if IsDefined(weapon) && (weapon.IsHeavyWeapon() || EnumInt(WeaponObject.GetWeaponType(weapon.GetItemID())) == EnumInt(gamedataItemType.Wea_HeavyMachineGun)) {
         let hmgAttack: ref<Attack_Record> = TweakDBInterface.GetAttackRecord(t"Attacks.ExplodingBulletMediumEffect");

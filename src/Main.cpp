@@ -139,6 +139,62 @@ void DR_GetT2BPitch(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame
     if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetT2BPitch();
 }
 
+void DR_SetT2BParams(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(aOut);
+    RED4EXT_UNUSED_PARAMETER(a4);
+
+    float settlingRate = 8.0f;
+    float movingRate = 2.0f;
+    float threshold = 5.0f;
+    float maxSpeed = 240.0f;
+    float minSpeed = 3.0f;
+
+    RED4ext::GetParameter(aFrame, &settlingRate);
+    RED4ext::GetParameter(aFrame, &movingRate);
+    RED4ext::GetParameter(aFrame, &threshold);
+    RED4ext::GetParameter(aFrame, &maxSpeed);
+    RED4ext::GetParameter(aFrame, &minSpeed);
+    aFrame->code++; // skip ParamEnd
+
+    DetachedReticle::InputHook::SetT2BParams(settlingRate, movingRate, threshold, maxSpeed, minSpeed);
+}
+
+void DR_GetT2BSettlingRate(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetT2BSettlingRate();
+}
+
+void DR_GetT2BMovingRate(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetT2BMovingRate();
+}
+
+void DR_GetT2BThreshold(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetT2BThreshold();
+}
+
+void DR_GetT2BMaxSpeed(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetT2BMaxSpeed();
+}
+
+void DR_GetT2BMinSpeed(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetT2BMinSpeed();
+}
+
 
 void DR_DrainEvents(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
     RED4EXT_UNUSED_PARAMETER(aContext);
@@ -287,6 +343,21 @@ void PostRegisterTypes() {
     funcSetBarrelOffset->AddParam("Float", "yaw");
     funcSetBarrelOffset->AddParam("Float", "pitch");
     rtti->RegisterFunction(funcSetBarrelOffset);
+
+    auto funcSetT2BParams = RED4ext::CGlobalFunction::Create("DR_SetT2BParams", "DR_SetT2BParams", &DR_SetT2BParams);
+    funcSetT2BParams->flags = flags;
+    funcSetT2BParams->AddParam("Float", "settlingRate");
+    funcSetT2BParams->AddParam("Float", "movingRate");
+    funcSetT2BParams->AddParam("Float", "threshold");
+    funcSetT2BParams->AddParam("Float", "maxSpeed");
+    funcSetT2BParams->AddParam("Float", "minSpeed");
+    rtti->RegisterFunction(funcSetT2BParams);
+
+    regGetter("DR_GetT2BSettlingRate", &DR_GetT2BSettlingRate);
+    regGetter("DR_GetT2BMovingRate", &DR_GetT2BMovingRate);
+    regGetter("DR_GetT2BThreshold", &DR_GetT2BThreshold);
+    regGetter("DR_GetT2BMaxSpeed", &DR_GetT2BMaxSpeed);
+    regGetter("DR_GetT2BMinSpeed", &DR_GetT2BMinSpeed);
 
 
     auto funcDrain = RED4ext::CGlobalFunction::Create("DR_DrainEvents", "DR_DrainEvents", &DR_DrainEvents);

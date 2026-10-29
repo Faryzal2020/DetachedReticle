@@ -139,6 +139,14 @@ void InputHook::SetBarrelOffset(float aYaw, float aPitch) {
     s_targetCompPitch = std::clamp(aPitch, -15.0f, 15.0f);
 }
 
+void InputHook::SetT2BParams(float aSettlingRate, float aMovingRate, float aThreshold, float aMaxSpeed, float aMinSpeed) {
+    s_t2bSettlingRate = std::max(0.1f, aSettlingRate);
+    s_t2bMovingRate = std::max(0.0f, aMovingRate);
+    s_t2bThreshold = std::max(0.1f, aThreshold);
+    s_t2bMaxSpeed = std::max(1.0f, aMaxSpeed);
+    s_t2bMinSpeed = std::max(0.0f, aMinSpeed);
+}
+
 void InputHook::SetSmoothing(float aLambda, int32_t aMode, float aMaxDiv, float aDeadzone, bool aEnabled) {
     s_lambda = aLambda;
     s_mode = aMode;
@@ -206,18 +214,34 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
     s_aimPitch = std::clamp(s_aimPitch, -85.0f, 85.0f);
 
     // 7. Tier 2B Active Barrel Offset Compensation:
-    // When dynamic gap is large (flicking), rate is 1.0 s^-1 so T2A handles swing weight.
-    // When dynamic gap settles (< 5.0 deg), rate increases to 4.5 s^-1 for fast, snappy alignment.
-    float compRate = 4.5f;
-    if (std::abs(gapYaw) > 5.0f || std::abs(gapPitch) > 5.0f) {
-        compRate = 1.0f;
+    // Dynamic gap gating: when swinging wide (|gap| > threshold), use s_t2bMovingRate.
+    // When settling near rest (|gap| <= threshold), use s_t2bSettlingRate.
+    float compRate = s_t2bSettlingRate;
+    if (std::abs(gapYaw) > s_t2bThreshold || std::abs(gapPitch) > s_t2bThreshold) {
+        compRate = s_t2bMovingRate;
     }
     float compFactor = 1.0f - std::exp(-compRate * dt);
-    float dCompYaw = (s_targetCompYaw - s_compYaw) * compFactor;
-    float dCompPitch = (s_targetCompPitch - s_compPitch) * compFactor;
+    float diffCompYaw = s_targetCompYaw - s_compYaw;
+    float diffCompPitch = s_targetCompPitch - s_compPitch;
 
-    dCompYaw = std::clamp(dCompYaw, -2.5f, 2.5f);
-    dCompPitch = std::clamp(dCompPitch, -2.5f, 2.5f);
+    float dCompYaw = diffCompYaw * compFactor;
+    float dCompPitch = diffCompPitch * compFactor;
+
+    // Minimum angular speed to prevent slowing down too soon:
+    if (s_t2bMinSpeed > 0.0f) {
+        float minStep = s_t2bMinSpeed * dt;
+        if (std::abs(dCompYaw) < minStep && std::abs(diffCompYaw) > 0.001f) {
+            dCompYaw = (diffCompYaw > 0.0f) ? std::min(minStep, diffCompYaw) : std::max(-minStep, diffCompYaw);
+        }
+        if (std::abs(dCompPitch) < minStep && std::abs(diffCompPitch) > 0.001f) {
+            dCompPitch = (diffCompPitch > 0.0f) ? std::min(minStep, diffCompPitch) : std::max(-minStep, diffCompPitch);
+        }
+    }
+
+    // Maximum angular speed clamp (framerate-independent in deg/s):
+    float maxStep = s_t2bMaxSpeed * dt;
+    dCompYaw = std::clamp(dCompYaw, -maxStep, maxStep);
+    dCompPitch = std::clamp(dCompPitch, -maxStep, maxStep);
 
     s_compYaw += dCompYaw;
     s_compPitch += dCompPitch;
@@ -257,6 +281,11 @@ float InputHook::GetCompYaw() { return s_compYaw; }
 float InputHook::GetCompPitch() { return s_compPitch; }
 float InputHook::GetT2BYaw() { return s_displayT2BYaw; }
 float InputHook::GetT2BPitch() { return s_displayT2BPitch; }
+float InputHook::GetT2BSettlingRate() { return s_t2bSettlingRate; }
+float InputHook::GetT2BMovingRate() { return s_t2bMovingRate; }
+float InputHook::GetT2BThreshold() { return s_t2bThreshold; }
+float InputHook::GetT2BMaxSpeed() { return s_t2bMaxSpeed; }
+float InputHook::GetT2BMinSpeed() { return s_t2bMinSpeed; }
 
 void InputHook::SetSensitivityMult(RED4ext::IScriptable* aFpp, float aMultX, float aMultY) {
     if (!aFpp) return;

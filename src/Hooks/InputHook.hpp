@@ -26,10 +26,16 @@ public:
 
     // Tier 2B Active Barrel Offset Compensation
     static void SetBarrelOffset(float aYaw, float aPitch);
+    static void SetT2BParams(float aSettlingRate, float aMovingRate, float aThreshold, float aMaxSpeed, float aMinSpeed);
     static float GetCompYaw();
     static float GetCompPitch();
     static float GetT2BYaw();
     static float GetT2BPitch();
+    static float GetT2BSettlingRate();
+    static float GetT2BMovingRate();
+    static float GetT2BThreshold();
+    static float GetT2BMaxSpeed();
+    static float GetT2BMinSpeed();
 
     // Sensitivity Mult Direct Memory Access (offsets 0x498, 0x49C on gameFPPCameraComponent)
     static void SetSensitivityMult(RED4ext::IScriptable* aFpp, float aMultX, float aMultY);
@@ -61,13 +67,20 @@ public:
     static inline float s_displayTargetYaw{ 0.0f };
     static inline float s_displayAimYaw{ 0.0f };
 
-    // Tier 2B Compensation State (C)
+    // Tier 2B Compensation State (C) & Tuning
     static inline float s_targetCompYaw{ 0.0f };
     static inline float s_targetCompPitch{ 0.0f };
     static inline float s_compYaw{ 0.0f };
     static inline float s_compPitch{ 0.0f };
     static inline float s_displayT2BYaw{ 0.0f };
     static inline float s_displayT2BPitch{ 0.0f };
+
+    // Tier 2B Configurable Variables
+    static inline float s_t2bSettlingRate{ 8.0f };  // Rate (s^-1) when near rest (< threshold)
+    static inline float s_t2bMovingRate{ 2.0f };    // Rate (s^-1) during active swings (> threshold)
+    static inline float s_t2bThreshold{ 5.0f };     // Dynamic gap angle (deg) threshold
+    static inline float s_t2bMaxSpeed{ 240.0f };    // Max angular speed (deg/s)
+    static inline float s_t2bMinSpeed{ 3.0f };      // Min angular speed (deg/s) to prevent crawling too soon
 
     static void ResetChase(float aInitialPitch = 0.0f);
     static void ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, float& outYaw, float& outPitch);
