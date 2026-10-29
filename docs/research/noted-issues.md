@@ -2,3 +2,41 @@ This document provides findings that are proven to be causing issues. This docum
 
 - fpp is a gameFPPCameraComponent (an entIComponent), not an entity (entEntity).
 - In REDengine / CET, components (entIComponent) do not have an IsAttached() method; calling it throws a runtime nil method exception. Entities (entEntity / GameObject / PlayerPuppet / WeaponObject) DO have IsAttached() (verified in reference/game-scripts: core/entity/entity.swift:30: public native func IsAttached() -> Bool).
+Redscript / CET language mistakes:
+- `export` and `function` are not redscript keywords; methods are declared with `func`.
+- Empty argument slots like `, , true` do not compile; declare an empty struct variable and pass it.
+- `==` on game enums (gamedataItemType, gamedataWeaponEvolution) does not compile; use `Equals(a, b)` or `EnumInt(a) == EnumInt(b)`.
+- `EntityID` is not auto-cast to `StatsObjectID`; `GetStatValue` / `GetStatPoolValue` need `Cast<StatsObjectID>(...)`.
+- `array<gameStatModifierData>` is the wrong element type for `GetStatModList`; it needs `array<ref<gameStatModifierData>>`.
+- `@wrapMethod` on a method the target class only inherits (CrosshairGameController_NoWeapon.OnInitialize) fails with UNRESOLVED_METHOD; wrap a method the class declares itself.
+- `hud_turret` is not a resolvable class name in redscript.
+- `LogChannel` is not in the vanilla scripts; it comes from a third-party Logs.reds that end users do not have.
+- `FTLog` and `redscript_rCURRENT.log` do not show runtime telemetry on disk; the compile log closes before gameplay.
+- A UI `cb` callback wrap (OnPlayerDetach, OnPlayerAttach, OnInitialize, OnUninitialize) must keep `-> Bool`; changing it to `-> Void` is the compile error, not the fix.
+- `GetSystemRequestsHandler().IsLoadingSavedSession()` does not exist in the 2.5 scripts.
+- `srh.IsPreGame()` and `srh.IsGamePaused()` are both false while an in-game save is loading; they are useless as a loading-screen guard.
+- CET has no `onSessionStart` / `onSessionEnd` events; `registerForEvent` only accepts onInit, onUpdate, onDraw, onOverlayOpen, onOverlayClose, onShutdown, onTweak.
+- `Observe(...)` called at Lua top level (outside `onInit`) errors with "attempt to call global 'Observe' (a nil value)".
+- A DLL opening a relative path like `red4ext/...` resolves from `bin\x64`, not the game root; the file silently never appears.
+- Deleting the `local weapon = ...` and `local fpp = ...` lines in `onUpdate` made the whole mod inert (nil globals, armed check never true) while the DLL still loaded fine.
+- `ShootEvents.OnEnter` is not where the bullet is fired. Suppressing every call inside it still fired a bullet at the camera reticle.
+- Writing position / forward / raycastEnd into the effect blackboard from `EffectPreAction_PreAttack.Process` does not move the hitscan ray.
+- `weapon.ShootStraight(true)` does not redirect the shot, and it disables spread (shotgun pellets collapse to one line).
+- `AI_ShootForwards`, `StartContinuousAttack` / `PrepareContinuousAttack`, and `EffectSystem.CreateEffectStatic(n"weaponShoot", ...)` called from script do not fire along a given vector for the player.
+- Suppressing `TriggerWeaponEffects(..., Shoot)` only removes the visual; the bullet still hits the camera reticle.
+- Overwriting the evaluated ray direction with one fixed muzzle vector removes pellet spread; the spread offset has to be rotated from camera frame to barrel frame instead.
+- The HMG fires `Attacks.ExplodingBulletSmallProjectile` (a projectile), so the PhysicalRay hook never sees it; projectile weapons need a different path.
+- `math.deg(math.atan2(fwd.y, fwd.x))` is not engine yaw. Engine yaw (GetWorldYaw, Vector4.Heading, Transform.GetYaw, EulerAngles.Yaw) has forward along +Y; mixing the two conventions turned the body 90 degrees and shook it every frame.
+- `GetWorldYaw()` exists on the player (Entity, core/entity/entity.swift:48); the earlier note that it does not was wrong.
+- Composing the camera as `Rx(-pitch) * Rz(yaw) * Rx(pitch + free) * baseline` rolls the horizon whenever yaw is nonzero.
+- Rotating the residual yaw around the local (0, 0, 1) axis inside a pitched parent frame rolls the horizon by about yaw * sin(pitch).
+- Reading `fpp:GetWorldForward()` every frame to build the yaw axis feeds the previous frame's result back in (one frame of scene-graph lag), causing left-right jitter and a post-stop shift.
+- Seeding the native pitch tracker from `aimSys:GetCameraForward()` fails because that value is zero while holstered; the seed came out as 0 and the roll came back.
+- Re-seeding the pitch tracker every frame from the live camera (`DR_ResetChasePitch` in onUpdate) wipes the residual and the barrel compensation; idle sway (about 2 degrees) trips it constantly, causing shaking and a 0.5 degree gaze shift.
+- Folding pitch into the divergence that drives body yaw yanks the body sideways when only looking up or down.
+- Per-frame `TeleportationFacility.Teleport` to rotate the body breaks locomotion and physics and cannot pitch; it is not a viable actuator.
+- Setting camera pitch through `fpp:SetLocalTransform` does not move the arms or the gun; the rig follows the engine's own input state, not the camera component transform.
+- Mouse Y is not stored in the camera component's local orientation quaternion (`camLocalPitch` stays 0); it lives in a native accumulator.
+- Vanilla does not rewrite the camera component's local orientation every frame. Multiplying an offset onto `GetLocalOrientation()` each frame compounds and spins the camera; offsets must be applied to a baseline captured once.
+- Inverting the residual yaw sign (`-rYaw`) made the gun appear to move ahead of the camera; positive engine yaw is left.
+- Hooking RVA 0x39CB63 missed horizontal input (a branch bypasses it); hooking the 0x39CA70 entry gets a zeroed mouse X (caller does `xorps xmm2, xmm2`); hooking the 0x39CBE3 call only moves the camera component, not body yaw. Only 0x51D462 carries both deltas.
