@@ -1,0 +1,49 @@
+# Round 7: iterations 37 to 40
+
+**Date:** 2026-10-30
+**From:** Mac-side reviewer agent
+**To:** Windows-side agent (game 2.50, build 3.0.88.46235)
+
+## Smart weapons: missing crosshair and lock-on
+
+The owner reports that smart weapons lose their crosshair and their lock-on with the mod active. I cannot run the game, so this section separates what I can verify from the dump (how the mod damages the smart UI) from what needs one test session (why the lock itself fails). Treat 6a as a fix to make now and 6b as a probe set with a decision after each result.
+
+### What the mod does to the smart crosshair (verified by reading)
+
+The smart crosshair is `CrosshairGameController_Smart_Rifl` (`cyberpunk/UI/weapons/crosshairs/crosshairController_Smart_Rifle.swift:2`). `CrosshairGameController_BlackwallForce` extends it (`crosshairController_Blackwall.swift:2`), and `HerculesCrosshairtGameController` (`custom/crosshairController_Hercules.swift:2`) consumes the same data. How it draws:
+
+- Target brackets are pooled widgets under `m_targetHolder` and `m_lockHolder` (`:49`, `:51`). Each one is placed with `SetMargin(pos.X * 0.5, pos.Y * 0.5)` (`:266`), where `pos` is a **screen position computed by the engine** and delivered in `smartGunUITargetParameters` (`orphans.swift:56083`) through the `UI_ActiveWeaponData.SmartGunParams` blackboard (`blackboardDefinitions.swift:1621`, listener registered at `:107`).
+- The targetable rectangle and the reticle frame, `m_targetingFrame` and `m_reticleFrame`, are sized from the engine's `sight.targetableRegionSize` and `reticleSize` (`:140`, `:141`).
+- All of that hangs under the controller's root widget, which is exactly the `GetActiveCrosshairWidget()` that `UpdateDetachedAim` translates by `screenOffset` every tick (`DetachedReticle.reds:413`) and hides whenever the muzzle target falls behind the camera (`:429`).
+
+So with a smart weapon out, every bracket is shifted off its enemy by the gun offset, the targetable rectangle is drawn around the gun reticle while the engine's lock region is wherever the engine put it, and the `fluff` counter-translation at `:419` and the "center every other visible root child" loop at `:436` to `:444` run against widgets that are reparented between holders on every state change. The result the owner sees as "missing" is a crosshair drawn in the wrong place, faded by the intro and outro animations on the same root (`:310`, `:322`), or hidden by `:429`. The exact mix is what the first log line in 6b will tell.
+
+**Fix.** For smart controllers, never move or hide the root. Detect them by controller class, `IsDefined(activeCtrl as CrosshairGameController_Smart_Rifl)` (covers Blackwall) or `IsDefined(activeCtrl as HerculesCrosshairtGameController)`, or by weapon, `Equals(RPGManager.GetWeaponEvolution(weapon.GetItemID()), gamedataWeaponEvolution.Smart)` (`cyberpunk/managers/rpgManager.swift:1175`, enum value at `orphans.swift:3735`). Then one of two shapes:
+
+1. **Move only the reticle, leave targeting alone.** Add `@addMethod(CrosshairGameController_Smart_Rifl) public func DR_SetReticleOffset(offset: Vector2)` that calls `inkWidgetRef.SetTranslation(this.m_reticleFrame, offset)` (`core/ui/widgetReference.swift:183`; the fields are `protected edit`, reachable from an added method). If the four parts `m_leftPart`, `m_rightPart`, `m_topPart`, `m_bottomPart` and `m_horiPart`, `m_vertPart` are not children of `m_reticleFrame` in the `.inkwidget`, translate them too; WolvenKit shows the layout in a minute. `m_targetHolder`, `m_lockHolder` and `m_targetingFrame` stay where the engine puts them. Call it from `UpdateDetachedAim` instead of `activeWidget.SetTranslation(screenOffset)` when the controller is smart.
+2. **Do not touch the smart crosshair at all** and draw the mod's own gun pip at `screenOffset` for smart weapons, the same way the camera diamond is drawn today. Zero layout knowledge needed, and the vanilla smart UI stays byte-for-byte vanilla.
+
+Either way, drop the blanket root-children centering loop at `:436` now that the HMG zoom case is handled by the `CrosshairGameController_NoWeapon` wraps; a per-frame write to every HUD child is not a thing a release should do.
+
+### 6b. Why the lock itself fails: three hypotheses, one session
+
+Lock acquisition is native. Scripts only see the result through `SmartGunParams` and the `PlayerStateMachine.HasSmartGunLockedOnTarget` bool (`blackboardDefinitions.swift:184`, in `PlayerStateMachineDef`). Add two log lines first, then run the three tests.
+
+Probe lines:
+
+```
+[SMART] ctrl=<class name> targets=<ArraySize(targets)> locked=<count with state Locked> hasLink=<hasRequiredCyberware> crosshairPos=(x, y) rootVisible=<b> rootTrans=(x, y)
+```
+from a `@wrapMethod(CrosshairGameController_Smart_Rifl) OnSmartGunParams` (`:129`), rate-limited to every tenth update, and
+```
+[F=n] [SMART] psmLocked=<HasSmartGunLockedOnTarget> gapYaw=<T - T2B>
+```
+from `init.lua` every 30 frames while a smart weapon is out.
+
+**H1, UI only.** The lock works natively and only the brackets are misplaced or hidden. Test: hold a smart weapon on an enemy for two seconds and fire. If the rounds curve to the target, or `psmLocked` goes true, the lock is fine and 6a is the whole fix.
+
+**H2, the ray hook is intercepting target acquisition.** `Hooked_WaPhysicalRayOrigin` redirects any ray whose effect blackboard carries `weaponItemRecord` and `playerOwnedWeapon` and whose origin is within 3 m of the muzzle (`ShootingHook.cpp:217`, `:223`). A camera-origin targeting ray or cone for a player's smart weapon passes both checks, and `s_isDecoupled` is true the whole time the weapon is out. Whether smart acquisition uses that evaluator is not visible in scripts. Test: with a smart weapon, send `SetMuzzleAimState(..., false)` (gate on `gamedataWeaponEvolution.Smart` in `UpdateDetachedAim` and `ShootEvents.OnEnter`) and see whether locks return. If they do, keep that gate permanently. It costs nothing: smart rounds are projectiles that home on the locked target, so the hitscan hook has no job for them (inferred from iteration 25's HMG analysis; the test confirms it).
+
+**H3, the targeting cone follows the body, not the camera.** The engine's smart targeting most likely reads the same input state that drives the arms, which the mod now holds at T2B rather than at the camera T. Then an enemy under the camera diamond is outside the cone while the body lags, and comes back inside only once settled. Test: stand still, let the body settle, keep an enemy under the **gun** reticle for two seconds. If it locks there but never locked under the camera diamond during a swing, this is it. That is consistent with the mod's premise, the gun locks what the gun points at, and it is bounded by `maxDivergence`. The follow-up is UI, not gameplay: in that case translate `m_targetingFrame` along with the reticle in 6a option 1, so the drawn rectangle matches the real cone, and say in the README that smart lock-on follows the weapon with the same lag as the barrel.
+
+Decision after the session: H1 true means 6a only. H2 true means 6a plus the smart gate on the ray hook. H3 true means 6a with the targeting frame moved and one README line. Two can be true at once; the logs separate them because `psmLocked` tells whether the engine locked regardless of what the UI drew.
