@@ -11,7 +11,7 @@ local Config = {
     deadzone = 0.0,               -- Degrees: zero deadzone by default (turns immediately)
     maxDivergence = 65.0,         -- Degrees: maximum angular separation before pulling body
     smoothingMode = "exponential",-- "exponential", "linear", "spring", or "power"
-    debugLogging = true           -- Verbose telemetry logging to DetachedReticle.log
+    debugLogging = false          -- Verbose telemetry logging to DetachedReticle.log
 }
 
 local DetachedReticle = {
@@ -274,14 +274,29 @@ registerForEvent("onUpdate", function(delta)
         SetupNativeSettings()
     end
 
+    local weapon = GameObject.GetRightActiveWeapon(player)
+    local fpp = player:GetFPPCameraComponent()
+
     local isDual = false
     pcall(function()
         isDual = GameObject.IsDualWielding(player)
     end)
     local isArmed = weapon and not weapon:IsMelee() and not isDual
-    local isReturning = false
-    pcall(function() isReturning = Game.DR_IsReturningToT2A() end)
-    local shouldBeActive = Config.enabled and (isArmed or isReturning) and fpp
+
+    -- Residual and compensation settling state:
+    -- Keeps decoupled camera active until compensation and residual smoothly reach 0.0,
+    -- preventing any camera snap during holster or weapon transition.
+    local rYaw = 0.0
+    local rPitch = 0.0
+    local cYaw = 0.0
+    local cPitch = 0.0
+    pcall(function() rYaw = Game.DR_GetResidualYaw() end)
+    pcall(function() rPitch = Game.DR_GetResidualPitch() end)
+    pcall(function() cYaw = Game.DR_GetCompYaw() end)
+    pcall(function() cPitch = Game.DR_GetCompPitch() end)
+    local settling = (math.abs(rYaw) + math.abs(rPitch) > 0.10) or (math.abs(cYaw) + math.abs(cPitch) > 0.10)
+
+    local shouldBeActive = Config.enabled and fpp and (isArmed or settling)
 
     if shouldBeActive then
         DetachedReticle.isActive = true
@@ -454,10 +469,15 @@ registerForEvent("onUpdate", function(delta)
         -- Check mouse deflection gap to determine resting status
         local tYaw = 0.0
         local aYaw = 0.0
+        local tPitch = 0.0
+        local aPitch = 0.0
         pcall(function() tYaw = Game.DR_GetTargetYaw() end)
         pcall(function() aYaw = Game.DR_GetAimYaw() end)
+        pcall(function() tPitch = Game.DR_GetTargetPitch() end)
+        pcall(function() aPitch = Game.DR_GetAimPitch() end)
         local rawGapYaw = math.abs(normalizeDeg(tYaw - aYaw))
-        local isResting = (rawGapYaw < 0.10)
+        local rawGapPitch = math.abs(tPitch - aPitch)
+        local isResting = (rawGapYaw < 0.10) and (rawGapPitch < 0.10)
 
         if isResting and stateStr == "HIP" then
             DetachedReticle.restingFrames = (DetachedReticle.restingFrames or 0) + 1
@@ -465,16 +485,12 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.restingFrames = 0
         end
 
-        -- Detect holstering / unholstering transition animation:
-        -- During drawing or holstering, the weapon barrel points downward/sideways (angleDeg > 12.0 or state SAFE)
-        local isHolsteringOrDrawing = (not isArmed) or (stateStr == "SAFE") or (crosshairState <= 1) or (angleDeg > 12.0)
-
         -- 4. Tier 2B Active Barrel Offset Control Loop (Per-Frame Execution)
         local diffYaw = 0.0
         local diffPitch = 0.0
         local gunYaw = 0.0
         local gunPitch = 0.0
-        local aPitch = 0.0
+        local t2bPitch = 0.0
         local fx, fy, fz = 0.0, 0.0, 0.0
         if gunFwd then
             fx = gunFwd.x or gunFwd.X or 0.0
@@ -490,28 +506,42 @@ registerForEvent("onUpdate", function(delta)
                 gunYaw = math.deg(math.atan2(-fx, fy))
             end
 
-            pcall(function() aPitch = Game.DR_GetAimPitch() end)
+            pcall(function() t2bPitch = Game.DR_GetT2BPitch() end)
 
-            -- Base angular offset from camera gaze
-            diffYaw = (yawLag ~= 0.0) and yawLag or normalizeDeg(gunYaw - bodyYaw)
-            diffPitch = (pitchLag ~= 0.0) and pitchLag or (gunPitch - aPitch)
+            -- Body-relative anatomical offset (fixed-point target C = O):
+            -- Eliminates the half-gain error and dynamic chase gap pollution
+            diffYaw = normalizeDeg(gunYaw - bodyYaw)
+            diffPitch = gunPitch - t2bPitch
 
-            -- Screen-space closed-loop feedback trim:
-            -- Fine-tunes pitch and yaw so the reticle lands dead-center on the diamond across all weapon models
-            local pitchTrim = math.max(-3.0, math.min(3.0, scrY * 0.03))
-            local yawTrim = math.max(-3.0, math.min(3.0, scrX * 0.03))
-            diffPitch = diffPitch - pitchTrim
-            diffYaw = diffYaw + yawTrim
+            -- Ready stance gate: hold C target at zero until |diffYaw| < 15 and |diffPitch| < 15
+            -- This cleanly distinguishes ready firing stances from draw/holster animations and sprints
+            local isReadyStance = (math.abs(diffYaw) < 15.0) and (math.abs(diffPitch) < 15.0) and (stateStr == "HIP" or stateStr == "ADS")
 
-            if Config.activeAimOffset and isArmed and not isHolsteringOrDrawing and (stateStr == "HIP" or stateStr == "ADS") then
-                pcall(function() Game.DR_SetBarrelOffset(diffYaw, diffPitch) end)
+            -- Reset integral trim on weapon change
+            if weaponName ~= DetachedReticle.lastTrimWeapon then
+                DetachedReticle.lastTrimWeapon = weaponName
+                DetachedReticle.trimYaw = 0.0
+                DetachedReticle.trimPitch = 0.0
+            end
+
+            -- Convergence on camera hit point: slow integral trim on screen error (only when fully resting at settled stance)
+            if isResting and isReadyStance and isArmed then
+                local dt = (type(delta) == "number" and delta > 0.0001 and delta < 0.1) and delta or 0.016
+                DetachedReticle.trimYaw = math.max(-3.0, math.min(3.0, (DetachedReticle.trimYaw or 0.0) + scrX * 0.005 * dt))
+                DetachedReticle.trimPitch = math.max(-3.0, math.min(3.0, (DetachedReticle.trimPitch or 0.0) - scrY * 0.005 * dt))
+            end
+
+            local targetYaw = diffYaw + (DetachedReticle.trimYaw or 0.0)
+            local targetPitch = diffPitch + (DetachedReticle.trimPitch or 0.0)
+
+            if Config.activeAimOffset and isArmed and isReadyStance then
+                pcall(function() Game.DR_SetBarrelOffset(targetYaw, targetPitch) end)
             else
-                -- In the middle of deholstering/holstering animation:
-                -- Return T2B back to T2A with a quick ease-in ease-out movement (0.30s)
-                pcall(function() Game.DR_StartReturnToT2A(0.30) end)
+                -- While holstering, drawing, or unready: decay C smoothly to 0 via native filter
+                pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
             end
         else
-            pcall(function() Game.DR_StartReturnToT2A(0.30) end)
+            pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
         end
 
         -- 5. Diagnostic Telemetry & Anomaly Watchdogs

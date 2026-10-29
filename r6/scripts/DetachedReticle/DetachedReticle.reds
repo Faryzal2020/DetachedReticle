@@ -531,94 +531,13 @@ protected func GetDesiredAttackRecord(stateContext: ref<StateContext>, scriptInt
     return wrappedMethod(stateContext, scriptInterface);
 }
 
-// Deep inspection and hierarchical telemetry for Crosshair_Custom_HMG
-@addField(Crosshair_Custom_HMG)
-private let m_drLoggedHmgHierarchy: Bool;
-
-@wrapMethod(Crosshair_Custom_HMG)
-protected cb func OnInitialize() -> Bool {
-    wrappedMethod();
-    this.DR_LogHmgHierarchy();
-}
-
-@wrapMethod(Crosshair_Custom_HMG)
-protected cb func OnPreIntro() -> Bool {
-    wrappedMethod();
-    this.DR_LogHmgHierarchy();
-}
-
-@addMethod(Crosshair_Custom_HMG)
-private func DR_LogHmgHierarchy() -> Void {
-    if this.m_drLoggedHmgHierarchy {
-        return;
-    }
-    let root: ref<inkCompoundWidget> = this.GetRootCompoundWidget();
-    if !IsDefined(root) {
-        return;
-    }
-    let count: Int32 = root.GetNumChildren();
-    FTLog("[DetachedReticle][HMG_HIERARCHY] Root num children: " + IntToString(count));
-    let i: Int32 = 0;
-    while i < count {
-        let child: ref<inkWidget> = root.GetWidgetByIndex(i);
-        if IsDefined(child) {
-            let childName: CName = child.GetName();
-            let childClass: CName = child.GetClassName();
-            let cTrans: Vector2 = child.GetTranslation();
-            let cSize: Vector2 = child.GetSize();
-            let cVis: Bool = child.IsVisible();
-            FTLog("[DetachedReticle][HMG_HIERARCHY] Child[" + IntToString(i) + "]: " + NameToString(childName) + " | Class: " + NameToString(childClass) + " | Visible: " + BoolToString(cVis) + " | Trans: (" + FloatToStringPrec(cTrans.X, 1) + ", " + FloatToStringPrec(cTrans.Y, 1) + ") | Size: (" + FloatToStringPrec(cSize.X, 1) + ", " + FloatToStringPrec(cSize.Y, 1) + ")");
-
-            let compound: ref<inkCompoundWidget> = child as inkCompoundWidget;
-            if IsDefined(compound) {
-                let subCount: Int32 = compound.GetNumChildren();
-                let j: Int32 = 0;
-                while j < subCount {
-                    let subChild: ref<inkWidget> = compound.GetWidgetByIndex(j);
-                    if IsDefined(subChild) {
-                        let subName: CName = subChild.GetName();
-                        let subClass: CName = subChild.GetClassName();
-                        let sTrans: Vector2 = subChild.GetTranslation();
-                        let sMargin: inkMargin = subChild.GetMargin();
-                        let sVis: Bool = subChild.IsVisible();
-                        FTLog("[DetachedReticle][HMG_HIERARCHY]   -> SubChild[" + IntToString(j) + "]: " + NameToString(subName) + " | Class: " + NameToString(subClass) + " | Visible: " + BoolToString(sVis) + " | Trans: (" + FloatToStringPrec(sTrans.X, 1) + ", " + FloatToStringPrec(sTrans.Y, 1) + ") | Margin: (" + FloatToStringPrec(sMargin.left, 1) + ", " + FloatToStringPrec(sMargin.top, 1) + ", " + FloatToStringPrec(sMargin.right, 1) + ", " + FloatToStringPrec(sMargin.bottom, 1) + ")");
-
-                        let subCompound: ref<inkCompoundWidget> = subChild as inkCompoundWidget;
-                        if IsDefined(subCompound) {
-                            let deepCount: Int32 = subCompound.GetNumChildren();
-                            let k: Int32 = 0;
-                            while k < deepCount {
-                                let deepChild: ref<inkWidget> = subCompound.GetWidgetByIndex(k);
-                                if IsDefined(deepChild) {
-                                    FTLog("[DetachedReticle][HMG_HIERARCHY]       -> DeepChild[" + IntToString(k) + "]: " + NameToString(deepChild.GetName()) + " | Class: " + NameToString(deepChild.GetClassName()) + " | Visible: " + BoolToString(deepChild.IsVisible()));
-                                }
-                                k += 1;
-                            }
-                        }
-                    }
-                    j += 1;
-                }
-            }
-        }
-        i += 1;
-    }
-    this.m_drLoggedHmgHierarchy = true;
-}
-
-// Track and enforce centering for optical zoom crosshair (NoWeapon)
-@wrapMethod(CrosshairGameController_NoWeapon)
-protected cb func OnPlayerAttach(playerPuppet: ref<GameObject>) -> Bool {
-    wrappedMethod(playerPuppet);
-    FTLog("[DetachedReticle][NO_WEAPON_CROSSHAIR] OnPlayerAttach called.");
-}
-
+// Enforce screen-center positioning for optical zoom crosshairs (NoWeapon)
 @wrapMethod(CrosshairGameController_NoWeapon)
 protected func OnState_Aim() -> Void {
     wrappedMethod();
     let root: ref<inkWidget> = this.GetRootWidget();
     if IsDefined(root) {
         root.SetTranslation(new Vector2(0.0, 0.0));
-        FTLog("[DetachedReticle][NO_WEAPON_CROSSHAIR] OnState_Aim: Forced root translation to (0, 0). Root visible: " + BoolToString(root.IsVisible()));
     }
 }
 
@@ -637,7 +556,6 @@ protected cb func OnZoomLevel(argZoom: Float) -> Bool {
     let root: ref<inkWidget> = this.GetRootWidget();
     if IsDefined(root) {
         root.SetTranslation(new Vector2(0.0, 0.0));
-        FTLog("[DetachedReticle][NO_WEAPON_CROSSHAIR] OnZoomLevel(" + FloatToStringPrec(argZoom, 2) + ") | Root trans forced to (0, 0).");
     }
 }
 

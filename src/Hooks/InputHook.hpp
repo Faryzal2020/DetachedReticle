@@ -30,8 +30,6 @@ public:
     static float GetCompPitch();
     static float GetT2BYaw();
     static float GetT2BPitch();
-    static void StartReturnToT2A(float aDuration = 0.30f);
-    static bool IsReturningToT2A();
 
     // Sensitivity Mult Direct Memory Access (offsets 0x498, 0x49C on gameFPPCameraComponent)
     static void SetSensitivityMult(RED4ext::IScriptable* aFpp, float aMultX, float aMultY);
@@ -70,13 +68,6 @@ public:
     static inline float s_compPitch{ 0.0f };
     static inline float s_displayT2BYaw{ 0.0f };
     static inline float s_displayT2BPitch{ 0.0f };
-
-    // Ease-in Ease-out Return to T2A Transition State
-    static inline bool s_isReturningToT2A{ false };
-    static inline float s_transTime{ 0.0f };
-    static inline float s_transDuration{ 0.30f };
-    static inline float s_transStartYaw{ 0.0f };
-    static inline float s_transStartPitch{ 0.0f };
 
     static void ResetChase(float aInitialPitch = 0.0f);
     static void ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, float& outYaw, float& outPitch);

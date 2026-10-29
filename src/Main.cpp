@@ -139,24 +139,6 @@ void DR_GetT2BPitch(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame
     if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetT2BPitch();
 }
 
-void DR_StartReturnToT2A(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
-    RED4EXT_UNUSED_PARAMETER(aContext);
-    RED4EXT_UNUSED_PARAMETER(aOut);
-    RED4EXT_UNUSED_PARAMETER(a4);
-
-    float duration = 0.30f;
-    RED4ext::GetParameter(aFrame, &duration);
-    aFrame->code++; // skip ParamEnd
-
-    DetachedReticle::InputHook::StartReturnToT2A(duration);
-}
-
-void DR_IsReturningToT2A(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
-    RED4EXT_UNUSED_PARAMETER(aContext);
-    RED4EXT_UNUSED_PARAMETER(a4);
-    aFrame->code++;
-    if (aOut) *reinterpret_cast<bool*>(aOut) = DetachedReticle::InputHook::IsReturningToT2A();
-}
 
 void DR_DrainEvents(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
     RED4EXT_UNUSED_PARAMETER(aContext);
@@ -306,15 +288,6 @@ void PostRegisterTypes() {
     funcSetBarrelOffset->AddParam("Float", "pitch");
     rtti->RegisterFunction(funcSetBarrelOffset);
 
-    auto funcReturnToT2A = RED4ext::CGlobalFunction::Create("DR_StartReturnToT2A", "DR_StartReturnToT2A", &DR_StartReturnToT2A);
-    funcReturnToT2A->flags = flags;
-    funcReturnToT2A->AddParam("Float", "duration");
-    rtti->RegisterFunction(funcReturnToT2A);
-
-    auto funcIsReturning = RED4ext::CGlobalFunction::Create("DR_IsReturningToT2A", "DR_IsReturningToT2A", &DR_IsReturningToT2A);
-    funcIsReturning->flags = flags;
-    funcIsReturning->SetReturnType("Bool");
-    rtti->RegisterFunction(funcIsReturning);
 
     auto funcDrain = RED4ext::CGlobalFunction::Create("DR_DrainEvents", "DR_DrainEvents", &DR_DrainEvents);
     funcDrain->flags = flags;

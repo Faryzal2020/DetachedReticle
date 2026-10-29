@@ -273,6 +273,49 @@ Post-MVP 2 research, bug diagnoses, and iteration tracking for polish and edge-c
      - Deployed updated `init.lua` to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
 - status: tested, broken, iteration 31 solution is not working because it undo the previous MVPs. implementation of iteration 31 requirement from iteration 30 state is advised.
 
+# iteration 32
+- requirement:
+  1. Restore MVP 1 & MVP 2 decoupled aim functionality completely.
+  2. Fix the 50% half-gain error in Tier 2B loop that left vertical and horizontal reticle discrepancies across weapons.
+  3. Prevent camera snapping during holster/draw without relying on timed transitions or per-frame restarted smoothsteps.
+  4. Preserve all volatile registers (r9, r10, r11, xmm4, xmm5) in `MouseLookRelay.asm` with 16-byte stack alignment (Round 5 finding H1).
+  5. Document parallax & convergence design decision (Round 5 finding H3).
+- root cause / problem analysis:
+  1. **Mod Inertia in Iteration 31:** `local weapon = GameObject.GetRightActiveWeapon(player)` and `local fpp = player:GetFPPCameraComponent()` were accidentally omitted in `init.lua:onUpdate`. `isArmed` and `shouldBeActive` were nil, leaving the native input hook in 100% vanilla passthrough.
+  2. **Half-Gain Loop Error in Iteration 30:** Gun direction $G = T2B + O$. Error measured relative to camera gaze $L = G - T = O - C - \text{gap}$. At rest ($\text{gap} = 0$), $C \to L \implies C = O - C \implies C = O/2$. The loop only compensated for half the anatomical offset, leaving $2.4^\circ\text{ to }3.2^\circ$ ($75\text{--}100\text{ px}$) vertical error on shotguns/HMGs.
+  3. **Anti-Lag Dynamic Locking in Iteration 31:** Feeding live `yawLagDeg` (camera-relative) and proportional screen trim into the fast compensator ($4.5\text{ s}^{-1}$) caused the compensator to erase dynamic mouse deflection $(T1 - T2A)$, locking $T2$ to $T1$.
+  4. **Holster Snap & Zeno's Holster:** Calling `DR_StartReturnToT2A` every frame reset `s_transTime = 0`, while deactivating `shouldBeActive` abruptly when `isArmed` became false snapped the camera because the puppet was left at $T2A - C$.
+- solution / architecture:
+  1. **Restore Core Initialization in `init.lua`:** Re-declared `weapon` and `fpp` at the top of `onUpdate`.
+  2. **Body-Relative Offset Target ($C = O$):**
+     $$\text{diffYaw} = \text{normalizeDeg}(\text{gunYaw} - \text{bodyYaw})$$
+     $$\text{diffPitch} = \text{gunPitch} - \text{t2bPitch}$$
+     Measuring relative to puppet body heading and actuation pitch eliminates the chase gap and ensures 100% anatomical offset removal at rest.
+  3. **No-Snap Transition Gating via Settling Continuity:**
+     `shouldBeActive = Config.enabled and fpp and (isArmed or settling)`
+     where `settling = (|rYaw| + |rPitch| > 0.10) or (|cYaw| + |cPitch| > 0.10)`.
+     When unarming (`not isArmed`), `DR_SetBarrelOffset(0.0, 0.0)` is sent. $C$ naturally decays through the native filter at $4.5\text{ s}^{-1}$, while camera residual $R = (T - T2A) + C$ keeps camera world gaze rock-solid on $T$. When residual and compensation reach $< 0.10^\circ$, `shouldBeActive` deactivates cleanly with zero snap.
+  4. **Ready Stance Gating:**
+     Target offset is held at zero during draw/holster animations using body-relative gate:
+     `isReadyStance = (|diffYaw| < 15.0) and (|diffPitch| < 15.0) and (stateStr == "HIP" or stateStr == "ADS")`.
+  5. **Dynamic Hit-Point Parallax Convergence:**
+     Implemented slow integral trim on screen error ($\int \text{scrErr} \cdot k_i \, dt$, clamped $\pm 3.0^\circ$) active **only** when resting at settled stance (`rawGap < 0.10°`). Frozen during mouse swings. Documented in `docs/research/convergence-design.md`.
+  6. **Relay Register Preservation:**
+     Expanded stack frame in `MouseLookRelay.asm` to `0D8h` (216 bytes) with 16-byte alignment to preserve volatile registers `r9`, `r10`, `r11`, `xmm4`, `xmm5` across `OnNativeMouseAim`.
+  7. **Native Code Simplification:**
+     Removed `StartReturnToT2A` and `IsReturningToT2A` from `InputHook` and `Main.cpp`.
+  8. **Cleanups:**
+     Set `Config.debugLogging = false` by default; cleaned up leftover HMG diagnostic hierarchy dumper in `DetachedReticle.reds`.
+- implementation:
+  1. `src/Hooks/MouseLookRelay.asm`: Preserved all volatile registers (`r9`, `r10`, `r11`, `xmm4`, `xmm5`).
+  2. `src/Hooks/InputHook.hpp` & `src/Hooks/InputHook.cpp`: Removed timed transition methods and simplified Tier 2B loop with rate $4.5\text{ s}^{-1}$ and clamp $2.5^\circ$.
+  3. `src/Main.cpp`: Removed `DR_StartReturnToT2A` and `DR_IsReturningToT2A`.
+  4. Recompiled `DetachedReticle.dll` and deployed to `red4ext/plugins/DetachedReticle/DetachedReticle.dll` and `E:\Cyberpunk 2077\red4ext\plugins\DetachedReticle\DetachedReticle.dll`.
+  5. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`: Restored `weapon`/`fpp`, added `settling` gate, implemented body-relative offsets, ready stance gating, slow integral trim, and default `debugLogging = false`. Deployed to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
+  6. `r6/scripts/DetachedReticle/DetachedReticle.reds`: Cleaned up HMG hierarchy dumper and `FTLog` noise. Deployed to `E:\Cyberpunk 2077\r6\scripts\DetachedReticle\DetachedReticle.reds`.
+  7. `docs/research/convergence-design.md`: Documented parallax decision.
+- status: tested 2026-10-29 18:40, everything works and looks good.
+
 # next iteration above this line
 
 ### Findings Writing Rules:

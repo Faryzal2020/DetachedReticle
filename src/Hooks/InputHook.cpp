@@ -129,11 +129,6 @@ void InputHook::ResetChase(float aInitialPitch) {
     s_targetCompPitch = 0.0f;
     s_compYaw = 0.0f;
     s_compPitch = 0.0f;
-    s_isReturningToT2A = false;
-    s_transTime = 0.0f;
-    s_transDuration = 0.30f;
-    s_transStartYaw = 0.0f;
-    s_transStartPitch = 0.0f;
     s_displayT2BYaw = 0.0f;
     s_displayT2BPitch = aInitialPitch;
     s_lastTime = std::chrono::steady_clock::now();
@@ -142,29 +137,6 @@ void InputHook::ResetChase(float aInitialPitch) {
 void InputHook::SetBarrelOffset(float aYaw, float aPitch) {
     s_targetCompYaw = std::clamp(aYaw, -15.0f, 15.0f);
     s_targetCompPitch = std::clamp(aPitch, -15.0f, 15.0f);
-    if (s_isReturningToT2A && (std::abs(aYaw) > 0.05f || std::abs(aPitch) > 0.05f)) {
-        s_isReturningToT2A = false;
-    }
-}
-
-void InputHook::StartReturnToT2A(float aDuration) {
-    if (std::abs(s_compYaw) > 0.001f || std::abs(s_compPitch) > 0.001f) {
-        s_isReturningToT2A = true;
-        s_transTime = 0.0f;
-        s_transDuration = (aDuration > 0.05f) ? aDuration : 0.30f;
-        s_transStartYaw = s_compYaw;
-        s_transStartPitch = s_compPitch;
-        s_targetCompYaw = 0.0f;
-        s_targetCompPitch = 0.0f;
-    } else {
-        s_isReturningToT2A = false;
-        s_compYaw = 0.0f;
-        s_compPitch = 0.0f;
-    }
-}
-
-bool InputHook::IsReturningToT2A() {
-    return s_isReturningToT2A;
 }
 
 void InputHook::SetSmoothing(float aLambda, int32_t aMode, float aMaxDiv, float aDeadzone, bool aEnabled) {
@@ -234,52 +206,23 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
     s_aimPitch = std::clamp(s_aimPitch, -85.0f, 85.0f);
 
     // 7. Tier 2B Active Barrel Offset Compensation:
-    // When returning to T2A (middle of deholster/holster animation):
-    // Smoothly eases C to 0 using a cubic smoothstep curve (ease-in ease-out)
-    // so T2B returns cleanly to T2A without camera snaps or sudden jerks.
-    float dCompYaw = 0.0f;
-    float dCompPitch = 0.0f;
-
-    if (s_isReturningToT2A) {
-        s_transTime += dt;
-        float u = (s_transDuration > 0.001f) ? std::clamp(s_transTime / s_transDuration, 0.0f, 1.0f) : 1.0f;
-        // Cubic smoothstep factor: S(u) = 3u^2 - 2u^3
-        float smoothFactor = 1.0f - (3.0f * u * u - 2.0f * u * u * u);
-        float nextCompYaw = s_transStartYaw * smoothFactor;
-        float nextCompPitch = s_transStartPitch * smoothFactor;
-
-        dCompYaw = nextCompYaw - s_compYaw;
-        dCompPitch = nextCompPitch - s_compPitch;
-        s_compYaw = nextCompYaw;
-        s_compPitch = nextCompPitch;
-
-        if (u >= 1.0f) {
-            s_isReturningToT2A = false;
-            s_compYaw = 0.0f;
-            s_compPitch = 0.0f;
-            dCompYaw = 0.0f;
-            dCompPitch = 0.0f;
-        }
-    } else {
-        // Continuous active compensation:
-        // When dynamic gap is large (flicking), rate is 1.0 s^-1 so T2A handles swing weight.
-        // When dynamic gap settles (< 5.0 deg), rate increases to 4.5 s^-1 for fast, snappy alignment.
-        float compRate = 4.5f;
-        if (std::abs(gapYaw) > 5.0f || std::abs(gapPitch) > 5.0f) {
-            compRate = 1.0f;
-        }
-        float compFactor = 1.0f - std::exp(-compRate * dt);
-        dCompYaw = (s_targetCompYaw - s_compYaw) * compFactor;
-        dCompPitch = (s_targetCompPitch - s_compPitch) * compFactor;
-
-        dCompYaw = std::clamp(dCompYaw, -2.5f, 2.5f);
-        dCompPitch = std::clamp(dCompPitch, -2.5f, 2.5f);
-
-        s_compYaw += dCompYaw;
-        s_compPitch += dCompPitch;
-        s_compYaw = std::clamp(s_compYaw, -15.0f, 15.0f);
-        s_compPitch = std::clamp(s_compPitch, -15.0f, 15.0f);
+    // When dynamic gap is large (flicking), rate is 1.0 s^-1 so T2A handles swing weight.
+    // When dynamic gap settles (< 5.0 deg), rate increases to 4.5 s^-1 for fast, snappy alignment.
+    float compRate = 4.5f;
+    if (std::abs(gapYaw) > 5.0f || std::abs(gapPitch) > 5.0f) {
+        compRate = 1.0f;
     }
+    float compFactor = 1.0f - std::exp(-compRate * dt);
+    float dCompYaw = (s_targetCompYaw - s_compYaw) * compFactor;
+    float dCompPitch = (s_targetCompPitch - s_compPitch) * compFactor;
+
+    dCompYaw = std::clamp(dCompYaw, -2.5f, 2.5f);
+    dCompPitch = std::clamp(dCompPitch, -2.5f, 2.5f);
+
+    s_compYaw += dCompYaw;
+    s_compPitch += dCompPitch;
+    s_compYaw = std::clamp(s_compYaw, -15.0f, 15.0f);
+    s_compPitch = std::clamp(s_compPitch, -15.0f, 15.0f);
 
     // 8. Residual for camera offset: R = T - T2B = (T - T2A) + C
     // Since Puppet is rotated to T2B = T2A - C, CameraWorld = T2B + R = (T2A - C) + (T - T2A + C) = T (rock-solid in world space).
