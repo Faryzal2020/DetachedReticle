@@ -6,6 +6,7 @@
 
 local Config = {
     enabled = true,               -- Master switch for decoupled aiming
+    activeAimOffset = true,       -- Tier 2B: Actively offset aiming direction to center gun reticle
     catchUpSpeed = 6.0,           -- Catch-up speed (higher = faster, lower = heavier physical weight)
     deadzone = 0.0,               -- Degrees: zero deadzone by default (turns immediately)
     maxDivergence = 65.0,         -- Degrees: maximum angular separation before pulling body
@@ -26,6 +27,9 @@ local DetachedReticle = {
     chaseActive = false,
     registeredPlayer = nil,
     lastShotCount = 0,
+    lastLoggedWeapon = nil,
+    lastLoggedADS = nil,
+    restingFrames = 0,
     isOverlayOpen = false,
     nativeSettingsInitAttempted = false
 }
@@ -90,6 +94,7 @@ local function LoadConfig()
             local ok, data = pcall(json.decode, content)
             if ok and type(data) == "table" then
                 if data.enabled ~= nil then Config.enabled = (data.enabled == true) end
+                if data.activeAimOffset ~= nil then Config.activeAimOffset = (data.activeAimOffset == true) end
                 if data.catchUpSpeed ~= nil then Config.catchUpSpeed = tonumber(data.catchUpSpeed) or Config.catchUpSpeed end
                 if data.deadzone ~= nil then Config.deadzone = tonumber(data.deadzone) or Config.deadzone end
                 if data.maxDivergence ~= nil then Config.maxDivergence = tonumber(data.maxDivergence) or Config.maxDivergence end
@@ -185,6 +190,16 @@ local function SetupNativeSettings()
                 end
             )
 
+            ns.addSwitch(
+                "/detachedReticle/aiming",
+                "Active Aim Offset (Tier 2B)",
+                "Actively offsets the character body and arms to center the gun reticle at rest",
+                Config.activeAimOffset, true,
+                function(val)
+                    DetachedReticle.SetActiveAimOffset(val)
+                end
+            )
+
             ns.addRangeFloat(
                 "/detachedReticle/aiming",
                 "Catch-up Speed",
@@ -263,11 +278,12 @@ registerForEvent("onUpdate", function(delta)
     pcall(function()
         isDual = GameObject.IsDualWielding(player)
     end)
-    local weapon = GameObject.GetRightActiveWeapon(player)
     local isArmed = weapon and not weapon:IsMelee() and not isDual
-    local fpp = player:GetFPPCameraComponent()
+    local isReturning = false
+    pcall(function() isReturning = Game.DR_IsReturningToT2A() end)
+    local shouldBeActive = Config.enabled and (isArmed or isReturning) and fpp
 
-    if Config.enabled and isArmed and fpp then
+    if shouldBeActive then
         DetachedReticle.isActive = true
         DetachedReticle.frameCounter = (DetachedReticle.frameCounter or 0) + 1
 
@@ -377,9 +393,186 @@ registerForEvent("onUpdate", function(delta)
                 DetachedReticle.frameCounter, bodyYaw, rYaw, rPitch, tPitch, aPitch, fwdZ, fwdXY)
             Log(line)
         end
+
+        -- 3. Resolve weapon state and active aiming posture
+        local psmBB = nil
+        pcall(function() psmBB = player:GetPlayerStateMachineBlackboard() end)
+        local crosshairState = -1
+        local upperBodyState = -1
+        if psmBB then
+            pcall(function()
+                crosshairState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.Crosshair)
+                upperBodyState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.UpperBody)
+            end)
+        end
+        local isADS = (crosshairState == 4 or upperBodyState == 6)
+
+        local weaponName = "Unknown"
+        if weapon then
+            pcall(function()
+                local itemID = weapon:GetItemID()
+                local tdbid = ItemID.GetTDBID(itemID)
+                weaponName = TDBID.ToStringDEBUG(tdbid)
+            end)
+        end
+
+        local aimSys = nil
+        pcall(function()
+            aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
+        end)
+
+        local gunFwd = nil
+        local scrX, scrY = 0.0, 0.0
+        local angleDeg = 0.0
+        local yawLag = 0.0
+        local pitchLag = 0.0
+        if aimSys then
+            pcall(function()
+                gunFwd = aimSys:GetGunForward()
+                local offset = aimSys:GetScreenOffset()
+                if offset then
+                    scrX = offset.x or offset.X or 0.0
+                    scrY = offset.y or offset.Y or 0.0
+                end
+                angleDeg = aimSys:GetAngleLagDeg() or 0.0
+                yawLag = aimSys:GetYawLagDeg() or 0.0
+                pitchLag = aimSys:GetPitchLagDeg() or 0.0
+            end)
+        end
+
+        local stateStr = "HIP"
+        if isADS then
+            stateStr = "ADS"
+        elseif crosshairState == 5 or upperBodyState == 3 then
+            stateStr = "RELOAD"
+        elseif crosshairState == 7 then
+            stateStr = "SPRINT"
+        elseif crosshairState == 1 or upperBodyState == 1 then
+            stateStr = "SAFE"
+        end
+
+        -- Check mouse deflection gap to determine resting status
+        local tYaw = 0.0
+        local aYaw = 0.0
+        pcall(function() tYaw = Game.DR_GetTargetYaw() end)
+        pcall(function() aYaw = Game.DR_GetAimYaw() end)
+        local rawGapYaw = math.abs(normalizeDeg(tYaw - aYaw))
+        local isResting = (rawGapYaw < 0.10)
+
+        if isResting and stateStr == "HIP" then
+            DetachedReticle.restingFrames = (DetachedReticle.restingFrames or 0) + 1
+        else
+            DetachedReticle.restingFrames = 0
+        end
+
+        -- Detect holstering / unholstering transition animation:
+        -- During drawing or holstering, the weapon barrel points downward/sideways (angleDeg > 12.0 or state SAFE)
+        local isHolsteringOrDrawing = (not isArmed) or (stateStr == "SAFE") or (crosshairState <= 1) or (angleDeg > 12.0)
+
+        -- 4. Tier 2B Active Barrel Offset Control Loop (Per-Frame Execution)
+        local diffYaw = 0.0
+        local diffPitch = 0.0
+        local gunYaw = 0.0
+        local gunPitch = 0.0
+        local aPitch = 0.0
+        local fx, fy, fz = 0.0, 0.0, 0.0
+        if gunFwd then
+            fx = gunFwd.x or gunFwd.X or 0.0
+            fy = gunFwd.y or gunFwd.Y or 0.0
+            fz = gunFwd.z or gunFwd.Z or 0.0
+            local fxy = math.sqrt(fx * fx + fy * fy)
+            gunPitch = (fxy > 0.0001 or math.abs(fz) > 0.0001) and math.deg(math.atan2(fz, fxy)) or 0.0
+
+            local okGYaw, gYaw = pcall(function() return Vector4.Heading(gunFwd) end)
+            if okGYaw and gYaw then
+                gunYaw = gYaw
+            else
+                gunYaw = math.deg(math.atan2(-fx, fy))
+            end
+
+            pcall(function() aPitch = Game.DR_GetAimPitch() end)
+
+            -- Base angular offset from camera gaze
+            diffYaw = (yawLag ~= 0.0) and yawLag or normalizeDeg(gunYaw - bodyYaw)
+            diffPitch = (pitchLag ~= 0.0) and pitchLag or (gunPitch - aPitch)
+
+            -- Screen-space closed-loop feedback trim:
+            -- Fine-tunes pitch and yaw so the reticle lands dead-center on the diamond across all weapon models
+            local pitchTrim = math.max(-3.0, math.min(3.0, scrY * 0.03))
+            local yawTrim = math.max(-3.0, math.min(3.0, scrX * 0.03))
+            diffPitch = diffPitch - pitchTrim
+            diffYaw = diffYaw + yawTrim
+
+            if Config.activeAimOffset and isArmed and not isHolsteringOrDrawing and (stateStr == "HIP" or stateStr == "ADS") then
+                pcall(function() Game.DR_SetBarrelOffset(diffYaw, diffPitch) end)
+            else
+                -- In the middle of deholstering/holstering animation:
+                -- Return T2B back to T2A with a quick ease-in ease-out movement (0.30s)
+                pcall(function() Game.DR_StartReturnToT2A(0.30) end)
+            end
+        else
+            pcall(function() Game.DR_StartReturnToT2A(0.30) end)
+        end
+
+        -- 5. Diagnostic Telemetry & Anomaly Watchdogs
+        local weaponChanged = (weaponName ~= DetachedReticle.lastLoggedWeapon)
+        local adsChanged = (isADS ~= DetachedReticle.lastLoggedADS)
+        local shouldLogMonitor = weaponChanged or adsChanged or (DetachedReticle.frameCounter % 10 == 0)
+
+        if Config.debugLogging and shouldLogMonitor and gunFwd then
+            DetachedReticle.lastLoggedWeapon = weaponName
+            DetachedReticle.lastLoggedADS = isADS
+
+            local aimPitchRad = math.rad(aPitch)
+            local aimYawRad = math.rad(bodyYaw)
+            local ax = -math.sin(aimYawRad) * math.cos(aimPitchRad)
+            local ay = math.cos(aimYawRad) * math.cos(aimPitchRad)
+            local az = math.sin(aimPitchRad)
+            local dotAim = math.max(-1.0, math.min(1.0, fx * ax + fy * ay + fz * az))
+            local totalDiv = math.deg(math.acos(dotAim))
+
+            local modeStr = isResting and ("RESTING(" .. stateStr .. ")") or ("SWINGING(" .. stateStr .. ")")
+
+            local logLine = string.format("[GUN_OFFSET_MONITOR] Weapon=%s | Mode=%s | ReticleScreen=(%.1f, %.1f)px | GunAngles=(Yaw:%.2f, Pitch:%.2f) | AimAngles=(Yaw:%.2f, Pitch:%.2f) | Offset=(dYaw:%+.2f deg, dPitch:%+.2f deg, Total:%.2f deg)",
+                weaponName, modeStr, scrX, scrY, gunYaw, gunPitch, bodyYaw, aPitch, diffYaw, diffPitch, totalDiv)
+            Log(logLine)
+
+            local cYaw = 0.0
+            local cPitch = 0.0
+            local t2bYaw = 0.0
+            local t2bPitch = 0.0
+            pcall(function() cYaw = Game.DR_GetCompYaw() end)
+            pcall(function() cPitch = Game.DR_GetCompPitch() end)
+            pcall(function() t2bYaw = Game.DR_GetT2BYaw() end)
+            pcall(function() t2bPitch = Game.DR_GetT2BPitch() end)
+
+            local compLine = string.format("[T2B_OFFSET_COMP] TargetErr=(dYaw:%+.2f deg, dPitch:%+.2f deg) | CompApplied=(C_yaw:%+.2f deg, C_pitch:%+.2f deg) | T2A_Aim=(Yaw:%.2f, Pitch:%.2f) | T2B_Body=(Yaw:%.2f, Pitch:%.2f) | Residual=(rYaw:%.4f, rPitch:%.4f)",
+                diffYaw, diffPitch, cYaw, cPitch, bodyYaw, aPitch, t2bYaw, t2bPitch, rYaw, rPitch)
+            Log(compLine)
+
+            -- Anomaly Watchdogs:
+            if math.abs(cYaw) >= 14.5 or math.abs(cPitch) >= 14.5 then
+                Log(string.format("[WARN][T2B_CLAMP] Compensation reached clamp limit! cYaw=%.2f, cPitch=%.2f", cYaw, cPitch))
+            end
+            if cYaw ~= cYaw or cPitch ~= cPitch or diffYaw ~= diffYaw or diffPitch ~= diffPitch then
+                Log("[WARN][T2B_NAN] NaN detected in compensation variables!")
+            end
+            if math.abs(diffYaw) > 25.0 or math.abs(diffPitch) > 25.0 then
+                Log(string.format("[WARN][T2B_EXCESSIVE_OFFSET] Barrel offset exceeded expected bounds! dYaw=%.2f, dPitch=%.2f", diffYaw, diffPitch))
+            end
+            if math.abs(rYaw) > 70.0 or math.abs(rPitch) > 70.0 then
+                Log(string.format("[WARN][T2B_RESIDUAL_HIGH] Camera residual exceeded expected bounds! rYaw=%.2f, rPitch=%.2f", rYaw, rPitch))
+            end
+            if DetachedReticle.restingFrames > 120 and (math.abs(scrX) > 40.0 or math.abs(scrY) > 40.0) and (DetachedReticle.frameCounter % 30 == 0) then
+                Log(string.format("[WARN][T2B_CONVERGENCE_STALL] Reticle screen offset not converging to center! scr=(%.1f, %.1f)px, targetErr=(%.2f, %.2f) applied=(%.2f, %.2f)",
+                    scrX, scrY, diffYaw, diffPitch, cYaw, cPitch))
+            end
+        end
     else
         if DetachedReticle.isActive then
             DetachedReticle.isActive = false
+            pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
+            DetachedReticle.restingFrames = 0
             if DetachedReticle.chaseActive then
                 DetachedReticle.chaseActive = false
                 pcall(function() Game.DR_SetSmoothing(Config.catchUpSpeed, 0, Config.maxDivergence, Config.deadzone, false) end)
@@ -405,6 +598,8 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.origHeadingLocked = nil
             DetachedReticle.origSensX = nil
             DetachedReticle.origSensY = nil
+            DetachedReticle.lastLoggedWeapon = nil
+            DetachedReticle.lastLoggedADS = nil
         end
     end
 
@@ -477,6 +672,15 @@ registerForEvent("onDraw", function()
             DetachedReticle.SetEnabled(newEnabled)
         end
 
+        -- Active Aim Offset Checkbox
+        local newOffset, offsetChanged = ImGui.Checkbox("Active Aim Offset (Tier 2B)", Config.activeAimOffset)
+        if offsetChanged then
+            DetachedReticle.SetActiveAimOffset(newOffset)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Actively offsets the character body and arms to center the gun reticle at rest.")
+        end
+
         -- Catch-Up Speed Slider
         local newSpeed, speedChanged = ImGui.SliderFloat("Catch-up Speed", Config.catchUpSpeed, 0.0, 30.0, "%.1f")
         if speedChanged then
@@ -534,9 +738,14 @@ registerForEvent("onDraw", function()
         if DetachedReticle.isActive then
             local rYaw = 0.0
             local rPitch = 0.0
+            local cYaw = 0.0
+            local cPitch = 0.0
             pcall(function() rYaw = Game.DR_GetResidualYaw() end)
             pcall(function() rPitch = Game.DR_GetResidualPitch() end)
+            pcall(function() cYaw = Game.DR_GetCompYaw() end)
+            pcall(function() cPitch = Game.DR_GetCompPitch() end)
             ImGui.Text(string.format("Camera Residual: Yaw=%.2f deg | Pitch=%.2f deg", rYaw, rPitch))
+            ImGui.Text(string.format("Tier 2B Compensation: C_yaw=%+.2f deg | C_pitch=%+.2f deg", cYaw, cPitch))
         end
 
         ImGui.End()
@@ -549,6 +758,7 @@ DetachedReticle.SetEnabled = function(val)
     SaveConfig()
     if not Config.enabled and DetachedReticle.chaseActive then
         DetachedReticle.chaseActive = false
+        pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
         pcall(function() Game.DR_SetSmoothing(Config.catchUpSpeed, 0, Config.maxDivergence, Config.deadzone, false) end)
         local player = Game.GetPlayer()
         local fpp = player and player:GetFPPCameraComponent()
@@ -557,6 +767,15 @@ DetachedReticle.SetEnabled = function(val)
         end
     end
     Log(string.format("[OPTIONS] Enabled set to: %s", tostring(Config.enabled)))
+end
+
+DetachedReticle.SetActiveAimOffset = function(val)
+    Config.activeAimOffset = val and true or false
+    SaveConfig()
+    if not Config.activeAimOffset then
+        pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
+    end
+    Log(string.format("[OPTIONS] activeAimOffset set to: %s", tostring(Config.activeAimOffset)))
 end
 
 DetachedReticle.SetCatchUpSpeed = function(val)

@@ -24,6 +24,15 @@ public:
     static float GetResidualYaw();
     static float GetResidualPitch();
 
+    // Tier 2B Active Barrel Offset Compensation
+    static void SetBarrelOffset(float aYaw, float aPitch);
+    static float GetCompYaw();
+    static float GetCompPitch();
+    static float GetT2BYaw();
+    static float GetT2BPitch();
+    static void StartReturnToT2A(float aDuration = 0.30f);
+    static bool IsReturningToT2A();
+
     // Sensitivity Mult Direct Memory Access (offsets 0x498, 0x49C on gameFPPCameraComponent)
     static void SetSensitivityMult(RED4ext::IScriptable* aFpp, float aMultX, float aMultY);
     static float GetSensitivityMultX(RED4ext::IScriptable* aFpp);
@@ -44,7 +53,7 @@ public:
     static inline float s_deadzone{ 0.0f };
     static inline bool s_enabled{ false };
 
-    // Chase Target (T) and Aim Direction (A)
+    // Chase Target (T) and Aim Direction (A = T2A, Actuated = T2B)
     static inline float s_targetYaw{ 0.0f };
     static inline float s_targetPitch{ 0.0f };
     static inline float s_aimYaw{ 0.0f };
@@ -53,6 +62,21 @@ public:
     static inline float s_residualPitch{ 0.0f };
     static inline float s_displayTargetYaw{ 0.0f };
     static inline float s_displayAimYaw{ 0.0f };
+
+    // Tier 2B Compensation State (C)
+    static inline float s_targetCompYaw{ 0.0f };
+    static inline float s_targetCompPitch{ 0.0f };
+    static inline float s_compYaw{ 0.0f };
+    static inline float s_compPitch{ 0.0f };
+    static inline float s_displayT2BYaw{ 0.0f };
+    static inline float s_displayT2BPitch{ 0.0f };
+
+    // Ease-in Ease-out Return to T2A Transition State
+    static inline bool s_isReturningToT2A{ false };
+    static inline float s_transTime{ 0.0f };
+    static inline float s_transDuration{ 0.30f };
+    static inline float s_transStartYaw{ 0.0f };
+    static inline float s_transStartPitch{ 0.0f };
 
     static void ResetChase(float aInitialPitch = 0.0f);
     static void ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, float& outYaw, float& outPitch);

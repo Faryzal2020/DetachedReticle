@@ -159,6 +159,120 @@ Post-MVP 2 research, bug diagnoses, and iteration tracking for polish and edge-c
     3. Deployed the updated `DetachedReticle.reds` to `E:\Cyberpunk 2077\r6\scripts\DetachedReticle\DetachedReticle.reds`.
 (user test timestamp: 2026-10-29 16:08:16 +0700: user confirmed "test iteration 28 complete, the issues have been resolved")
 
+# iteration 29
+- requirement: Monitor the location of the gun reticle and its angular offset compared to the Aiming Direction across various weapons in hip and resting animation postures vs ADS.
+- implementation:
+  1. In `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`, added dedicated `[GUN_OFFSET_MONITOR]` telemetry block running in `onUpdate`:
+     - Reads equipped weapon name via `TDBID.ToStringDEBUG(ItemID.GetTDBID(weapon:GetItemID()))`.
+     - Reads gun forward vector and screen pixel offset from `DetachedAimSystem`: `aimSys:GetGunForward()` and `aimSys:GetScreenOffset()`.
+     - Computes spherical gun barrel angles (`gunYaw`, `gunPitch`) and compares them against Aiming Direction angles (`bodyYaw`, `aPitch`).
+     - Computes exact 3D angular divergence:
+       $$\text{Offset} = \left(\Delta\text{Yaw} = \text{gunYaw} - \text{bodyYaw},\ \Delta\text{Pitch} = \text{gunPitch} - \text{aPitch},\ \text{Total} = \arccos(\mathbf{gunFwd} \cdot \mathbf{aimFwd})\right)$$
+     - Reads Player State Machine crosshair and upper body states to distinguish postures:
+       `RESTING(HIP)`, `SWINGING(HIP)`, `RESTING(ADS)`, `SWINGING(ADS)`, `RELOAD`, `SPRINT`, `SAFE`.
+     - Logs continuously every 10 frames (~6 Hz) and immediately triggers on weapon switch or ADS transition:
+       `[GUN_OFFSET_MONITOR] Weapon=<name> | Mode=<posture> | ReticleScreen=(x, y)px | GunAngles=(Yaw, Pitch) | AimAngles=(Yaw, Pitch) | Offset=(dYaw, dPitch, Total)`
+  2. Deployed updated `init.lua` to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
+
+# iteration 30
+- requirement: Actively offset the Aiming Direction so that the resting position of the physical gun reticle aligns with the Aiming Direction (Tier 2A anchor), without breaking mouse freelook crispness, dynamic swing lag, or camera stability.
+- root cause / problem analysis (from Iteration 29 telemetry):
+  1. In hipfire resting posture, weapons exhibit an intrinsic anatomical barrel offset relative to the character puppet body:
+     - Lexington (Pistol): $\Delta\text{Yaw} = -1.05^\circ$, $\Delta\text{Pitch} = -4.80^\circ$ (Total $4.95^\circ$, Screen `(36.0, 154.1)px`)
+     - Igla (Shotgun): $\Delta\text{Yaw} = +5.64^\circ$, $\Delta\text{Pitch} = +5.52^\circ$ (Total $7.88^\circ$, Screen `(-147.3, -139.4)px`)
+     - HMG (Heavy Machine Gun): $\Delta\text{Yaw} = +3.76^\circ$, $\Delta\text{Pitch} = +6.40^\circ$ (Total $7.56^\circ$, Screen `(-67.7, -158.2)px`)
+  2. In optical ADS, the rig naturally aligns the weapon optics with the camera eye ($<0.2^\circ$).
+  3. Because the weapon rig and arms are parented to the character puppet body, actuating the puppet body rotation directly turns the gun barrel in 3D world space.
+- solution / architecture:
+  1. **Tier 2A ($T2A$) Anchor Preservation:**
+     - Tier 2A maintains the dynamic mouse chase anchor chained to Tier 1 target gaze $T$. Raw mouse input updates $T$, and exponential smoothing advances $T2A$ by step $dA = \text{gap} \times (1 - e^{-\lambda \cdot dt})$.
+  2. **Tier 2B ($T2B = T2A - C$) Body Heading Actuation:**
+     - Actively offsets the player puppet body yaw and pitch by $C = (C_{\text{yaw}}, C_{\text{pitch}})$, physically rotating the arms and weapon barrel so the gun points directly along $T2A$ (and camera gaze $T$) in resting posture.
+     - Rate-modulated exponential tracking:
+       $$dC = (\Delta_{\text{target}} - C) \times (1 - e^{-\lambda_{\text{comp}} \cdot dt})$$
+       Where $\lambda_{\text{comp}} = 0.5\text{ s}^{-1}$ during rapid mouse flicks ($|\text{gap}| > 5.0^\circ$) to let $T2A$ dictate swing weight, and $\lambda_{\text{comp}} = 2.0\text{ s}^{-1}$ when settling to smoothly glide the barrel into alignment.
+     - Single-frame step clamped to $\pm 1.0^\circ$; total compensation clamped to $\pm 15.0^\circ$.
+     - Output to engine look integrator at RVA `0x51D462`:
+       $$\text{outYaw} = dAYaw - dCompYaw,\quad \text{outPitch} = dAPitch - dCompPitch$$
+  3. **Camera World Invariance ($R = T - T2B$):**
+     - Because `FPPCameraComponent` is parented to the puppet head, offsetting the puppet by $-C$ and the camera local residual by $+C$ cancels out identically in world space:
+       $$\text{CamWorld} = T2B + R = (T2A - C) + (T - T2A + C) = T$$
+       The camera gaze remains 100% rock-solid in world space on mouse gaze $T$, with zero drift or wobble.
+  4. **State Gating:**
+     - Active compensation tracks barrel offset during `HIP` and `ADS`.
+     - During `RELOAD`, `SPRINT`, `SAFE`, or when holstered, target offset is commanded to `(0.0, 0.0)` so compensation smoothly winds down to zero, preventing the compensator from fighting weapon handling animations.
+- implementation:
+  1. In `src/Hooks/InputHook.hpp` and `src/Hooks/InputHook.cpp`:
+     - Added native compensation state (`s_targetCompYaw`, `s_targetCompPitch`, `s_compYaw`, `s_compPitch`, `s_displayT2BYaw`, `s_displayT2BPitch`).
+     - Added `SetBarrelOffset(aYaw, aPitch)` with $\pm 15.0^\circ$ safety clamping.
+     - Integrated $dC$ calculation and updated engine look integrator feed and camera residual in `ProcessMouseAim`.
+  2. In `src/Main.cpp`:
+     - Registered RTTI native functions: `DR_SetBarrelOffset(yaw, pitch)`, `DR_GetCompYaw()`, `DR_GetCompPitch()`, `DR_GetT2BYaw()`, `DR_GetT2BPitch()`.
+  3. Recompiled `DetachedReticle.dll` and deployed to `red4ext/plugins/DetachedReticle/DetachedReticle.dll` and `E:\Cyberpunk 2077\red4ext\plugins\DetachedReticle\DetachedReticle.dll`.
+  4. In `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Added `Config.activeAimOffset = true`.
+     - Added per-frame active barrel offset feeding to `Game.DR_SetBarrelOffset(diffYaw, diffPitch)` during `HIP` and `ADS`.
+     - Added ImGui overlay checkbox, live status telemetry, and NativeSettings integration.
+     - Added `DetachedReticle.SetActiveAimOffset(val)` modular option.
+     - Deployed updated `init.lua` to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
+- diagnostic telemetry & anomaly watchdogs:
+  1. `[T2B_OFFSET_COMP] TargetErr=(dYaw:%+.2f deg, dPitch:%+.2f deg) | CompApplied=(C_yaw:%+.2f deg, C_pitch:%+.2f deg) | T2A_Aim=(Yaw:%.2f, Pitch:%.2f) | T2B_Body=(Yaw:%.2f, Pitch:%.2f) | Residual=(rYaw:%.4f, rPitch:%.4f)`
+  2. `[WARN][T2B_CLAMP]`: Triggers if compensation reaches clamp limit ($\ge 14.5^\circ$).
+  3. `[WARN][T2B_NAN]`: Triggers if NaN / Inf is detected in any compensation variable.
+  4. `[WARN][T2B_EXCESSIVE_OFFSET]`: Triggers if measured barrel offset exceeds expected bounds ($> 25.0^\circ$).
+  5. `[WARN][T2B_RESIDUAL_HIGH]`: Triggers if camera residual exceeds expected bounds ($> 70.0^\circ$).
+  6. `[WARN][T2B_CONVERGENCE_STALL]`: Triggers if resting in hipfire for $> 120$ frames (~2 seconds) and reticle screen distance remains $> 40\text{ px}$.
+(user test timestamp: 2026-10-29 17:13:04 +0700: user confirmed yaw stabilization aligns with aiming direction; requested faster yaw settling, pitch fine-tuning across guns, and smooth ease-in ease-out return of T2B to T2A during unholster/holster to eliminate camera snap)
+
+# iteration 31
+- requirement:
+  1. Faster yaw stabilization toward the aiming direction.
+  2. Eliminate vertical reticle discrepancy (reticle slightly higher or lower on some guns).
+  3. Prevent camera snapping back to T2B when unholstering / holstering by returning T2B smoothly to T2A in the middle of the transition animation using a quick ease-in ease-out movement.
+- root cause / problem analysis:
+  1. **Camera Snap on Holster / Unholster:**
+     - During holster or unholster animations, the weapon barrel points downward/sideways (`angleDeg > 12.0°` up to `100°+`), which spiked target compensation to the clamp limit ($\pm 15.0^\circ$).
+     - When fully holstered, `isArmed` became false in a single frame, immediately disabling native smoothing and snapping the camera local transform to `baselineRot` (0 residual). Because the puppet body was left at $T2B = T2A - C$, the camera abruptly snapped from $T2A$ to $T2B$ by $C$ degrees.
+     - On unholstering, the system started from $T2B$, and the draw animation angles again caused sudden jerks.
+  2. **Pitch Divergence across Weapon Types:**
+     - Different weapon models (pistols vs shotguns vs HMGs) have different vertical offsets and sight heights relative to eye level, creating parallax at different engagement ranges.
+     - Previously, `diffPitch` was calculated from world spherical angles `gunPitch - aPitch`, which did not match the camera view coordinate frame and lacked closed-loop screen feedback.
+  3. **Slower Yaw Settling:**
+     - Previous `compRate = 2.0 s^-1` had a time constant of $\tau = 0.5\text{s}$, taking ~1.5s to fully settle.
+- solution / architecture:
+  1. **Quick Ease-In Ease-Out Return to T2A ($C \to 0$) during Transitions:**
+     - Added native `StartReturnToT2A(duration = 0.30s)` and `IsReturningToT2A()` in `InputHook`.
+     - Uses a cubic smoothstep curve $S(u) = 3u^2 - 2u^3$ where $u = \text{clamp}(t / T_{\text{trans}}, 0.0, 1.0)$.
+     - At $u = 0$, velocity is 0 (smooth ease-in); at $u = 0.5$, peak velocity; at $u = 1.0$, velocity is 0 (smooth ease-out).
+     - Each frame: $dComp = C_{\text{target}}(u) - C_{\text{previous}}$, outputting smooth deltas to the puppet body look integrator while counter-rotating the camera local residual.
+     - Camera gaze remains 100% frozen in world space on $T2A$ throughout the entire transition.
+     - By the middle/end of the animation, $T2B$ has smoothly rejoined $T2A$, and $C = 0$.
+     - In `init.lua`, decoupled camera mode remains active while `IsReturningToT2A()` is true even if `isArmed` becomes false, eliminating any single-frame camera snap.
+     - During unholstering (draw animation), $C$ is held at 0 ($T2B == T2A$) until the weapon enters ready firing stance (`angleDeg < 12.0°`), preventing wild draw angles from affecting compensation.
+  2. **Faster Yaw Stabilization:**
+     - Increased resting settling rate `compRate` from `2.0 s^-1` to `4.5 s^-1`.
+     - Increased single-frame delta clamp from `1.0°` to `2.5°`.
+  3. **Camera-Relative Pitch Lag & Screen-Space Feedback Trim:**
+     - Reads exact camera-relative barrel angles `yawLagDeg` and `pitchLagDeg` from `DetachedAimSystem`.
+     - Applies subtle screen-space feedback trim ($\pm 3.0^\circ$ bounded nudge proportional to `screenOffset`):
+       $$\text{diffPitch} = \text{pitchLagDeg} - \text{clamp}(\text{scrY} \times 0.03, -3.0, 3.0)$$
+       $$\text{diffYaw} = \text{yawLagDeg} + \text{clamp}(\text{scrX} \times 0.03, -3.0, 3.0)$$
+     - Closes the loop in screen space, pulling the reticle directly onto the center diamond vertically and horizontally on all weapon models.
+- implementation:
+  1. `src/Hooks/InputHook.hpp` & `src/Hooks/InputHook.cpp`:
+     - Added `StartReturnToT2A(duration)` and `IsReturningToT2A()`.
+     - Implemented cubic smoothstep ease-in ease-out return loop in `ProcessMouseAim`.
+     - Increased settling rate to `4.5 s^-1` and delta clamp to `2.5°`.
+  2. `src/Main.cpp`:
+     - Registered RTTI global functions: `DR_StartReturnToT2A(duration)` and `DR_IsReturningToT2A()`.
+  3. Recompiled `DetachedReticle.dll` and deployed to `red4ext/plugins/DetachedReticle/DetachedReticle.dll` and `E:\Cyberpunk 2077\red4ext\plugins\DetachedReticle\DetachedReticle.dll`.
+  4. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Added `isReturning` check to `shouldBeActive` to preserve continuity across holster/unholster.
+     - Added `isHolsteringOrDrawing` detection triggering `DR_StartReturnToT2A(0.30)`.
+     - Integrated `aimSys:GetPitchLagDeg()`, `aimSys:GetYawLagDeg()`, and screen-space trim.
+     - Deployed updated `init.lua` to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
+- status: tested, broken, iteration 31 solution is not working because it undo the previous MVPs. implementation of iteration 31 requirement from iteration 30 state is advised.
+
 # next iteration above this line
 
 ### Findings Writing Rules:
