@@ -139,6 +139,20 @@ void InputHook::SetBarrelOffset(float aYaw, float aPitch) {
     s_targetCompPitch = std::clamp(aPitch, -15.0f, 15.0f);
 }
 
+void InputHook::SetCompParams(float aSpeedSettled, float aSpeedMoving, float aMaxSpeed, float aGapThreshold, float aMinSpeed) {
+    s_compSpeedSettled = (aSpeedSettled > 0.1f) ? aSpeedSettled : 0.1f;
+    s_compSpeedMoving = (aSpeedMoving > 0.1f) ? aSpeedMoving : 0.1f;
+    s_compMaxSpeed = (aMaxSpeed > 10.0f) ? aMaxSpeed : 10.0f;
+    s_compGapThreshold = (aGapThreshold > 0.1f) ? aGapThreshold : 0.1f;
+    s_compMinSpeed = (aMinSpeed >= 0.0f) ? aMinSpeed : 0.0f;
+}
+
+float InputHook::GetCompSpeedSettled() { return s_compSpeedSettled; }
+float InputHook::GetCompSpeedMoving() { return s_compSpeedMoving; }
+float InputHook::GetCompMaxSpeed() { return s_compMaxSpeed; }
+float InputHook::GetCompGapThreshold() { return s_compGapThreshold; }
+float InputHook::GetCompMinSpeed() { return s_compMinSpeed; }
+
 void InputHook::SetSmoothing(float aLambda, int32_t aMode, float aMaxDiv, float aDeadzone, bool aEnabled) {
     s_lambda = aLambda;
     s_mode = aMode;
@@ -206,18 +220,34 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
     s_aimPitch = std::clamp(s_aimPitch, -85.0f, 85.0f);
 
     // 7. Tier 2B Active Barrel Offset Compensation:
-    // When dynamic gap is large (flicking), rate is 1.0 s^-1 so T2A handles swing weight.
-    // When dynamic gap settles (< 5.0 deg), rate increases to 4.5 s^-1 for fast, snappy alignment.
-    float compRate = 4.5f;
-    if (std::abs(gapYaw) > 5.0f || std::abs(gapPitch) > 5.0f) {
-        compRate = 1.0f;
+    // When dynamic gap is large (flicking), rate uses s_compSpeedMoving so T2A handles swing weight.
+    // When dynamic gap settles (< s_compGapThreshold), rate increases to s_compSpeedSettled for fast, snappy alignment.
+    float compRate = s_compSpeedSettled;
+    if (std::abs(gapYaw) > s_compGapThreshold || std::abs(gapPitch) > s_compGapThreshold) {
+        compRate = s_compSpeedMoving;
     }
     float compFactor = 1.0f - std::exp(-compRate * dt);
-    float dCompYaw = (s_targetCompYaw - s_compYaw) * compFactor;
-    float dCompPitch = (s_targetCompPitch - s_compPitch) * compFactor;
+    float errYaw = s_targetCompYaw - s_compYaw;
+    float errPitch = s_targetCompPitch - s_compPitch;
 
-    dCompYaw = std::clamp(dCompYaw, -2.5f, 2.5f);
-    dCompPitch = std::clamp(dCompPitch, -2.5f, 2.5f);
+    float dCompYaw = errYaw * compFactor;
+    float dCompPitch = errPitch * compFactor;
+
+    // Minimum angular speed to prevent asymptotic tail stall ("slowing down too soon")
+    if (s_compMinSpeed > 0.0f) {
+        float minStep = s_compMinSpeed * dt;
+        if (std::abs(errYaw) > 0.005f && std::abs(dCompYaw) < minStep) {
+            dCompYaw = std::copysign(std::min(minStep, std::abs(errYaw)), errYaw);
+        }
+        if (std::abs(errPitch) > 0.005f && std::abs(dCompPitch) < minStep) {
+            dCompPitch = std::copysign(std::min(minStep, std::abs(errPitch)), errPitch);
+        }
+    }
+
+    // Framerate-independent maximum angular velocity clamp
+    float maxStep = s_compMaxSpeed * dt;
+    dCompYaw = std::clamp(dCompYaw, -maxStep, maxStep);
+    dCompPitch = std::clamp(dCompPitch, -maxStep, maxStep);
 
     s_compYaw += dCompYaw;
     s_compPitch += dCompPitch;

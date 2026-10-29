@@ -1,6 +1,14 @@
 {
+  "enabled": true,
+  "activeAimOffset": true,
   "catchUpSpeed": 6.0,
   "deadzone": 0.0,
   "maxDivergence": 65.0,
-  "smoothingMode": "exponential"
+  "smoothingMode": "exponential",
+  "compSpeedSettled": 12.0,
+  "compSpeedMoving": 4.0,
+  "compMaxSpeed": 240.0,
+  "compMinSpeed": 6.0,
+  "compGapThreshold": 3.0,
+  "debugLogging": false
 }

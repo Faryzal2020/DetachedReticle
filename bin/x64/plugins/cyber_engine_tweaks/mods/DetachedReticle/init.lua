@@ -11,6 +11,12 @@ local Config = {
     deadzone = 0.0,               -- Degrees: zero deadzone by default (turns immediately)
     maxDivergence = 65.0,         -- Degrees: maximum angular separation before pulling body
     smoothingMode = "exponential",-- "exponential", "linear", "spring", or "power"
+    -- Tier 2B Barrel Compensation Parameters (Snappy by default)
+    compSpeedSettled = 12.0,      -- T2B compensation speed when settled (default: 12.0, old: 4.5)
+    compSpeedMoving = 4.0,        -- T2B compensation speed while swinging mouse (default: 4.0, old: 1.0)
+    compMaxSpeed = 240.0,         -- T2B maximum angular speed in deg/s (default: 240.0 deg/s)
+    compMinSpeed = 6.0,           -- T2B minimum angular speed in deg/s (prevents early slowdown tail crawl, default: 6.0)
+    compGapThreshold = 3.0,       -- Mouse gap threshold in degrees between moving and settled (default: 3.0, old: 5.0)
     debugLogging = false          -- Verbose telemetry logging to DetachedReticle.log
 }
 
@@ -99,10 +105,27 @@ local function LoadConfig()
                 if data.deadzone ~= nil then Config.deadzone = tonumber(data.deadzone) or Config.deadzone end
                 if data.maxDivergence ~= nil then Config.maxDivergence = tonumber(data.maxDivergence) or Config.maxDivergence end
                 if data.smoothingMode ~= nil then Config.smoothingMode = tostring(data.smoothingMode):lower() end
+                if data.compSpeedSettled ~= nil then Config.compSpeedSettled = tonumber(data.compSpeedSettled) or Config.compSpeedSettled end
+                if data.compSpeedMoving ~= nil then Config.compSpeedMoving = tonumber(data.compSpeedMoving) or Config.compSpeedMoving end
+                if data.compMaxSpeed ~= nil then Config.compMaxSpeed = tonumber(data.compMaxSpeed) or Config.compMaxSpeed end
+                if data.compMinSpeed ~= nil then Config.compMinSpeed = tonumber(data.compMinSpeed) or Config.compMinSpeed end
+                if data.compGapThreshold ~= nil then Config.compGapThreshold = tonumber(data.compGapThreshold) or Config.compGapThreshold end
                 if data.debugLogging ~= nil then Config.debugLogging = (data.debugLogging == true) end
             end
         end
     end
+end
+
+local function SyncCompParams()
+    pcall(function()
+        Game.DR_SetCompParams(
+            Config.compSpeedSettled,
+            Config.compSpeedMoving,
+            Config.compMaxSpeed,
+            Config.compGapThreshold,
+            Config.compMinSpeed
+        )
+    end)
 end
 
 local function SaveConfig()
@@ -250,6 +273,58 @@ local function SetupNativeSettings()
                 end
             )
 
+            ns.addSubcategory("/detachedReticle/compensation", "Tier 2B Gun Alignment Speed & Snappiness")
+
+            ns.addRangeFloat(
+                "/detachedReticle/compensation",
+                "Settled Alignment Speed",
+                "Speed at which the gun aligns to center when mouse movement settles (default: 12.0, old: 4.5)",
+                1.0, 30.0, 0.5, "%.1f", Config.compSpeedSettled, 12.0,
+                function(val)
+                    DetachedReticle.SetCompSpeedSettled(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/compensation",
+                "Moving Alignment Speed",
+                "Speed at which the gun aligns while swinging or moving mouse (default: 4.0, old: 1.0)",
+                0.5, 20.0, 0.5, "%.1f", Config.compSpeedMoving, 4.0,
+                function(val)
+                    DetachedReticle.SetCompSpeedMoving(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/compensation",
+                "Max Angular Speed",
+                "Maximum angular speed for barrel offset compensation in degrees per second (default: 240.0 deg/s)",
+                30.0, 600.0, 10.0, "%.0f deg/s", Config.compMaxSpeed, 240.0,
+                function(val)
+                    DetachedReticle.SetCompMaxSpeed(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/compensation",
+                "Min Tail Angular Speed",
+                "Minimum speed to snap the last degrees of alignment and prevent early slowdown (default: 6.0 deg/s)",
+                0.0, 30.0, 0.5, "%.1f deg/s", Config.compMinSpeed, 6.0,
+                function(val)
+                    DetachedReticle.SetCompMinSpeed(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/compensation",
+                "Dynamic Gap Threshold",
+                "Mouse divergence angle threshold switching between moving and settled speeds (default: 3.0 deg, old: 5.0 deg)",
+                0.5, 15.0, 0.5, "%.1f deg", Config.compGapThreshold, 3.0,
+                function(val)
+                    DetachedReticle.SetCompGapThreshold(val)
+                end
+            )
+
             Log("[SETTINGS] NativeSettings tab '/detachedReticle' successfully initialized.")
         end
     end)
@@ -260,8 +335,9 @@ end
 
 registerForEvent("onInit", function()
     LoadConfig()
-    Log(string.format("Initializing Decoupled Aiming System v%s | Enabled=%s | Speed=%.1f | Deadzone=%.1f deg | MaxDiv=%.1f deg | Algorithm=%s",
-        DetachedReticle.version, tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode))
+    SyncCompParams()
+    Log(string.format("Initializing Decoupled Aiming System v%s | Enabled=%s | Speed=%.1f | Deadzone=%.1f deg | MaxDiv=%.1f deg | CompSettled=%.1f | CompMoving=%.1f | CompMax=%.0f deg/s",
+        DetachedReticle.version, tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed))
 
     SetupNativeSettings()
 end)
@@ -356,6 +432,7 @@ registerForEvent("onUpdate", function(delta)
             -- Reset native chase state with initial pitch and activate native look smoothing
             pcall(function() Game.DR_ResetChasePitch(initPitch) end)
             pcall(function() Game.DR_SetSmoothing(Config.catchUpSpeed, 0, Config.maxDivergence, Config.deadzone, true) end)
+            SyncCompParams()
 
             -- Ensure heading lock is FALSE so engine actuates native chase deltas
             pcall(function() Game.DR_SetHeadingLocked(fpp, false) end)
@@ -751,6 +828,40 @@ registerForEvent("onDraw", function()
         end
         ImGui.NewLine()
 
+        -- Tier 2B Gun Alignment (T2B-to-T2A) Snappiness Sliders
+        ImGui.Separator()
+        ImGui.Text("Tier 2B Gun Alignment (T2B-to-T2A) Snappiness:")
+
+        local newCompSettled, compSettledChanged = ImGui.SliderFloat("Settled Speed", Config.compSpeedSettled, 1.0, 30.0, "%.1f")
+        if compSettledChanged then DetachedReticle.SetCompSpeedSettled(newCompSettled) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Speed at which the gun aligns to center when resting/settling.\nDefault: 12.0 (Old hardcoded: 4.5)")
+        end
+
+        local newCompMoving, compMovingChanged = ImGui.SliderFloat("Moving Speed", Config.compSpeedMoving, 0.5, 20.0, "%.1f")
+        if compMovingChanged then DetachedReticle.SetCompSpeedMoving(newCompMoving) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Speed at which the gun aligns while swinging mouse.\nDefault: 4.0 (Old hardcoded: 1.0)")
+        end
+
+        local newCompMax, compMaxChanged = ImGui.SliderFloat("Max Angular Speed", Config.compMaxSpeed, 30.0, 600.0, "%.0f deg/s")
+        if compMaxChanged then DetachedReticle.SetCompMaxSpeed(newCompMax) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Maximum angular speed in deg/s for barrel offset compensation.\nDefault: 240 deg/s")
+        end
+
+        local newCompMin, compMinChanged = ImGui.SliderFloat("Min Tail Speed", Config.compMinSpeed, 0.0, 30.0, "%.1f deg/s")
+        if compMinChanged then DetachedReticle.SetCompMinSpeed(newCompMin) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Minimum speed to prevent asymptotic tail slowdown and snap cleanly into center.\nDefault: 6.0 deg/s")
+        end
+
+        local newCompThresh, compThreshChanged = ImGui.SliderFloat("Gap Threshold", Config.compGapThreshold, 0.5, 15.0, "%.1f deg")
+        if compThreshChanged then DetachedReticle.SetCompGapThreshold(newCompThresh) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Angle threshold in degrees between moving and settled alignment speeds.\nDefault: 3.0 deg (Old hardcoded: 5.0 deg)")
+        end
+
         -- Debug Telemetry Checkbox
         local newDebug, debugChanged = ImGui.Checkbox("Verbose Debug Logging", Config.debugLogging)
         if debugChanged then
@@ -837,6 +948,41 @@ DetachedReticle.SetSmoothingMode = function(mode)
     end
 end
 
+DetachedReticle.SetCompSpeedSettled = function(val)
+    Config.compSpeedSettled = math.max(0.1, tonumber(val) or 12.0)
+    SaveConfig()
+    SyncCompParams()
+    Log(string.format("[OPTIONS] compSpeedSettled set to: %.1f", Config.compSpeedSettled))
+end
+
+DetachedReticle.SetCompSpeedMoving = function(val)
+    Config.compSpeedMoving = math.max(0.1, tonumber(val) or 4.0)
+    SaveConfig()
+    SyncCompParams()
+    Log(string.format("[OPTIONS] compSpeedMoving set to: %.1f", Config.compSpeedMoving))
+end
+
+DetachedReticle.SetCompMaxSpeed = function(val)
+    Config.compMaxSpeed = math.max(10.0, tonumber(val) or 240.0)
+    SaveConfig()
+    SyncCompParams()
+    Log(string.format("[OPTIONS] compMaxSpeed set to: %.1f deg/s", Config.compMaxSpeed))
+end
+
+DetachedReticle.SetCompMinSpeed = function(val)
+    Config.compMinSpeed = math.max(0.0, tonumber(val) or 6.0)
+    SaveConfig()
+    SyncCompParams()
+    Log(string.format("[OPTIONS] compMinSpeed set to: %.1f deg/s", Config.compMinSpeed))
+end
+
+DetachedReticle.SetCompGapThreshold = function(val)
+    Config.compGapThreshold = math.max(0.1, tonumber(val) or 3.0)
+    SaveConfig()
+    SyncCompParams()
+    Log(string.format("[OPTIONS] compGapThreshold set to: %.1f deg", Config.compGapThreshold))
+end
+
 DetachedReticle.SetDebugLogging = function(val)
     Config.debugLogging = val and true or false
     SaveConfig()
@@ -844,8 +990,9 @@ DetachedReticle.SetDebugLogging = function(val)
 end
 
 DetachedReticle.GetOptions = function()
-    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s",
-        tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode))
+    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg",
+        tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode,
+        Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.compMinSpeed, Config.compGapThreshold))
     return Config
 end
 

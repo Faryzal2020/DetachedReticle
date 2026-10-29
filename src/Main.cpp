@@ -139,6 +139,62 @@ void DR_GetT2BPitch(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame
     if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetT2BPitch();
 }
 
+void DR_SetCompParams(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(aOut);
+    RED4EXT_UNUSED_PARAMETER(a4);
+
+    float speedSettled = 12.0f;
+    float speedMoving = 4.0f;
+    float maxAngularSpeed = 240.0f;
+    float gapThreshold = 3.0f;
+    float minAngularSpeed = 6.0f;
+
+    RED4ext::GetParameter(aFrame, &speedSettled);
+    RED4ext::GetParameter(aFrame, &speedMoving);
+    RED4ext::GetParameter(aFrame, &maxAngularSpeed);
+    RED4ext::GetParameter(aFrame, &gapThreshold);
+    RED4ext::GetParameter(aFrame, &minAngularSpeed);
+    aFrame->code++; // skip ParamEnd
+
+    DetachedReticle::InputHook::SetCompParams(speedSettled, speedMoving, maxAngularSpeed, gapThreshold, minAngularSpeed);
+}
+
+void DR_GetCompSpeedSettled(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetCompSpeedSettled();
+}
+
+void DR_GetCompSpeedMoving(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetCompSpeedMoving();
+}
+
+void DR_GetCompMaxSpeed(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetCompMaxSpeed();
+}
+
+void DR_GetCompGapThreshold(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetCompGapThreshold();
+}
+
+void DR_GetCompMinSpeed(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetCompMinSpeed();
+}
+
 
 void DR_DrainEvents(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
     RED4EXT_UNUSED_PARAMETER(aContext);
@@ -281,12 +337,26 @@ void PostRegisterTypes() {
     regGetter("DR_GetCompPitch", &DR_GetCompPitch);
     regGetter("DR_GetT2BYaw", &DR_GetT2BYaw);
     regGetter("DR_GetT2BPitch", &DR_GetT2BPitch);
+    regGetter("DR_GetCompSpeedSettled", &DR_GetCompSpeedSettled);
+    regGetter("DR_GetCompSpeedMoving", &DR_GetCompSpeedMoving);
+    regGetter("DR_GetCompMaxSpeed", &DR_GetCompMaxSpeed);
+    regGetter("DR_GetCompGapThreshold", &DR_GetCompGapThreshold);
+    regGetter("DR_GetCompMinSpeed", &DR_GetCompMinSpeed);
 
     auto funcSetBarrelOffset = RED4ext::CGlobalFunction::Create("DR_SetBarrelOffset", "DR_SetBarrelOffset", &DR_SetBarrelOffset);
     funcSetBarrelOffset->flags = flags;
     funcSetBarrelOffset->AddParam("Float", "yaw");
     funcSetBarrelOffset->AddParam("Float", "pitch");
     rtti->RegisterFunction(funcSetBarrelOffset);
+
+    auto funcSetCompParams = RED4ext::CGlobalFunction::Create("DR_SetCompParams", "DR_SetCompParams", &DR_SetCompParams);
+    funcSetCompParams->flags = flags;
+    funcSetCompParams->AddParam("Float", "speedSettled");
+    funcSetCompParams->AddParam("Float", "speedMoving");
+    funcSetCompParams->AddParam("Float", "maxAngularSpeed");
+    funcSetCompParams->AddParam("Float", "gapThreshold");
+    funcSetCompParams->AddParam("Float", "minAngularSpeed");
+    rtti->RegisterFunction(funcSetCompParams);
 
 
     auto funcDrain = RED4ext::CGlobalFunction::Create("DR_DrainEvents", "DR_DrainEvents", &DR_DrainEvents);

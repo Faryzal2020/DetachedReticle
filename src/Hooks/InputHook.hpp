@@ -30,6 +30,12 @@ public:
     static float GetCompPitch();
     static float GetT2BYaw();
     static float GetT2BPitch();
+    static void SetCompParams(float aSpeedSettled, float aSpeedMoving, float aMaxSpeed, float aGapThreshold, float aMinSpeed);
+    static float GetCompSpeedSettled();
+    static float GetCompSpeedMoving();
+    static float GetCompMaxSpeed();
+    static float GetCompGapThreshold();
+    static float GetCompMinSpeed();
 
     // Sensitivity Mult Direct Memory Access (offsets 0x498, 0x49C on gameFPPCameraComponent)
     static void SetSensitivityMult(RED4ext::IScriptable* aFpp, float aMultX, float aMultY);
@@ -68,6 +74,13 @@ public:
     static inline float s_compPitch{ 0.0f };
     static inline float s_displayT2BYaw{ 0.0f };
     static inline float s_displayT2BPitch{ 0.0f };
+
+    // Tier 2B Compensation Parameters
+    static inline float s_compSpeedSettled{ 12.0f };
+    static inline float s_compSpeedMoving{ 4.0f };
+    static inline float s_compMaxSpeed{ 240.0f };
+    static inline float s_compGapThreshold{ 3.0f };
+    static inline float s_compMinSpeed{ 6.0f };
 
     static void ResetChase(float aInitialPitch = 0.0f);
     static void ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, float& outYaw, float& outPitch);
