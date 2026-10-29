@@ -1,6 +1,0 @@
-# TweakXL configuration for DetachedReticle
-# Replaces HMG projectile attack with hitscan Bullet_GameEffect (ExplodingBulletMediumEffect)
-# This routes HMG bullets through gameEffectObjectProvider_PhysicalRay, allowing physical muzzle redirection.
-
-Attacks.ExplodingBulletHMG:
-  playerAttack: Attacks.ExplodingBulletMediumEffect

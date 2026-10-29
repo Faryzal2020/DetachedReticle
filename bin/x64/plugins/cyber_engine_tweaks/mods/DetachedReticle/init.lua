@@ -16,7 +16,7 @@ local Config = {
     t2bThreshold = 5.0,           -- Tier 2B: Dynamic gap threshold (deg) between moving and settling
     t2bMaxSpeed = 240.0,          -- Tier 2B: Max angular speed (deg/s)
     t2bMinSpeed = 3.0,            -- Tier 2B: Min angular speed (deg/s) preventing crawling too soon
-    debugLogging = false          -- Verbose telemetry logging to DetachedReticle.log
+    debugLogging = true           -- Verbose telemetry logging to DetachedReticle.log
 }
 
 local function SyncT2BParams()
@@ -182,6 +182,26 @@ local function quatMultiply(a, b)
     )
 end
 
+local function GetActiveCameraPitchDeg()
+    local pitch = 0.0
+    pcall(function()
+        local camSys = Game.GetCameraSystem()
+        if camSys then
+            local fwd = camSys:GetActiveCameraForward()
+            if fwd then
+                local fx = fwd.x or fwd.X or 0.0
+                local fy = fwd.y or fwd.Y or 0.0
+                local fz = fwd.z or fwd.Z or 0.0
+                local xy = math.sqrt(fx * fx + fy * fy)
+                if xy > 0.0001 or math.abs(fz) > 0.0001 then
+                    pitch = math.deg(math.atan2(fz, xy))
+                end
+            end
+        end
+    end)
+    return pitch
+end
+
 local function SetupNativeSettings()
     if DetachedReticle.nativeSettingsInitAttempted then return true end
 
@@ -326,30 +346,41 @@ local function SetupNativeSettings()
     return ok
 end
 
+DetachedReticle.inSession = false
+
 registerForEvent("onInit", function()
     LoadConfig()
     SyncT2BParams()
     Log(string.format("Initializing Decoupled Aiming System v%s | Enabled=%s | Speed=%.1f | Deadzone=%.1f deg | MaxDiv=%.1f deg | Algorithm=%s | T2BSettling=%.1f | T2BMaxSpd=%.0f deg/s",
         DetachedReticle.version, tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode, Config.t2bSettlingRate, Config.t2bMaxSpeed))
 
+    pcall(function()
+        Observe('PlayerPuppet', 'OnGameAttached', function(self)
+            DetachedReticle.inSession = true
+        end)
+
+        Observe('PlayerPuppet', 'OnDetach', function(self)
+            DetachedReticle.inSession = false
+            pcall(function() Game.DR_SetSmoothing(Config.catchUpSpeed, 0, Config.maxDivergence, Config.deadzone, false) end)
+            pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
+        end)
+    end)
+
+    local player = Game.GetPlayer()
+    if player and player:IsAttached() then
+        DetachedReticle.inSession = true
+    end
+
     SetupNativeSettings()
 end)
 
 registerForEvent("onUpdate", function(delta)
-    local srh = nil
-    pcall(function() srh = Game.GetSystemRequestsHandler() end)
-    if srh then
-        local isPre = false
-        local isPaused = false
-        pcall(function() isPre = srh:IsPreGame() end)
-        pcall(function() isPaused = srh:IsGamePaused() end)
-        if isPre or isPaused then
-            return
-        end
-    end
-
     local player = Game.GetPlayer()
-    if not player or not player:IsAttached() then return end
+    if not player or not player:IsAttached() then
+        DetachedReticle.inSession = false
+        return
+    end
+    DetachedReticle.inSession = true
 
     if not DetachedReticle.nativeSettingsInitAttempted then
         SetupNativeSettings()
@@ -363,8 +394,7 @@ registerForEvent("onUpdate", function(delta)
     pcall(function()
         isDual = GameObject.IsDualWielding(player)
     end)
-    local isWeaponAttached = weapon and (not weapon.IsAttached or weapon:IsAttached())
-    local isArmed = weapon and isWeaponAttached and not weapon:IsMelee() and not isDual
+    local isArmed = weapon and not weapon:IsMelee() and not isDual
 
     -- Residual and compensation settling state:
     -- Keeps decoupled camera active until compensation and residual smoothly reach 0.0,
@@ -418,23 +448,8 @@ registerForEvent("onUpdate", function(delta)
             local okHead, headLocked = pcall(function() return Game.DR_GetHeadingLocked(fpp) end)
             DetachedReticle.origHeadingLocked = (okHead and headLocked) or false
 
-            -- Get initial camera pitch before chase begins
-            local initPitch = 0.0
-            pcall(function()
-                local aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
-                if aimSys then
-                    local fwd = aimSys:GetCameraForward()
-                    if fwd and (fwd.x ~= 0 or fwd.y ~= 0 or fwd.z ~= 0) then
-                        local fx = fwd.x or fwd.X or 0.0
-                        local fy = fwd.y or fwd.Y or 0.0
-                        local fz = fwd.z or fwd.Z or 0.0
-                        local xy = math.sqrt(fx * fx + fy * fy)
-                        if xy > 0.0001 or math.abs(fz) > 0.0001 then
-                            initPitch = math.deg(math.atan2(fz, xy))
-                        end
-                    end
-                end
-            end)
+            -- Get initial camera pitch before chase begins directly from CameraSystem
+            local initPitch = GetActiveCameraPitchDeg()
 
             -- Reset native chase state with initial pitch and activate native look smoothing
             pcall(function() Game.DR_ResetChasePitch(initPitch) end)

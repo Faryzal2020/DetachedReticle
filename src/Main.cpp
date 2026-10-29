@@ -405,9 +405,6 @@ void PostRegisterTypes() {
     funcGetHeading->AddParam("handle:IScriptable", "fpp");
     funcGetHeading->SetReturnType("Bool");
     rtti->RegisterFunction(funcGetHeading);
-
-    // Route A: RTTI inspection across camera and player puppet classes
-    DetachedReticle::InputHook::ProbeRTTI();
 }
 
 RED4EXT_C_EXPORT bool RED4EXT_CALL Main(const RED4ext::v1::PluginHandle aHandle, const RED4ext::v1::EMainReason aReason, const RED4ext::v1::Sdk* aSdk) {

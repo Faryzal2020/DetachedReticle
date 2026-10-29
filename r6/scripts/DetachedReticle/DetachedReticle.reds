@@ -133,12 +133,28 @@ protected cb func OnPlayerAttach(playerGameObject: ref<GameObject>) -> Bool {
 @wrapMethod(gameuiCrosshairContainerController)
 protected cb func OnWeaponSwap(value: Variant) -> Bool {
     wrappedMethod(value);
-    if !IsDefined(this.m_cameraCrosshair) {
-        this.InitCameraCrosshair();
-    } else if !IsDefined(this.m_detachedTickProxy) || !this.m_detachedTickProxy.IsPlaying() {
-        this.StartDetachedReticleTick();
+    let player: ref<PlayerPuppet> = this.GetPlayerControlledObject() as PlayerPuppet;
+    let weapon: ref<WeaponObject> = IsDefined(player) ? GameObject.GetRightActiveWeapon(player) : null;
+    let isRanged: Bool = IsDefined(weapon) && !weapon.IsMelee();
+
+    if isRanged {
+        if !IsDefined(this.m_cameraCrosshair) {
+            this.InitCameraCrosshair();
+        } else if !IsDefined(this.m_detachedTickProxy) || !this.m_detachedTickProxy.IsPlaying() {
+            this.StartDetachedReticleTick();
+        }
+        this.UpdateDetachedAim();
+    } else {
+        if IsDefined(this.m_detachedTickProxy) {
+            this.m_detachedTickProxy.UnregisterFromAllCallbacks(inkanimEventType.OnStartLoop);
+            this.m_detachedTickProxy.Stop();
+            this.m_detachedTickProxy = null;
+        }
+        if IsDefined(this.m_cameraCrosshair) {
+            this.m_cameraCrosshair.SetVisible(false);
+        }
+        SetMuzzleAimState(new Vector4(0.0, 0.0, 0.0, 1.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), false);
     }
-    this.UpdateDetachedAim();
 }
 
 @wrapMethod(gameuiCrosshairContainerController)
@@ -255,6 +271,8 @@ private func UninitDetachedReticle() -> Void {
     if IsDefined(activeWidget) {
         activeWidget.SetTranslation(new Vector2(0.0, 0.0));
     }
+
+    SetMuzzleAimState(new Vector4(0.0, 0.0, 0.0, 1.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), false);
 }
 
 @addMethod(gameuiCrosshairContainerController)
@@ -265,14 +283,8 @@ protected cb func OnDetachedReticleTick(anim: ref<inkAnimProxy>) -> Bool {
 
 @addMethod(gameuiCrosshairContainerController)
 private func UpdateDetachedAim() -> Void {
-    let srh: ref<inkISystemRequestsHandler> = GameInstance.GetSystemRequestsHandler();
-    if IsDefined(srh) && (srh.IsPreGame() || srh.IsGamePaused()) {
-        if IsDefined(this.m_cameraCrosshair) { this.m_cameraCrosshair.SetVisible(false); }
-        return;
-    }
-
     let player: ref<PlayerPuppet> = this.GetPlayerControlledObject() as PlayerPuppet;
-    if !IsDefined(player) || !player.IsAttached() {
+    if !IsDefined(player) {
         if IsDefined(this.m_cameraCrosshair) { this.m_cameraCrosshair.SetVisible(false); }
         return;
     }
@@ -291,11 +303,17 @@ private func UpdateDetachedAim() -> Void {
     }
 
     let weapon: ref<WeaponObject> = GameObject.GetRightActiveWeapon(player);
-    if !IsDefined(weapon) || !weapon.IsAttached() || weapon.IsMelee() {
+    if !IsDefined(weapon) || weapon.IsMelee() {
         if IsDefined(this.m_cameraCrosshair) { this.m_cameraCrosshair.SetVisible(false); }
         if IsDefined(activeWidget) { activeWidget.SetTranslation(new Vector2(0.0, 0.0)); }
         if IsDefined(aimSys) {
-            aimSys.SetAimState(new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector2(0.0, 0.0), 0.0, 0.0, 0.0, false);
+            let camSys: ref<CameraSystem> = GameInstance.GetCameraSystem(player.GetGame());
+            let camTransform: Transform;
+            let camFwd3: Vector4 = new Vector4(0.0, 0.0, 0.0, 0.0);
+            if IsDefined(camSys) && camSys.GetActiveCameraWorldTransform(camTransform) {
+                camFwd3 = Vector4.Normalize(Transform.GetForward(camTransform));
+            }
+            aimSys.SetAimState(new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), camFwd3, new Vector2(0.0, 0.0), 0.0, 0.0, 0.0, false);
         }
         return;
     }
@@ -470,9 +488,8 @@ private func UpdateDetachedAim() -> Void {
 @wrapMethod(ShootEvents)
 protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<StateGameScriptInterface>) -> Void {
     let player: ref<PlayerPuppet> = scriptInterface.executionOwner as PlayerPuppet;
-    let isPlayerOwned: Bool = IsDefined(player) && player.IsPlayerControlled() && player.IsAttached();
-    let weapon: ref<WeaponObject> = isPlayerOwned ? this.GetWeaponObject(scriptInterface) : null;
-    let isDecoupledActive: Bool = isPlayerOwned && !GameObject.IsDualWielding(player) && IsDefined(weapon) && weapon.IsAttached() && !weapon.IsMelee();
+    let weapon: ref<WeaponObject> = this.GetWeaponObject(scriptInterface);
+    let isDecoupledActive: Bool = IsDefined(player) && player.IsPlayerControlled() && !GameObject.IsDualWielding(player) && IsDefined(weapon) && !weapon.IsMelee();
 
     if isDecoupledActive {
         let muzzleTransform: Transform = weapon.GetMuzzleSlotWorldTransform();
@@ -521,12 +538,6 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
     }
 
     wrappedMethod(stateContext, scriptInterface);
-
-    // Re-assert HMG attack record right after vanilla OnEnter has run GetDesiredAttackRecord and SetAttack
-    // STRICTLY PLAYER-CONTROLLED ONLY to prevent mutating NPC weapons or effectors
-    if isDecoupledActive && (weapon.IsHeavyWeapon() || EnumInt(WeaponObject.GetWeaponType(weapon.GetItemID())) == EnumInt(gamedataItemType.Wea_HeavyMachineGun)) {
-        weapon.SetAttack(t"Attacks.ExplodingBulletMediumEffect");
-    }
 }
 
 // Intercept attack resolution for Heavy Machine Guns so they use the unified
@@ -535,7 +546,7 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
 @wrapMethod(WeaponTransition)
 protected func GetDesiredAttackRecord(stateContext: ref<StateContext>, scriptInterface: ref<StateGameScriptInterface>) -> ref<Attack_Record> {
     let player: ref<PlayerPuppet> = scriptInterface.executionOwner as PlayerPuppet;
-    if !IsDefined(player) || !player.IsPlayerControlled() || !player.IsAttached() {
+    if !IsDefined(player) || !player.IsPlayerControlled() {
         return wrappedMethod(stateContext, scriptInterface);
     }
 
@@ -546,6 +557,7 @@ protected func GetDesiredAttackRecord(stateContext: ref<StateContext>, scriptInt
             return hmgAttack;
         }
     }
+
     return wrappedMethod(stateContext, scriptInterface);
 }
 
