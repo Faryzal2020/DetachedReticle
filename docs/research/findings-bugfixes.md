@@ -316,9 +316,98 @@ Post-MVP 2 research, bug diagnoses, and iteration tracking for polish and edge-c
   7. `docs/research/convergence-design.md`: Documented parallax decision.
 - status: tested 2026-10-29 18:40, everything works and looks good.
 
+# iteration 33
+- date: 2026-11-02 18:24 +0700
+- requirement:
+  1. Fix yaw integral trim positive feedback sign inversion (Round 8 §2A) so gun settles onto camera center instead of driving off-screen.
+  2. Prevent trim offset leakage between stances (hip-fire trim carrying over into ADS).
+  3. Eliminate the 0.1s camera jerk/shake when raising weapon from relaxed low-ready carry to ready firing stance.
+  4. Surface direct Trim telemetry in `[T2B_OFFSET_COMP]`.
+- root cause / problem analysis:
+  1. **Positive Feedback in `trimYaw`:** `trimYaw = trimYaw + scrX * 0.005 * dt` in `init.lua:607`. Positive `scrX` (reticle right) increased `trimYaw`, commanding $+C$ yaw compensation, rotating puppet $-dC$ (right), moving the gun further right until hitting the $+3.0^\circ$ clamp.
+  2. **Trim Stance Leakage:** Trim was only reset on weapon change (`DetachedReticle.lastTrimWeapon`), not on `HIP` <-> `ADS` transitions. A $+3.0^\circ$ trim accumulated during hip-fire stayed active after entering ADS.
+  3. **Binary Ready Stance Discontinuity:** The hard threshold `isReadyStance = (|diffYaw| < 15) and (|diffPitch| < 15)` jumped from `readyWeight = 0.0` to `1.0` in a single frame as the gun raised above 15°, delivering a sudden ~14.5° step into `Game.DR_SetBarrelOffset` which yanked the puppet and camera for 0.1s.
+- solution / implementation:
+  1. **Sign Flip:** In `init.lua:607`, flipped `+ scrX * 0.005 * dt` to `- scrX * 0.005 * dt` (negative feedback). Pitch trim (`- scrY`) was verified correct in Round 8 review and kept unchanged.
+  2. **Stance Edge Trim Reset:** Added `or isADS ~= DetachedReticle.lastTrimADS` to the trim reset check, resetting `trimYaw = 0.0` and `trimPitch = 0.0` on every HIP <-> ADS transition.
+  3. **Continuous Smoothstep Gate:** Replaced the binary 15° check with a smooth cubic Hermite blend between 10° (full compensation, `readyWeight = 1.0`) and 16° (low-ready carry, `readyWeight = 0.0`):
+     $$t = \text{clamp}\left(\frac{16 - \text{maxAngle}}{6}, 0, 1\right), \quad \text{readyWeight} = t^2(3 - 2t)$$
+     Scaling target offsets by `readyWeight` provides continuous blending with zero step discontinuities or camera twitches.
+  4. **Telemetry:** Added `Trim=(Y:%+.2f, P:%+.2f)` directly to the `[T2B_OFFSET_COMP]` telemetry string in `init.lua`.
+  5. Deployed updated `init.lua` to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
+- status: deployed, awaiting in-game verification.
+
+# iteration 34
+- date: 2026-11-02 19:25 +0700
+- type: diagnostic only (no aiming behavior change)
+- finding (verified, file timestamps and hashes):
+  1. The 19:15 test session did NOT run iteration 33. At 19:00 a DLL built from uncommitted source (adds `DR_SetMinChaseSpeed`, 386048 bytes) and at 19:03 a different `init.lua` (`steadyOffsets`, `minChaseSpeed`, `catchUpSpeed=12`, `maxDivergence=25`, yaw axis pitch from `DR_GetT2BPitch`) were deployed over iteration 33. `src/` was later reverted to HEAD, leaving repo DLL and game folder out of sync with the source.
+  2. Game `config.json` carried `catchUpSpeed=12`, `maxDivergence=25` from that build; saved config overrides script defaults.
+  3. `DetachedReticle.log` 19:15:55 and 19:16:36: both activations logged `initPitch=0.00` (the known seed failure, `noted-issues.md:34`). Debug logging was off, so no other telemetry exists for that session.
+- user observations from that session (build = the 19:03 experimental build, not iteration 33):
+  1. Camera pull/shake still present when the gun enters/leaves the resting (low-ready) pose. That build held the T2B target nearly constant through resting, so this is evidence (inferred) that the shake is not caused by C changing.
+  2. New: camera roll left/right with the HMG only.
+- HMG roll hypotheses (unverified, to be classified by the [SEED] probe):
+  - H-seed: `initPitch=0.00` makes the yaw-axis pitch (`DR_GetAimPitch`) wrong by the camera pitch at activation. Roll ~ rYaw * sin(error). HMG has the largest steady rYaw (C_yaw up to ~12 deg in the 12:31 session), so it shows mainly there.
+  - H-axis: the parent frame is pitched by native pitch = T2B = A - C, while iteration 33 uses A. Error = C_pitch (HMG ~5 to 9 deg). The 19:03 build used T2B and still rolled, so H-seed is the stronger candidate.
+- changes:
+  1. Rebuilt `DetachedReticle.dll` from HEAD `src/` (385024 bytes, no `DR_SetMinChaseSpeed`), copied to `red4ext/plugins/DetachedReticle/` and the game folder. Build note: MSBuild fails with `Item has already been added ... 'https_proxy'` when both `https_proxy` and `HTTPS_PROXY` are set; clear the lowercase variants for the build process.
+  2. `init.lua` (iteration 33 logic unchanged) gained logging-only probes, all gated on `debugLogging`, logged every frame:
+     - `[P1] camYaw/camPitch` from `CameraSystem.GetActiveCameraForward()` (`cameraSystem.script:14`), `dCam`, `dBody`, `predBody = dA - dC`.
+     - `[1C] fppOverwrite`: angle between the fpp local orientation read before writing and the one written last frame (non-zero = something else wrote it).
+     - `[SEED] pitchErr = camPitch - T pitch` (steady non-zero = bad seed).
+     - `ReadyW` (iteration 33 gate weight) added to `[T2B_OFFSET_COMP]`.
+  3. Game `config.json` reset to repo defaults with `debugLogging=true`.
+- status: deployed, awaiting test (iteration 33 behavior + probes).
+
+# iteration 35
+- date: 2026-11-02 20:00 +0700
+- requirement:
+  1. Eliminate the 0.1s camera shake / jolt when weapon enters and leaves resting (low-ready) carry pose.
+  2. Eliminate the camera horizon roll left/right when swinging mouse with Heavy Machine Gun (HMG).
+- verified telemetry findings (from 19:35 test session with 21,047 logged frames):
+  1. `[1C] fppOverwrite` logged strictly 0.000 deg (peak noise 0.01-0.03 deg): the engine is NOT overwriting `fpp` transform.
+  2. `[SEED] pitchErr` logged +0.02 to +0.08 deg on Copperhead: seed pitch is accurate.
+  3. Resting Transition Jolt Diagnosis: Telemetry proved steady-state ready firing offset is only dYaw ~ +0.58 deg, dPitch ~ +0.50 deg. The 10-16 deg gate in Iteration 33 chased the arm-lowering animation as it swept through 2-15 deg, ramping CompApplied (C_yaw) from 0.56 up to 3.57 deg. When maxAngle exceeded 16 deg, readyWeight hit 0, commanding targetYaw = 0. C_yaw decayed rapidly, rotating the puppet body by +0.495 deg in Frame 5281. Due to 1-frame latency between engine physics and CET onUpdate, rendered camera jolted by +0.353 deg (F=5281) and bounced back by -0.183 deg (F=5282).
+  4. HMG Horizon Roll Diagnosis: HMG is held in hip-cradle position with muzzle tilted up by +6.6 deg. Tier 2B commanded C_pitch = +6.5 deg to twist the torso down, inflating rPitch to 10 deg. In `init.lua`, the parent yaw axis was computed using `DR_GetAimPitch()` (A) instead of `DR_GetT2BPitch()` (T2B = A - C), creating a 6.5 deg tilt error in the parent coordinate frame. Rotating by rYaw (up to 65.5 deg) around an axis tilted by 6.5 deg induced an exact cross-axis roll of sin(6.5 deg) * sin(65.5 deg) ~ 6.0 deg.
+- solution / implementation:
+  1. **Align Gravity-Up Rotation Axis:** In `init.lua:460-466`, read `Game.DR_GetT2BPitch()` instead of `DR_GetAimPitch()`. Because the engine's physical parent socket is pitched at T2B = A - C, using T2B guarantees `(0, fwdZ, fwdXY)` points along the exact true gravity-up axis of the parent socket under all conditions.
+  2. **Bypass Tier 2B for Heavy Weapons:** In `init.lua:540`, added `isHeavyWeapon` detection (`weapon:IsHeavyWeapon()` or item ID match). When holding an HMG/heavy weapon, Tier 2B compensation is bypassed (target = 0, C_pitch = 0.0). Freelook, muzzle ballistics redirection, and reticle tracking remain 100% active, but the torso is never twisted by 6.6 deg, completely eliminating horizon roll.
+  3. **Tighten Ready Stance Gate & Target Clamp:** In `init.lua:630-665`, tightened the ready gate to `[2.5 deg, 4.0 deg]` (full ready < 2.5 deg, smooth Hermite blend to 0 by 4.0 deg, unready >= 4.0 deg). Added hard clamp on `targetYaw` and `targetPitch` to `[-2.0 deg, +2.0 deg]`. The controller can never chase arm-lowering/raising animations or spike to 3.5 deg; it smoothly tapers to 0 before the arm even begins its main motion.
+  4. **Native Clamp Safety:** In `src/Hooks/InputHook.cpp:138 & 254`, tightened clamp on `s_targetCompYaw`, `s_targetCompPitch`, `s_compYaw`, and `s_compPitch` from +/-15.0 deg to +/-3.0 deg.
+  5. Recompiled `DetachedReticle.dll` (Release) and deployed DLL and `init.lua` to repository and `<GAME_ROOT>`.
+- status: deployed, ready for verification.
+
+# iteration 36
+- date: 2026-11-02 20:12 +0700
+- user feedback on iteration 35:
+  1. "it's now less jittery and feels better for regular guns." (Resting transition twitch verified resolved).
+  2. "for HMG currently the gun reticle is offset to upper left."
+  3. "need a fix for smart weapons, the reticle for smart weapons is gone, i think by simply excluding smart weapons for our gun reticle (the 'where the bullet should go' part)."
+- root cause analysis:
+  1. **HMG Reticle Offset to Upper Left:** In Iteration 35, Tier 2B compensation was completely bypassed for heavy weapons (`isHeavyWeapon -> readyWeight = 0`). In vanilla animations, V holds the HMG at the right hip with the barrel angled upward and inward (dYaw ~ +3.5 deg, dPitch ~ +6.6 deg). With Tier 2B turned off, the barrel was never aligned toward center screen, causing the gun reticle (and muzzle fire) to sit permanently at the upper-left of screen center. The camera roll in earlier iterations was caused exclusively by `DR_GetAimPitch` vs `DR_GetT2BPitch` axis misalignment, which was mathematically proven (in `test_hmg_roll.ps1`) to have 0.000 deg roll once `DR_GetT2BPitch` is used.
+  2. **Smart Weapons Missing Reticle:** Smart weapons have their own built-in targeting brackets, locking frames, and homing projectile logic. Translating `activeWidget` with `screenOffset` moved the entire smart HUD hierarchy off-screen or out of position, and `ShootingHook` ray redirection interfered with native lock acquisition.
+- solution / implementation:
+  1. **Smart Weapon Full Exclusion:**
+     - In `r6/scripts/DetachedReticle/DetachedReticle.reds` (`UpdateDetachedAim` and `ShootEvents.OnEnter`), added `isSmartWeapon = Equals(RPGManager.GetWeaponEvolution(weapon.GetItemID()), gamedataWeaponEvolution.Smart)`.
+     - When a smart weapon is active:
+       - Hides the camera freelook center pip (`m_cameraCrosshair.SetVisible(false)`).
+       - Resets and locks the vanilla smart crosshair widget centered at `(0.0, 0.0)` (`activeWidget.SetTranslation(Vector2(0, 0))`).
+       - Disables native muzzle ray redirection (`SetMuzzleAimState(..., false)`).
+       - Excludes smart weapons from `ShootEvents.OnEnter` redirection, preserving 100% vanilla lock-on targeting and homing projectiles.
+     - In `init.lua`, added `isSmartWeapon` check and bypassed Tier 2B (`readyWeight = 0.0`).
+  2. **HMG Centered Offset Compensation (Roll-Free):**
+     - In `init.lua`, differentiated ready stance gates:
+       - Regular guns: `[2.5 deg, 4.0 deg]` gate, clamp `[-2.0 deg, +2.0 deg]`. (Preserves the smooth, jitter-free regular gun behavior).
+       - Heavy weapons (HMG): `[8.0 deg, 12.0 deg]` gate, clamp `[-8.0 deg, +8.0 deg]`. (Compensates the +3.5 deg yaw / +6.6 deg pitch cradle angle, bringing the HMG gun reticle right to center screen when ready).
+     - In `src/Hooks/InputHook.cpp`, adjusted `s_targetCompYaw`, `s_targetCompPitch`, `s_compYaw`, and `s_compPitch` clamps from +/-3.0 deg to +/-8.0 deg to accommodate HMG's 6.6 deg pitch while protecting against runaway spikes.
+     - Recompiled `DetachedReticle.dll` (Release) and deployed DLL, `init.lua`, and `DetachedReticle.reds` to repository and `<GAME_ROOT>`.
+- status: deployed, ready for verification.
+
 # next iteration above this line
 
 ### Findings Writing Rules:
 - Write iterations continuing the last one
 - Never edit/revise written iterations unless there's a typo
 - Fixes for a wrong implementation in an iteration = next iteration, describing what were wrong and what's the solution
+

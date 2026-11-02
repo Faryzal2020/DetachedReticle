@@ -293,6 +293,20 @@ private func UpdateDetachedAim() -> Void {
         return;
     }
 
+    let isSmartWeapon: Bool = Equals(RPGManager.GetWeaponEvolution(weapon.GetItemID()), gamedataWeaponEvolution.Smart);
+    if isSmartWeapon {
+        if IsDefined(this.m_cameraCrosshair) { this.m_cameraCrosshair.SetVisible(false); }
+        if IsDefined(activeWidget) {
+            activeWidget.SetVisible(true);
+            activeWidget.SetTranslation(new Vector2(0.0, 0.0));
+        }
+        if IsDefined(aimSys) {
+            aimSys.SetAimState(new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector2(0.0, 0.0), 0.0, 0.0, 0.0, false);
+        }
+        SetMuzzleAimState(new Vector4(0.0, 0.0, 0.0, 1.0), new Vector4(0.0, 1.0, 0.0, 0.0), new Vector4(0.0, 1.0, 0.0, 0.0), false);
+        return;
+    }
+
     if !this.m_detachedLoggedWeapon {
         FTLog("[DetachedReticle] Active ranged weapon equipped: " + TDBID.ToStringDEBUG(ItemID.GetTDBID(weapon.GetItemID())) + " | Decoupled Gun Reticle active.");
         this.m_detachedLoggedWeapon = true;
@@ -461,7 +475,8 @@ private func UpdateDetachedAim() -> Void {
 protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<StateGameScriptInterface>) -> Void {
     let weapon: ref<WeaponObject> = this.GetWeaponObject(scriptInterface);
     let player: ref<PlayerPuppet> = scriptInterface.executionOwner as PlayerPuppet;
-    let isDecoupledActive: Bool = IsDefined(player) && !GameObject.IsDualWielding(player) && IsDefined(weapon) && !weapon.IsMelee();
+    let isSmartWeapon: Bool = IsDefined(weapon) && Equals(RPGManager.GetWeaponEvolution(weapon.GetItemID()), gamedataWeaponEvolution.Smart);
+    let isDecoupledActive: Bool = IsDefined(player) && !GameObject.IsDualWielding(player) && IsDefined(weapon) && !weapon.IsMelee() && !isSmartWeapon;
 
     if isDecoupledActive {
         let muzzleTransform: Transform = weapon.GetMuzzleSlotWorldTransform();

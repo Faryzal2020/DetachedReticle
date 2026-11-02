@@ -135,8 +135,8 @@ void InputHook::ResetChase(float aInitialPitch) {
 }
 
 void InputHook::SetBarrelOffset(float aYaw, float aPitch) {
-    s_targetCompYaw = std::clamp(aYaw, -15.0f, 15.0f);
-    s_targetCompPitch = std::clamp(aPitch, -15.0f, 15.0f);
+    s_targetCompYaw = std::clamp(aYaw, -8.0f, 8.0f);
+    s_targetCompPitch = std::clamp(aPitch, -8.0f, 8.0f);
 }
 
 void InputHook::SetCompParams(float aSpeedSettled, float aSpeedMoving, float aMaxSpeed, float aGapThreshold, float aMinSpeed) {
@@ -251,8 +251,8 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
 
     s_compYaw += dCompYaw;
     s_compPitch += dCompPitch;
-    s_compYaw = std::clamp(s_compYaw, -15.0f, 15.0f);
-    s_compPitch = std::clamp(s_compPitch, -15.0f, 15.0f);
+    s_compYaw = std::clamp(s_compYaw, -8.0f, 8.0f);
+    s_compPitch = std::clamp(s_compPitch, -8.0f, 8.0f);
 
     // 8. Residual for camera offset: R = T - T2B = (T - T2A) + C
     // Since Puppet is rotated to T2B = T2A - C, CameraWorld = T2B + R = (T2A - C) + (T - T2A + C) = T (rock-solid in world space).

@@ -399,6 +399,10 @@ registerForEvent("onUpdate", function(delta)
         if not DetachedReticle.chaseActive then
             DetachedReticle.chaseActive = true
             DetachedReticle.baselineRot = localRot or Quaternion.new(0, 0, 0, 1)
+            DetachedReticle.lastWrittenRot = nil
+            DetachedReticle.lastCamYaw = nil
+            DetachedReticle.lastBodyYaw = nil
+            DetachedReticle.lastCYaw = nil
 
             -- Capture baseline sensitivity and heading lock before enabling chase
             local okNatX, natX = pcall(function() return Game.DR_GetSensitivityMultX(fpp) end)
@@ -453,10 +457,10 @@ registerForEvent("onUpdate", function(delta)
         pcall(function() rYaw = Game.DR_GetResidualYaw() end)
         pcall(function() rPitch = Game.DR_GetResidualPitch() end)
 
-        -- Read native continuous camera pitch angle (tracked smoothly in C++ from raw mouse input)
-        local nativePitch = 0.0
-        pcall(function() nativePitch = Game.DR_GetAimPitch() end)
-        local pitchRad = math.rad(nativePitch)
+        -- Read native physical socket pitch angle (T2B = A - C) so the gravity-up axis matches the parent coordinate frame
+        local socketPitch = 0.0
+        pcall(function() socketPitch = Game.DR_GetT2BPitch() end)
+        local pitchRad = math.rad(socketPitch)
         local fwdZ = math.sin(pitchRad)
         local fwdXY = math.cos(pitchRad)
 
@@ -468,21 +472,55 @@ registerForEvent("onUpdate", function(delta)
         local qRz = quatAxisAngle(0.0, fwdZ, fwdXY, rYaw)
         local qRel = quatMultiply(qRz, qRx)
         local targetRot = quatMultiply(qRel, baseline)
+        -- [PROBE 1C] Did anything else write the fpp local orientation since our last write?
+        -- Angle between the orientation read this frame (before writing) and the one we wrote last frame.
+        local fppOverwriteDeg = 0.0
+        local lastRot = DetachedReticle.lastWrittenRot
+        if Config.debugLogging and lastRot and localRot then
+            local dot = (localRot.i or 0) * (lastRot.i or 0) + (localRot.j or 0) * (lastRot.j or 0)
+                      + (localRot.k or 0) * (lastRot.k or 0) + (localRot.r or 1) * (lastRot.r or 1)
+            fppOverwriteDeg = math.deg(2.0 * math.acos(math.min(1.0, math.abs(dot))))
+        end
+
         pcall(function()
             fpp:SetLocalTransform(fpp:GetLocalPosition(), targetRot)
         end)
+        DetachedReticle.lastWrittenRot = targetRot
 
-        if Config.debugLogging and (DetachedReticle.frameCounter % 30 == 0 or math.abs(rYaw) > 0.05 or math.abs(rPitch) > 0.05) then
+        if Config.debugLogging then
             local tYaw = 0.0
             local aYaw = 0.0
             local tPitch = 0.0
             local aPitch = 0.0
+            local cYawNow = 0.0
             pcall(function() tYaw = Game.DR_GetTargetYaw() end)
             pcall(function() aYaw = Game.DR_GetAimYaw() end)
             pcall(function() tPitch = Game.DR_GetTargetPitch() end)
             pcall(function() aPitch = Game.DR_GetAimPitch() end)
-            local line = string.format("[F=%d] bodyYaw=%.4f rYaw=%.4f rPitch=%.4f tPitch=%.4f aPitch=%.4f fwdZ=%.4f fwdXY=%.4f",
-                DetachedReticle.frameCounter, bodyYaw, rYaw, rPitch, tPitch, aPitch, fwdZ, fwdXY)
+            pcall(function() cYawNow = Game.DR_GetCompYaw() end)
+
+            -- [PROBE P1] Rendered camera heading/pitch (CameraSystem.GetActiveCameraForward, cameraSystem.script:14)
+            local camYaw, camPitch = 0.0, 0.0
+            pcall(function()
+                local cf = Game.GetCameraSystem():GetActiveCameraForward()
+                local cx, cy, cz = cf.x or 0.0, cf.y or 0.0, cf.z or 0.0
+                camYaw = Vector4.Heading(cf)
+                camPitch = math.deg(math.atan2(cz, math.sqrt(cx * cx + cy * cy)))
+            end)
+            local dCamYaw = normalizeDeg(camYaw - (DetachedReticle.lastCamYaw or camYaw))
+            local dBody = normalizeDeg(bodyYaw - (DetachedReticle.lastBodyYaw or bodyYaw))
+            -- Predicted puppet step from the hook: dA - dC (aYaw is the last hook call's dA, InputHook.cpp:263)
+            local predBody = aYaw - (cYawNow - (DetachedReticle.lastCYaw or cYawNow))
+            DetachedReticle.lastCamYaw = camYaw
+            DetachedReticle.lastBodyYaw = bodyYaw
+            DetachedReticle.lastCYaw = cYawNow
+
+            -- [PROBE SEED] Model pitch T vs rendered camera pitch. Non-zero steady error = wrong initPitch seed.
+            local seedErr = camPitch - tPitch
+
+            local line = string.format("[F=%d] bodyYaw=%.4f rYaw=%.4f rPitch=%.4f tPitch=%.4f aPitch=%.4f fwdZ=%.4f fwdXY=%.4f | [P1] camYaw=%.3f camPitch=%.3f dCam=%+.3f dBody=%+.3f predBody=%+.3f cYaw=%+.3f | [1C] fppOverwrite=%.3f | [SEED] pitchErr=%+.3f",
+                DetachedReticle.frameCounter, bodyYaw, rYaw, rPitch, tPitch, aPitch, fwdZ, fwdXY,
+                camYaw, camPitch, dCamYaw, dBody, predBody, cYawNow, fppOverwriteDeg, seedErr)
             Log(line)
         end
 
@@ -500,12 +538,25 @@ registerForEvent("onUpdate", function(delta)
         local isADS = (crosshairState == 4 or upperBodyState == 6)
 
         local weaponName = "Unknown"
+        local isHeavyWeapon = false
+        local isSmartWeapon = false
         if weapon then
             pcall(function()
                 local itemID = weapon:GetItemID()
                 local tdbid = ItemID.GetTDBID(itemID)
                 weaponName = TDBID.ToStringDEBUG(tdbid)
+                isHeavyWeapon = weapon:IsHeavyWeapon()
+                local evo = RPGManager.GetWeaponEvolution(itemID)
+                if evo and (evo.value == "Smart" or tostring(evo) == "gamedataWeaponEvolution.Smart" or evo == gamedataWeaponEvolution.Smart) then
+                    isSmartWeapon = true
+                end
             end)
+            if not isHeavyWeapon and weaponName and (weaponName:find("HMG") or weaponName:find("HeavyMachineGun")) then
+                isHeavyWeapon = true
+            end
+            if not isSmartWeapon and weaponName and (weaponName:find("Smart") or weaponName:find("smart")) then
+                isSmartWeapon = true
+            end
         end
 
         local aimSys = nil
@@ -590,26 +641,47 @@ registerForEvent("onUpdate", function(delta)
             diffYaw = normalizeDeg(gunYaw - bodyYaw)
             diffPitch = gunPitch - t2bPitch
 
-            -- Ready stance gate: hold C target at zero until |diffYaw| < 15 and |diffPitch| < 15
-            -- This cleanly distinguishes ready firing stances from draw/holster animations and sprints
-            local isReadyStance = (math.abs(diffYaw) < 15.0) and (math.abs(diffPitch) < 15.0) and (stateStr == "HIP" or stateStr == "ADS")
+            -- Ready stance gate:
+            -- Regular guns: steady-state barrel offset is < 1.0 deg. Gate [2.5 deg, 4.0 deg], clamp +/- 2.0 deg.
+            -- Heavy weapons (HMG): hip-cradle offset is ~6.6 deg. Gate [8.0 deg, 12.0 deg], clamp +/- 8.0 deg.
+            -- Smart weapons: homing targeting, bypass Tier 2B completely.
+            local maxAngle = math.max(math.abs(diffYaw), math.abs(diffPitch))
+            local readyWeight = 0.0
+            local maxReady = isHeavyWeapon and 8.0 or 2.5
+            local maxBlend = isHeavyWeapon and 12.0 or 4.0
+            local maxClamp = isHeavyWeapon and 8.0 or 2.0
 
-            -- Reset integral trim on weapon change
-            if weaponName ~= DetachedReticle.lastTrimWeapon then
+            if not isSmartWeapon and (stateStr == "HIP" or stateStr == "ADS") then
+                if maxAngle < maxReady then
+                    readyWeight = 1.0
+                elseif maxAngle < maxBlend then
+                    local t = (maxBlend - maxAngle) / (maxBlend - maxReady)
+                    readyWeight = t * t * (3.0 - 2.0 * t)
+                end
+            end
+            local isReadyStance = (readyWeight > 0.001)
+            DetachedReticle.lastReadyWeight = readyWeight
+
+            -- Reset integral trim on weapon change or HIP <-> ADS transitions
+            if weaponName ~= DetachedReticle.lastTrimWeapon or isADS ~= DetachedReticle.lastTrimADS then
                 DetachedReticle.lastTrimWeapon = weaponName
+                DetachedReticle.lastTrimADS = isADS
                 DetachedReticle.trimYaw = 0.0
                 DetachedReticle.trimPitch = 0.0
             end
 
             -- Convergence on camera hit point: slow integral trim on screen error (only when fully resting at settled stance)
+            -- Sign convention: scrX > 0 means reticle is right -> subtract trimYaw to steer gun left towards center (negative feedback)
             if isResting and isReadyStance and isArmed then
                 local dt = (type(delta) == "number" and delta > 0.0001 and delta < 0.1) and delta or 0.016
-                DetachedReticle.trimYaw = math.max(-3.0, math.min(3.0, (DetachedReticle.trimYaw or 0.0) + scrX * 0.005 * dt))
-                DetachedReticle.trimPitch = math.max(-3.0, math.min(3.0, (DetachedReticle.trimPitch or 0.0) - scrY * 0.005 * dt))
+                DetachedReticle.trimYaw = math.max(-maxClamp, math.min(maxClamp, (DetachedReticle.trimYaw or 0.0) - scrX * 0.005 * dt))
+                DetachedReticle.trimPitch = math.max(-maxClamp, math.min(maxClamp, (DetachedReticle.trimPitch or 0.0) - scrY * 0.005 * dt))
             end
 
-            local targetYaw = diffYaw + (DetachedReticle.trimYaw or 0.0)
-            local targetPitch = diffPitch + (DetachedReticle.trimPitch or 0.0)
+            local rawTargetYaw = (diffYaw + (DetachedReticle.trimYaw or 0.0)) * readyWeight
+            local rawTargetPitch = (diffPitch + (DetachedReticle.trimPitch or 0.0)) * readyWeight
+            local targetYaw = math.max(-maxClamp, math.min(maxClamp, rawTargetYaw))
+            local targetPitch = math.max(-maxClamp, math.min(maxClamp, rawTargetPitch))
 
             if Config.activeAimOffset and isArmed and isReadyStance then
                 pcall(function() Game.DR_SetBarrelOffset(targetYaw, targetPitch) end)
@@ -653,8 +725,8 @@ registerForEvent("onUpdate", function(delta)
             pcall(function() t2bYaw = Game.DR_GetT2BYaw() end)
             pcall(function() t2bPitch = Game.DR_GetT2BPitch() end)
 
-            local compLine = string.format("[T2B_OFFSET_COMP] TargetErr=(dYaw:%+.2f deg, dPitch:%+.2f deg) | CompApplied=(C_yaw:%+.2f deg, C_pitch:%+.2f deg) | T2A_Aim=(Yaw:%.2f, Pitch:%.2f) | T2B_Body=(Yaw:%.2f, Pitch:%.2f) | Residual=(rYaw:%.4f, rPitch:%.4f)",
-                diffYaw, diffPitch, cYaw, cPitch, bodyYaw, aPitch, t2bYaw, t2bPitch, rYaw, rPitch)
+            local compLine = string.format("[T2B_OFFSET_COMP] ReadyW=" .. string.format("%.2f", DetachedReticle.lastReadyWeight or 0.0) .. " | TargetErr=(dYaw:%+.2f deg, dPitch:%+.2f deg) | Trim=(Y:%+.2f, P:%+.2f) | CompApplied=(C_yaw:%+.2f deg, C_pitch:%+.2f deg) | T2A_Aim=(Yaw:%.2f, Pitch:%.2f) | T2B_Body=(Yaw:%.2f, Pitch:%.2f) | Residual=(rYaw:%.4f, rPitch:%.4f)",
+                diffYaw, diffPitch, (DetachedReticle.trimYaw or 0.0), (DetachedReticle.trimPitch or 0.0), cYaw, cPitch, bodyYaw, aPitch, t2bYaw, t2bPitch, rYaw, rPitch)
             Log(compLine)
 
             -- Anomaly Watchdogs:
