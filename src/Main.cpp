@@ -139,6 +139,48 @@ void DR_GetT2BPitch(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame
     if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetT2BPitch();
 }
 
+void DR_GetRecoilYaw(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetRecoilYaw();
+}
+
+void DR_GetRecoilPitch(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetRecoilPitch();
+}
+
+void DR_GetLastDeltaRecoilYaw(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetLastDeltaRecoilYaw();
+}
+
+void DR_GetLastDeltaRecoilPitch(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetLastDeltaRecoilPitch();
+}
+
+void DR_GetSplitErrYaw(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetSplitErrYaw();
+}
+
+void DR_GetSplitErrPitch(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetSplitErrPitch();
+}
+
 void DR_SetCompParams(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
     RED4EXT_UNUSED_PARAMETER(aContext);
     RED4EXT_UNUSED_PARAMETER(aOut);
@@ -385,6 +427,12 @@ void PostRegisterTypes() {
     regGetter("DR_GetCompPitch", &DR_GetCompPitch);
     regGetter("DR_GetT2BYaw", &DR_GetT2BYaw);
     regGetter("DR_GetT2BPitch", &DR_GetT2BPitch);
+    regGetter("DR_GetRecoilYaw", &DR_GetRecoilYaw);
+    regGetter("DR_GetRecoilPitch", &DR_GetRecoilPitch);
+    regGetter("DR_GetLastDeltaRecoilYaw", &DR_GetLastDeltaRecoilYaw);
+    regGetter("DR_GetLastDeltaRecoilPitch", &DR_GetLastDeltaRecoilPitch);
+    regGetter("DR_GetSplitErrYaw", &DR_GetSplitErrYaw);
+    regGetter("DR_GetSplitErrPitch", &DR_GetSplitErrPitch);
     regGetter("DR_GetCompSpeedSettled", &DR_GetCompSpeedSettled);
     regGetter("DR_GetCompSpeedMoving", &DR_GetCompSpeedMoving);
     regGetter("DR_GetCompMaxSpeed", &DR_GetCompMaxSpeed);

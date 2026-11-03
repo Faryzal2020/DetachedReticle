@@ -18,11 +18,11 @@ static uintptr_t s_exeBase = 0;
 //   movss dword ptr [rcx+9Ch], xmm6    (8 bytes: F3 0F 11 B1 9C 00 00 00)
 // Inputs:
 //   rcx:   Player puppet orientation controller ([rax+8])
-//   xmm6:  Body Yaw Delta (post-sensitivity)
-//   xmm7:  Camera Pitch Delta (post-sensitivity)
+//   xmm6:  Body Yaw Delta (post-sensitivity, includes [rsp+48h] recoil yaw delta)
+//   xmm7:  Camera Pitch Delta (post-sensitivity, includes [rsp+44h] recoil pitch delta)
 static constexpr uintptr_t kWaLookCallsiteRva = 0x51D462;
 static constexpr uint8_t kWaLookDisplacedBytes[] = {
-    0xF3, 0x0F, 0x11, 0xB1, 0x9C, 0x00, 0x00, 0x00
+    0xF3, 0x0F, 0x11, 0xB1, 0x9C, 0x00, 0x00, 00
 };
 
 static void* WaAllocRelayNear(uint8_t* target) {
@@ -131,7 +131,19 @@ void InputHook::ResetChase(float aInitialPitch) {
     s_compPitch = 0.0f;
     s_displayT2BYaw = 0.0f;
     s_displayT2BPitch = aInitialPitch;
+    s_recoilYaw = 0.0f;
+    s_recoilPitch = 0.0f;
+    s_recoilPeakYaw = 0.0f;
+    s_recoilPeakPitch = 0.0f;
+    s_recoilDriftPitch = 0.0f;
+    s_recoilRecovering = false;
+    s_recoilIdleTimer = 0.0f;
+    s_lastDRecoilYaw = 0.0f;
+    s_lastDRecoilPitch = 0.0f;
+    s_splitErrYaw = 0.0f;
+    s_splitErrPitch = 0.0f;
     s_lastTime = std::chrono::steady_clock::now();
+    s_smoothedDt = 1.0f / 60.0f;
 }
 
 void InputHook::SetBarrelOffset(float aYaw, float aPitch) {
@@ -176,7 +188,7 @@ void InputHook::SetSmoothing(float aLambda, int32_t aMode, float aMaxDiv, float 
     s_enabled = aEnabled;
 }
 
-void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, float& outYaw, float& outPitch) {
+void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, const float* aSplitProbe, float& outYaw, float& outPitch) {
     if (!s_enabled) {
         outYaw = aRawYaw;
         outPitch = aRawPitch;
@@ -184,13 +196,42 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
     }
 
     auto now = std::chrono::steady_clock::now();
-    float dt = std::chrono::duration<float>(now - s_lastTime).count();
+    float rawDt = std::chrono::duration<float>(now - s_lastTime).count();
     s_lastTime = now;
-    if (dt <= 0.0f || dt > 0.1f) dt = 1.0f / 60.0f;
+    if (rawDt <= 0.0f || rawDt > 0.1f) rawDt = 1.0f / 60.0f;
+    if (s_smoothedDt <= 0.0f || s_smoothedDt > 0.1f) {
+        s_smoothedDt = rawDt;
+    } else {
+        s_smoothedDt = 0.75f * s_smoothedDt + 0.25f * rawDt;
+    }
+    float dt = s_smoothedDt;
 
-    // 1. Advance Target T with raw mouse deflection (post-sensitivity)
-    s_targetYaw += aRawYaw;
-    s_targetPitch += aRawPitch;
+    // 0. Extract native weapon recoil/sway delta ([rsp+128h]/[rsp+124h]) vs pure mouse look delta ([rbp-78h]/[rbp-7Ch])
+    float dRecoilYaw = 0.0f;
+    float dRecoilPitch = 0.0f;
+    float dMouseYaw = aRawYaw;
+    float dMousePitch = aRawPitch;
+    if (aSplitProbe) {
+        dRecoilYaw = aSplitProbe[0];
+        dRecoilPitch = aSplitProbe[1];
+        dMouseYaw = aSplitProbe[2];
+        dMousePitch = aSplitProbe[3];
+    }
+
+    s_lastDRecoilYaw = dRecoilYaw;
+    s_lastDRecoilPitch = dRecoilPitch;
+
+    // Pure player look input delta (strips native weapon recoil/sway while preserving mouse + gamepad stick)
+    float dInputYaw = aRawYaw - dRecoilYaw;
+    float dInputPitch = aRawPitch - dRecoilPitch;
+
+    // Probe P-R1: Stack frame split invariant verification
+    s_splitErrYaw = dInputYaw - dMouseYaw;
+    s_splitErrPitch = dInputPitch - dMousePitch;
+
+    // 1. Advance Tier 1 Camera Target T with pure player input deflection (free of weapon recoil)
+    s_targetYaw += dInputYaw;
+    s_targetPitch += dInputPitch;
     s_targetPitch = std::clamp(s_targetPitch, -85.0f, 85.0f);
 
     // 2. Compute Gap between Target T and current Aim A
@@ -221,14 +262,14 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
     }
     float effGapPitch = gapPitch;
 
-    // 5. Chase Filter (s_mode 0 = Exponential with Option 1 Min Speed Floor, s_mode 1 = Model A Braking Zone)
-    float dAYaw = 0.0f;
-    float dAPitch = 0.0f;
-    float gapMag = std::sqrt(effGapYaw * effGapYaw + effGapPitch * effGapPitch);
+    // 5. Chase Filter (s_mode 0 = Exponential with Option A Power-Law Curve, s_mode 1 = Model A Braking Zone)
+    auto computeChaseStep = [&](float aEffGapYaw, float aEffGapPitch, float aDt, float& aOutDYaw, float& aOutDPitch) {
+        aOutDYaw = 0.0f;
+        aOutDPitch = 0.0f;
+        float gapMag = std::sqrt(aEffGapYaw * aEffGapYaw + aEffGapPitch * aEffGapPitch);
+        if (gapMag <= 0.0001f) return;
 
-    if (gapMag > 0.0001f) {
         float step = 0.0f;
-
         if (s_mode == 1) {
             // Model A: Rate-Limited Saccade with Smoothstep Braking Zone
             float thresh = (s_brakeThreshold > 0.05f) ? s_brakeThreshold : 2.0f;
@@ -242,7 +283,7 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
                 v = maxSpd * smooth;
             }
 
-            step = v * dt;
+            step = v * aDt;
 
             // Deceleration safety bound: prevent multi-degree single-frame snaps that pull the camera
             if (gapMag <= thresh) {
@@ -257,12 +298,12 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
             float power = std::clamp(s_expPower, 0.1f, 1.5f);
             if (std::abs(power - 1.0f) < 0.001f) {
                 // Linear exponential curve (p = 1.0)
-                float expFactor = 1.0f - std::exp(-s_lambda * dt);
+                float expFactor = 1.0f - std::exp(-s_lambda * aDt);
                 step = gapMag * expFactor;
             } else {
                 // Sub-linear / custom power curve (p < 1.0, default 0.6)
                 float oneMinusP = 1.0f - power;
-                float rem = std::pow(gapMag, oneMinusP) - (oneMinusP * s_lambda * dt);
+                float rem = std::pow(gapMag, oneMinusP) - (oneMinusP * s_lambda * aDt);
                 if (rem <= 0.0f) {
                     step = gapMag;
                 } else {
@@ -282,9 +323,13 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
             step = gapMag;
         }
 
-        dAYaw = (effGapYaw / gapMag) * step;
-        dAPitch = (effGapPitch / gapMag) * step;
-    }
+        aOutDYaw = (aEffGapYaw / gapMag) * step;
+        aOutDPitch = (aEffGapPitch / gapMag) * step;
+    };
+
+    float dAYaw = 0.0f;
+    float dAPitch = 0.0f;
+    computeChaseStep(effGapYaw, effGapPitch, dt, dAYaw, dAPitch);
 
     // 6. Advance Tier 2A (Anchor Aim Direction)
     s_aimYaw += dAYaw;
@@ -326,15 +371,163 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
     s_compYaw = std::clamp(s_compYaw, -8.0f, 8.0f);
     s_compPitch = std::clamp(s_compPitch, -8.0f, 8.0f);
 
-    // 8. Residual for camera offset: R = T - T2B = (T - T2A) + C
-    // Since Puppet is rotated to T2B = T2A - C, CameraWorld = T2B + R = (T2A - C) + (T - T2A + C) = T (rock-solid in world space).
-    s_residualYaw = (s_targetYaw - s_aimYaw) + s_compYaw;
-    s_residualPitch = (s_targetPitch - s_aimPitch) + s_compPitch;
+    // 8. Tier 2 Recoil Transfer (W) with Direct-to-Origin Recovery (eliminating RecoilDrift):
+    // Vanilla Cyberpunk's native recoil recovery targets a random 2D point D_drift on a circle
+    // of radius [RecoilDriftRandomRangeMin, RecoilDriftRandomRangeMax] (0.6-0.9 deg) around (0, 0),
+    // moving along -(W_peak - D_drift) instead of -W_peak.
+    // In our 2-tier system, Tier 2 must recover directly to (0, 0) (Tier 1) during RecoilRecoveryTime:
+    //   - Kick (dRecoilPitch > 1e-5f): accumulate native kick and update W_peak = (s_recoilYaw, s_recoilPitch).
+    //   - Hold (|dRecoil| <= 1e-5f while !s_recoilRecovering): hold W steady during RecoilHoldDuration.
+    //   - Recovery (dRecoilPitch < -1e-5f): on the first recovery frame, if native recovery is
+    //     targeting D_drift (radial misalignment > 0.02 rad), estimate D_drift_pitch from the bounded
+    //     drift circle so each native recovery step du_k = -dRecoilPitch / (W_peak_pitch - D_drift_pitch)
+    //     scales directly to 100% of W_peak: effDRecoil = -du_k * W_peak, reaching (0, 0) on the
+    //     exact frame native RecoilRecoveryTime finishes!
+    float effDRecoilYaw = 0.0f;
+    float effDRecoilPitch = 0.0f;
+    if (dRecoilPitch > 1e-5f || (!s_recoilRecovering && std::abs(dRecoilYaw) > 1e-5f && dRecoilPitch >= -1e-5f)) {
+        // Kick Phase
+        s_recoilRecovering = false;
+        s_recoilIdleTimer = 0.0f;
+        effDRecoilYaw = dRecoilYaw;
+        effDRecoilPitch = dRecoilPitch;
+    } else if (dRecoilPitch < -1e-5f) {
+        // Native Recovery Phase
+        if (!s_recoilRecovering) {
+            s_recoilRecovering = true;
+            s_recoilPeakYaw = s_recoilYaw;
+            s_recoilPeakPitch = s_recoilPitch;
+            s_recoilDriftPitch = 0.0f;
+
+            // Detect if vanilla RecoilDrift is active by comparing the native recovery direction
+            // (dRecoilYaw, dRecoilPitch) against the radial origin direction (-W_peak_yaw, -W_peak_pitch)
+            float peakMag = std::hypot(s_recoilPeakYaw, s_recoilPeakPitch);
+            float dMag = std::hypot(dRecoilYaw, dRecoilPitch);
+            if (peakMag > 0.05f && dMag > 1e-5f) {
+                float cross = std::abs(dRecoilYaw * s_recoilPeakPitch - dRecoilPitch * s_recoilPeakYaw) / (peakMag * dMag);
+                if (cross > 0.02f && s_recoilPeakPitch > 0.15f) {
+                    // Vanilla BaseStats: RecoilDriftRandomRangeMin = 0.6, Max = 0.9 (mean 0.75 deg),
+                    // RecoilMagForFullDrift = 3.0 deg.
+                    // Exact line equation: (W_peak_yaw - D_yaw) / (W_peak_pitch - D_pitch) = m = dRecoilYaw / dRecoilPitch
+                    float m = dRecoilYaw / dRecoilPitch;
+                    float scale = std::clamp(peakMag / 3.0f, 0.0f, 1.0f);
+                    float rTarget = 0.75f * scale;
+                    // Closest point on the recovery line to the origin has radius |c| / sqrt(1 + m^2)
+                    float c = s_recoilPeakYaw - m * s_recoilPeakPitch;
+                    float m2p1 = 1.0f + m * m;
+                    float rMin2 = (c * c) / m2p1;
+                    float r2 = std::max(rTarget * rTarget, rMin2);
+                    float dPitchClosest = -(m * c) / m2p1;
+                    float halfChord = std::sqrt(std::max(0.0f, r2 - rMin2) / m2p1);
+                    // Choose the positive-pitch branch matching vanilla upward recovery drift
+                    float estDriftPitch = dPitchClosest + halfChord;
+                    s_recoilDriftPitch = std::clamp(estDriftPitch, 0.0f, s_recoilPeakPitch * 0.45f);
+                }
+            }
+        }
+        s_recoilIdleTimer = 0.0f;
+        float nativeSpanPitch = std::max(s_recoilPeakPitch - s_recoilDriftPitch, 0.05f);
+        if (s_recoilPitch > 1e-4f) {
+            float scale = s_recoilPeakPitch / nativeSpanPitch;
+            effDRecoilPitch = std::max(dRecoilPitch * scale, -s_recoilPitch);
+            effDRecoilYaw = s_recoilYaw * (effDRecoilPitch / s_recoilPitch);
+        } else {
+            effDRecoilPitch = -s_recoilPitch;
+            effDRecoilYaw = -s_recoilYaw;
+        }
+    } else {
+        // Native recoil delta is 0 (either in RecoilHoldDuration, or post-recovery idle)
+        if (s_recoilRecovering) {
+            // Native recovery just finished (or paused at D_drift): complete any tiny remaining
+            // fraction smoothly and immediately without waiting 0.50s
+            if (std::abs(s_recoilYaw) > 0.001f || std::abs(s_recoilPitch) > 0.001f) {
+                float finishStep = std::max(s_recoilPeakPitch / 0.18f, 12.0f) * dt;
+                float remMag = std::hypot(s_recoilYaw, s_recoilPitch);
+                if (remMag <= finishStep || remMag <= 0.005f) {
+                    effDRecoilYaw = -s_recoilYaw;
+                    effDRecoilPitch = -s_recoilPitch;
+                    s_recoilRecovering = false;
+                } else {
+                    float ratio = finishStep / remMag;
+                    effDRecoilYaw = -s_recoilYaw * ratio;
+                    effDRecoilPitch = -s_recoilPitch * ratio;
+                }
+            } else {
+                effDRecoilYaw = -s_recoilYaw;
+                effDRecoilPitch = -s_recoilPitch;
+                s_recoilRecovering = false;
+            }
+        } else {
+            // In RecoilHoldDuration (waiting for native recovery to begin) or aborted by reload
+            s_recoilIdleTimer += dt;
+            if (s_recoilIdleTimer > 0.50f && (std::abs(s_recoilYaw) > 0.001f || std::abs(s_recoilPitch) > 0.001f)) {
+                float bleedFactor = 1.0f - std::exp(-s_compSpeedSettled * dt);
+                float bleedYaw = -s_recoilYaw * bleedFactor;
+                float bleedPitch = -s_recoilPitch * bleedFactor;
+                if (std::abs(s_recoilYaw) <= 0.005f) bleedYaw = -s_recoilYaw;
+                if (std::abs(s_recoilPitch) <= 0.005f) bleedPitch = -s_recoilPitch;
+                effDRecoilYaw = bleedYaw;
+                effDRecoilPitch = bleedPitch;
+            }
+        }
+    }
+
+    float nextRecoilYaw = std::clamp(s_recoilYaw + effDRecoilYaw, -45.0f, 45.0f);
+    float nextRecoilPitch = std::clamp(s_recoilPitch + effDRecoilPitch, -45.0f, 45.0f);
+    effDRecoilYaw = nextRecoilYaw - s_recoilYaw;
+    effDRecoilPitch = nextRecoilPitch - s_recoilPitch;
+    s_recoilYaw = nextRecoilYaw;
+    s_recoilPitch = nextRecoilPitch;
+    if (dRecoilPitch > 1e-5f) {
+        s_recoilPeakYaw = s_recoilYaw;
+        s_recoilPeakPitch = s_recoilPitch;
+    }
+
+    // 9. Residual for camera offset: R = T - T2B - predNextDBodyYaw
+    // Because MouseLookRelay updates puppet bodyYaw [rcx+9Ch] BEFORE the engine's scene graph
+    // evaluates CameraWorld, whereas CET's fpp:SetLocalTransform(R_k) takes effect on frame k+1
+    // alongside bodyYaw_{k+1} = bodyYaw_k + dBody_{k+1}, pre-subtracting the 1-frame lookahead
+    // puppet step predNextDBodyYaw = nextDAYaw - nextDCompYaw ensures:
+    //   camYaw_{k+1} = (bodyYaw_k + dBody_{k+1}) + (T - bodyYaw_k - predNextDBodyYaw) = T.
+    float remGapYaw = s_targetYaw - s_aimYaw;
+    while (remGapYaw > 180.0f) remGapYaw -= 360.0f;
+    while (remGapYaw < -180.0f) remGapYaw += 360.0f;
+    float remEffGapYaw = remGapYaw;
+    if (s_deadzone > 0.0f) {
+        if (std::abs(remEffGapYaw) <= s_deadzone) {
+            remEffGapYaw = 0.0f;
+        } else {
+            remEffGapYaw = (remEffGapYaw > 0.0f) ? (remEffGapYaw - s_deadzone) : (remEffGapYaw + s_deadzone);
+        }
+    }
+    float remEffGapPitch = s_targetPitch - s_aimPitch;
+    float nextDAYaw = 0.0f;
+    float nextDAPitch = 0.0f;
+    computeChaseStep(remEffGapYaw, remEffGapPitch, dt, nextDAYaw, nextDAPitch);
+
+    float nextCompRate = s_compSpeedSettled;
+    if (std::abs(remGapYaw) > s_compGapThreshold || std::abs(remEffGapPitch) > s_compGapThreshold) {
+        nextCompRate = s_compSpeedMoving;
+    }
+    float nextCompFactor = 1.0f - std::exp(-nextCompRate * dt);
+    float remErrYaw = s_targetCompYaw - s_compYaw;
+    float nextDCompYaw = remErrYaw * nextCompFactor;
+    if (s_compMinSpeed > 0.0f) {
+        float minStep = s_compMinSpeed * dt;
+        if (std::abs(remErrYaw) > 0.005f && std::abs(nextDCompYaw) < minStep) {
+            nextDCompYaw = std::copysign(std::min(minStep, std::abs(remErrYaw)), remErrYaw);
+        }
+    }
+    nextDCompYaw = std::clamp(nextDCompYaw, -maxStep, maxStep);
+    float predNextDBodyYaw = nextDAYaw - nextDCompYaw;
+
+    s_residualYaw = remGapYaw + s_compYaw - s_recoilYaw - predNextDBodyYaw;
+    s_residualPitch = (s_targetPitch - s_aimPitch) + s_compPitch - s_recoilPitch;
 
     s_displayTargetYaw = s_targetYaw;
     s_displayAimYaw = s_aimYaw;
-    s_displayT2BYaw = s_aimYaw - s_compYaw;
-    s_displayT2BPitch = s_aimPitch - s_compPitch;
+    s_displayT2BYaw = s_aimYaw - s_compYaw + s_recoilYaw;
+    s_displayT2BPitch = std::clamp(s_aimPitch - s_compPitch + s_recoilPitch, -85.0f, 85.0f);
 
     // Keep yaw state bounded to prevent float overflow over time (yaw wraps around 360)
     s_targetYaw -= s_aimYaw;
@@ -343,10 +536,10 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
     // NOTE: Pitch does NOT wrap around 360; it remains bounded in [-85, +85] degrees absolute.
     // s_aimPitch represents continuous native camera pitch for roll-free yaw projection.
 
-    // 9. Output chase deltas to engine look integrator at RVA 0x51D462:
-    // Feeds d(T2B) = dA - dComp into puppet yaw [rcx+9Ch] and camera pitch accumulator
-    outYaw = dAYaw - dCompYaw;
-    outPitch = dAPitch - dCompPitch;
+    // 10. Output chase + recoil deltas to engine look integrator at RVA 0x51D462:
+    // Feeds d(T2B) = dA - dComp + dRecoil into puppet yaw [rcx+9Ch] and camera pitch accumulator
+    outYaw = dAYaw - dCompYaw + effDRecoilYaw;
+    outPitch = dAPitch - dCompPitch + effDRecoilPitch;
 }
 
 float InputHook::GetTargetYaw() { return s_displayTargetYaw; }
@@ -359,6 +552,12 @@ float InputHook::GetCompYaw() { return s_compYaw; }
 float InputHook::GetCompPitch() { return s_compPitch; }
 float InputHook::GetT2BYaw() { return s_displayT2BYaw; }
 float InputHook::GetT2BPitch() { return s_displayT2BPitch; }
+float InputHook::GetRecoilYaw() { return s_recoilYaw; }
+float InputHook::GetRecoilPitch() { return s_recoilPitch; }
+float InputHook::GetLastDeltaRecoilYaw() { return s_lastDRecoilYaw; }
+float InputHook::GetLastDeltaRecoilPitch() { return s_lastDRecoilPitch; }
+float InputHook::GetSplitErrYaw() { return s_splitErrYaw; }
+float InputHook::GetSplitErrPitch() { return s_splitErrPitch; }
 
 void InputHook::SetSensitivityMult(RED4ext::IScriptable* aFpp, float aMultX, float aMultY) {
     if (!aFpp) return;
@@ -653,8 +852,7 @@ void InputHook::ProbeRTTI() {
 
 } // namespace DetachedReticle
 
-extern "C" void OnNativeMouseAim(void* aFpp, float* aYawDelta, float* aPitchDelta) {
+extern "C" void OnNativeMouseAim(void* aFpp, float* aYawDelta, float* aPitchDelta, const float* aSplitProbe) {
     if (!aFpp || !aYawDelta || !aPitchDelta) return;
-    DetachedReticle::InputHook::ProcessMouseAim(aFpp, *aYawDelta, *aPitchDelta, *aYawDelta, *aPitchDelta);
+    DetachedReticle::InputHook::ProcessMouseAim(aFpp, *aYawDelta, *aPitchDelta, aSplitProbe, *aYawDelta, *aPitchDelta);
 }
-

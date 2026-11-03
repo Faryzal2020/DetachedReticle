@@ -4,6 +4,7 @@
 #include <string>
 #include <mutex>
 #include <vector>
+#include <chrono>
 
 namespace DetachedReticle {
 
@@ -24,12 +25,18 @@ public:
     static float GetResidualYaw();
     static float GetResidualPitch();
 
-    // Tier 2B Active Barrel Offset Compensation
+    // Tier 2B Active Barrel Offset Compensation & Recoil Transfer Telemetry
     static void SetBarrelOffset(float aYaw, float aPitch);
     static float GetCompYaw();
     static float GetCompPitch();
     static float GetT2BYaw();
     static float GetT2BPitch();
+    static float GetRecoilYaw();
+    static float GetRecoilPitch();
+    static float GetLastDeltaRecoilYaw();
+    static float GetLastDeltaRecoilPitch();
+    static float GetSplitErrYaw();
+    static float GetSplitErrPitch();
     static void SetCompParams(float aSpeedSettled, float aSpeedMoving, float aMaxSpeed, float aGapThreshold, float aMinSpeed);
     static float GetCompSpeedSettled();
     static float GetCompSpeedMoving();
@@ -60,7 +67,7 @@ public:
     static std::string DrainEvents();
 
     // State Variables
-    static inline float s_lambda{ 4.0f };
+    static inline float s_lambda{ 22.0f };
     static inline int32_t s_mode{ 0 }; // 0: exp, 1: linear, 2: spring, 3: power
     static inline float s_maxDiv{ 65.0f };
     static inline float s_deadzone{ 0.0f };
@@ -84,6 +91,19 @@ public:
     static inline float s_displayT2BYaw{ 0.0f };
     static inline float s_displayT2BPitch{ 0.0f };
 
+    // Tier 2 Native Recoil Offset State (W) & Split Probe Telemetry
+    static inline float s_recoilYaw{ 0.0f };
+    static inline float s_recoilPitch{ 0.0f };
+    static inline float s_recoilPeakYaw{ 0.0f };
+    static inline float s_recoilPeakPitch{ 0.0f };
+    static inline float s_recoilDriftPitch{ 0.0f };
+    static inline bool s_recoilRecovering{ false };
+    static inline float s_recoilIdleTimer{ 0.0f };
+    static inline float s_lastDRecoilYaw{ 0.0f };
+    static inline float s_lastDRecoilPitch{ 0.0f };
+    static inline float s_splitErrYaw{ 0.0f };
+    static inline float s_splitErrPitch{ 0.0f };
+
     // Tier 2B Compensation Parameters
     static inline float s_compSpeedSettled{ 12.0f };
     static inline float s_compSpeedMoving{ 4.0f };
@@ -99,7 +119,7 @@ public:
     static inline float s_expPower{ 0.6f };         // Curve exponent: 1.0 = linear exponential, 0.6 = tight power-law chase
 
     static void ResetChase(float aInitialPitch = 0.0f);
-    static void ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, float& outYaw, float& outPitch);
+    static void ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, const float* aSplitProbe, float& outYaw, float& outPitch);
 
 private:
     static inline RED4ext::v1::PluginHandle s_handle{ nullptr };
@@ -110,10 +130,10 @@ private:
     static inline bool s_isHooked{ false };
     static inline uint8_t* s_lookRelay{ nullptr };
     static inline std::chrono::steady_clock::time_point s_lastTime{};
+    static inline float s_smoothedDt{ 1.0f / 60.0f };
 };
 
 } // namespace DetachedReticle
 
 extern "C" void MouseLookRelay();
-extern "C" void OnNativeMouseAim(void* aFpp, float* aYawDelta, float* aPitchDelta);
-
+extern "C" void OnNativeMouseAim(void* aFpp, float* aYawDelta, float* aPitchDelta, const float* aSplitProbe);

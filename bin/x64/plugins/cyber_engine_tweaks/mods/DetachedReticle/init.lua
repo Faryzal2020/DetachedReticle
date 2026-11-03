@@ -281,8 +281,8 @@ local function SetupNativeSettings()
             ns.addRangeFloat(
                 "/detachedReticle/aiming",
                 "Catch-up Speed",
-                "Speed at which the body and gun turn to align with the camera reticle (0 = pure freelook, 6 = default realistic)",
-                0.0, 30.0, 0.5, "%.1f", Config.catchUpSpeed, 6.0,
+                "Speed at which the body and gun turn to align with the camera reticle (0 = pure freelook, 22 = default)",
+                0.0, 30.0, 0.5, "%.1f", Config.catchUpSpeed, 22.0,
                 function(val)
                     DetachedReticle.SetCatchUpSpeed(val)
                 end
@@ -309,7 +309,7 @@ local function SetupNativeSettings()
             )
 
             local algoOptions = { "Braking", "Exponential", "Linear", "Spring", "Power" }
-            local currentIdx = 1
+            local currentIdx = 2
             for i, name in ipairs(algoOptions) do
                 if name:lower() == Config.smoothingMode:lower() then
                     currentIdx = i
@@ -320,10 +320,10 @@ local function SetupNativeSettings()
             ns.addSelectorString(
                 "/detachedReticle/aiming",
                 "Catch-up Algorithm",
-                "Algorithm used to calculate the catch-up curve towards the camera reticle (Braking = Model A, Exponential = classic)",
-                algoOptions, currentIdx, 1,
+                "Algorithm used to calculate the catch-up curve towards the camera reticle (Exponential = default Power-Law, Braking = Model A)",
+                algoOptions, currentIdx, 2,
                 function(idx)
-                    local selected = algoOptions[idx] or "Braking"
+                    local selected = algoOptions[idx] or "Exponential"
                     DetachedReticle.SetSmoothingMode(selected:lower())
                 end
             )
@@ -444,18 +444,22 @@ registerForEvent("onUpdate", function(delta)
     end)
     local isArmed = weapon and not weapon:IsMelee() and not isDual
 
-    -- Residual and compensation settling state:
-    -- Keeps decoupled camera active until compensation and residual smoothly reach 0.0,
+    -- Residual, compensation, and recoil settling state:
+    -- Keeps decoupled camera active until compensation, recoil, and residual smoothly reach 0.0,
     -- preventing any camera snap during holster or weapon transition.
     local rYaw = 0.0
     local rPitch = 0.0
     local cYaw = 0.0
     local cPitch = 0.0
+    local wYaw = 0.0
+    local wPitch = 0.0
     pcall(function() rYaw = Game.DR_GetResidualYaw() end)
     pcall(function() rPitch = Game.DR_GetResidualPitch() end)
     pcall(function() cYaw = Game.DR_GetCompYaw() end)
     pcall(function() cPitch = Game.DR_GetCompPitch() end)
-    local settling = (math.abs(rYaw) + math.abs(rPitch) > 0.10) or (math.abs(cYaw) + math.abs(cPitch) > 0.10)
+    pcall(function() wYaw = Game.DR_GetRecoilYaw() end)
+    pcall(function() wPitch = Game.DR_GetRecoilPitch() end)
+    local settling = (math.abs(rYaw) + math.abs(rPitch) > 0.10) or (math.abs(cYaw) + math.abs(cPitch) > 0.10) or (math.abs(wYaw) + math.abs(wPitch) > 0.05)
 
     local shouldBeActive = Config.enabled and fpp and (isArmed or settling)
 
@@ -488,6 +492,8 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.lastCamYaw = nil
             DetachedReticle.lastBodyYaw = nil
             DetachedReticle.lastCYaw = nil
+            DetachedReticle.lastSettledCompTargetYaw = 0.0
+            DetachedReticle.lastSettledCompTargetPitch = 0.0
 
             -- Capture baseline sensitivity and heading lock before enabling chase
             local okNatX, natX = pcall(function() return Game.DR_GetSensitivityMultX(fpp) end)
@@ -533,13 +539,15 @@ registerForEvent("onUpdate", function(delta)
                 Config.smoothingMode, Config.catchUpSpeed, Config.expPower, Config.brakeThreshold, Config.brakeMaxSpeed, Config.maxDivergence, Config.deadzone, initPitch))
         end
 
-        -- Read native camera residuals (R = T - A)
+        -- Read native camera residuals (R = T - T2B = (T - A) + C - W)
         local rYaw = 0.0
         local rPitch = 0.0
         pcall(function() rYaw = Game.DR_GetResidualYaw() end)
         pcall(function() rPitch = Game.DR_GetResidualPitch() end)
+        pcall(function() wYaw = Game.DR_GetRecoilYaw() end)
+        pcall(function() wPitch = Game.DR_GetRecoilPitch() end)
 
-        -- Read native physical socket pitch angle (T2B = A - C) so the gravity-up axis matches the parent coordinate frame
+        -- Read native physical socket pitch angle (T2B = A - C + W) so the gravity-up axis matches the parent coordinate frame
         local socketPitch = 0.0
         pcall(function() socketPitch = Game.DR_GetT2BPitch() end)
         local pitchRad = math.rad(socketPitch)
@@ -575,11 +583,19 @@ registerForEvent("onUpdate", function(delta)
             local tPitch = 0.0
             local aPitch = 0.0
             local cYawNow = 0.0
+            local dRecYaw = 0.0
+            local dRecPitch = 0.0
+            local splitErrYaw = 0.0
+            local splitErrPitch = 0.0
             pcall(function() tYaw = Game.DR_GetTargetYaw() end)
             pcall(function() aYaw = Game.DR_GetAimYaw() end)
             pcall(function() tPitch = Game.DR_GetTargetPitch() end)
             pcall(function() aPitch = Game.DR_GetAimPitch() end)
             pcall(function() cYawNow = Game.DR_GetCompYaw() end)
+            pcall(function() dRecYaw = Game.DR_GetLastDeltaRecoilYaw() end)
+            pcall(function() dRecPitch = Game.DR_GetLastDeltaRecoilPitch() end)
+            pcall(function() splitErrYaw = Game.DR_GetSplitErrYaw() end)
+            pcall(function() splitErrPitch = Game.DR_GetSplitErrPitch() end)
 
             -- [PROBE P1] Rendered camera heading/pitch (CameraSystem.GetActiveCameraForward, cameraSystem.script:14)
             local camYaw, camPitch = 0.0, 0.0
@@ -591,18 +607,19 @@ registerForEvent("onUpdate", function(delta)
             end)
             local dCamYaw = normalizeDeg(camYaw - (DetachedReticle.lastCamYaw or camYaw))
             local dBody = normalizeDeg(bodyYaw - (DetachedReticle.lastBodyYaw or bodyYaw))
-            -- Predicted puppet step from the hook: dA - dC (aYaw is the last hook call's dA, InputHook.cpp:263)
-            local predBody = aYaw - (cYawNow - (DetachedReticle.lastCYaw or cYawNow))
+            -- Predicted puppet step from the hook: dA - dC + dRec
+            local predBody = aYaw - (cYawNow - (DetachedReticle.lastCYaw or cYawNow)) + dRecYaw
             DetachedReticle.lastCamYaw = camYaw
             DetachedReticle.lastBodyYaw = bodyYaw
             DetachedReticle.lastCYaw = cYawNow
 
-            -- [PROBE SEED] Model pitch T vs rendered camera pitch. Non-zero steady error = wrong initPitch seed.
+            -- [PROBE SEED] Model pitch T vs rendered camera pitch. Non-zero steady error = wrong initPitch seed or skeletal camera shake.
             local seedErr = camPitch - tPitch
 
-            local line = string.format("[F=%d] bodyYaw=%.4f rYaw=%.4f rPitch=%.4f tPitch=%.4f aPitch=%.4f fwdZ=%.4f fwdXY=%.4f | [P1] camYaw=%.3f camPitch=%.3f dCam=%+.3f dBody=%+.3f predBody=%+.3f cYaw=%+.3f | [1C] fppOverwrite=%.3f | [SEED] pitchErr=%+.3f",
+            local line = string.format("[F=%d] bodyYaw=%.4f rYaw=%.4f rPitch=%.4f tPitch=%.4f aPitch=%.4f fwdZ=%.4f fwdXY=%.4f | [P1] camYaw=%.3f camPitch=%.3f dCam=%+.3f dBody=%+.3f predBody=%+.3f cYaw=%+.3f | [1C] fppOverwrite=%.3f | [SEED] pitchErr=%+.3f | [RECOIL] W=(%+.3f,%+.3f) dRec=(%+.4f,%+.4f) splitErr=(%+.5f,%+.5f)",
                 DetachedReticle.frameCounter, bodyYaw, rYaw, rPitch, tPitch, aPitch, fwdZ, fwdXY,
-                camYaw, camPitch, dCamYaw, dBody, predBody, cYawNow, fppOverwriteDeg, seedErr)
+                camYaw, camPitch, dCamYaw, dBody, predBody, cYawNow, fppOverwriteDeg, seedErr,
+                wYaw, wPitch, dRecYaw, dRecPitch, splitErrYaw, splitErrPitch)
             Log(line)
         end
 
@@ -739,7 +756,7 @@ registerForEvent("onUpdate", function(delta)
             stateStr = "SAFE"
         end
 
-        -- Check mouse deflection gap to determine resting status
+        -- Check mouse deflection gap and active recoil state to determine resting status
         local tYaw = 0.0
         local aYaw = 0.0
         local tPitch = 0.0
@@ -750,7 +767,8 @@ registerForEvent("onUpdate", function(delta)
         pcall(function() aPitch = Game.DR_GetAimPitch() end)
         local rawGapYaw = math.abs(normalizeDeg(tYaw - aYaw))
         local rawGapPitch = math.abs(tPitch - aPitch)
-        local isResting = (rawGapYaw < 0.10) and (rawGapPitch < 0.10)
+        local isRecoiling = (math.abs(wYaw) + math.abs(wPitch) > 0.02)
+        local isResting = (rawGapYaw < 0.10) and (rawGapPitch < 0.10) and (not isRecoiling)
 
         if isResting and stateStr == "HIP" then
             DetachedReticle.restingFrames = (DetachedReticle.restingFrames or 0) + 1
@@ -805,17 +823,27 @@ registerForEvent("onUpdate", function(delta)
                 end
             end
             local isReadyStance = (readyWeight > 0.001)
+            local isSwinging = (rawGapYaw > 0.50) or (rawGapPitch > 0.50)
             DetachedReticle.lastReadyWeight = readyWeight
 
-            -- Reset integral trim on weapon change or HIP <-> ADS transitions
-            if weaponName ~= DetachedReticle.lastTrimWeapon or isADS ~= DetachedReticle.lastTrimADS then
+            -- Reset integral trim and settled compensation only on weapon change;
+            -- on HIP <-> ADS transitions, only reset trim for non-heavy weapons (HMG toggles crosshairState 4 <-> 8 on every zoomed shot)
+            if weaponName ~= DetachedReticle.lastTrimWeapon then
                 DetachedReticle.lastTrimWeapon = weaponName
                 DetachedReticle.lastTrimADS = isADS
                 DetachedReticle.trimYaw = 0.0
                 DetachedReticle.trimPitch = 0.0
+                DetachedReticle.lastSettledCompTargetYaw = nil
+                DetachedReticle.lastSettledCompTargetPitch = nil
+            elseif isADS ~= DetachedReticle.lastTrimADS then
+                DetachedReticle.lastTrimADS = isADS
+                if not isHeavyWeapon then
+                    DetachedReticle.trimYaw = 0.0
+                    DetachedReticle.trimPitch = 0.0
+                end
             end
 
-            -- Convergence on camera hit point: slow integral trim on screen error (only when fully resting at settled stance)
+            -- Convergence on camera hit point: slow integral trim on screen error (only when fully resting and not recoiling)
             -- Sign convention: scrX > 0 means reticle is right -> subtract trimYaw to steer gun left towards center (negative feedback)
             if isResting and isReadyStance and isArmed then
                 local dt = (type(delta) == "number" and delta > 0.0001 and delta < 0.1) and delta or 0.016
@@ -828,7 +856,22 @@ registerForEvent("onUpdate", function(delta)
             local targetYaw = math.max(-maxClamp, math.min(maxClamp, rawTargetYaw))
             local targetPitch = math.max(-maxClamp, math.min(maxClamp, rawTargetPitch))
 
-            if Config.activeAimOffset and isArmed and isReadyStance then
+            -- Hold Tier 2B target at its last settled pre-recoil/pre-swing value whenever recoiling,
+            -- swinging (mouse pan > 0.5 deg where upper-body turn lag twists diffYaw), or momentarily dipping
+            -- readyWeight from skeletal recoil animations while remaining in HIP/ADS stance.
+            local hasSettledComp = (DetachedReticle.lastSettledCompTargetYaw ~= nil) and (DetachedReticle.lastSettledCompTargetPitch ~= nil)
+            local isCombatStance = (not isSmartWeapon) and (stateStr == "HIP" or stateStr == "ADS")
+            if isRecoiling or isSwinging or (isCombatStance and readyWeight < 0.999 and hasSettledComp) then
+                if hasSettledComp then
+                    targetYaw = DetachedReticle.lastSettledCompTargetYaw
+                    targetPitch = DetachedReticle.lastSettledCompTargetPitch
+                end
+            elseif readyWeight >= 0.999 then
+                DetachedReticle.lastSettledCompTargetYaw = targetYaw
+                DetachedReticle.lastSettledCompTargetPitch = targetPitch
+            end
+
+            if Config.activeAimOffset and isArmed and isCombatStance and (isReadyStance or isRecoiling or isSwinging or hasSettledComp) then
                 pcall(function() Game.DR_SetBarrelOffset(targetYaw, targetPitch) end)
             else
                 -- While holstering, drawing, or unready: decay C smoothly to 0 via native filter
@@ -856,9 +899,12 @@ registerForEvent("onUpdate", function(delta)
             local totalDiv = math.deg(math.acos(dotAim))
 
             local modeStr = isResting and ("RESTING(" .. stateStr .. ")") or ("SWINGING(" .. stateStr .. ")")
+            if isRecoiling then
+                modeStr = "RECOILING(" .. stateStr .. ")"
+            end
 
-            local logLine = string.format("[GUN_OFFSET_MONITOR] Weapon=%s | Mode=%s | ReticleScreen=(%.1f, %.1f)px | GunAngles=(Yaw:%.2f, Pitch:%.2f) | AimAngles=(Yaw:%.2f, Pitch:%.2f) | Offset=(dYaw:%+.2f deg, dPitch:%+.2f deg, Total:%.2f deg)",
-                weaponName, modeStr, scrX, scrY, gunYaw, gunPitch, bodyYaw, aPitch, diffYaw, diffPitch, totalDiv)
+            local logLine = string.format("[GUN_OFFSET_MONITOR] Weapon=%s | Mode=%s | ReticleScreen=(%.1f, %.1f)px | GunAngles=(Yaw:%.2f, Pitch:%.2f) | AimAngles=(Yaw:%.2f, Pitch:%.2f) | RecoilW=(Y:%+.2f, P:%+.2f) | Offset=(dYaw:%+.2f deg, dPitch:%+.2f deg, Total:%.2f deg)",
+                weaponName, modeStr, scrX, scrY, gunYaw, gunPitch, bodyYaw, aPitch, wYaw, wPitch, diffYaw, diffPitch, totalDiv)
             Log(logLine)
 
             local cYaw = 0.0
@@ -870,8 +916,8 @@ registerForEvent("onUpdate", function(delta)
             pcall(function() t2bYaw = Game.DR_GetT2BYaw() end)
             pcall(function() t2bPitch = Game.DR_GetT2BPitch() end)
 
-            local compLine = string.format("[T2B_OFFSET_COMP] ReadyW=" .. string.format("%.2f", DetachedReticle.lastReadyWeight or 0.0) .. " | TargetErr=(dYaw:%+.2f deg, dPitch:%+.2f deg) | Trim=(Y:%+.2f, P:%+.2f) | CompApplied=(C_yaw:%+.2f deg, C_pitch:%+.2f deg) | T2A_Aim=(Yaw:%.2f, Pitch:%.2f) | T2B_Body=(Yaw:%.2f, Pitch:%.2f) | Residual=(rYaw:%.4f, rPitch:%.4f)",
-                diffYaw, diffPitch, (DetachedReticle.trimYaw or 0.0), (DetachedReticle.trimPitch or 0.0), cYaw, cPitch, bodyYaw, aPitch, t2bYaw, t2bPitch, rYaw, rPitch)
+            local compLine = string.format("[T2B_OFFSET_COMP] ReadyW=" .. string.format("%.2f", DetachedReticle.lastReadyWeight or 0.0) .. " | TargetErr=(dYaw:%+.2f deg, dPitch:%+.2f deg) | Trim=(Y:%+.2f, P:%+.2f) | CompApplied=(C_yaw:%+.2f deg, C_pitch:%+.2f deg) | RecoilW=(Y:%+.2f, P:%+.2f) | T2A_Aim=(Yaw:%.2f, Pitch:%.2f) | T2B_Body=(Yaw:%.2f, Pitch:%.2f) | Residual=(rYaw:%.4f, rPitch:%.4f)",
+                diffYaw, diffPitch, (DetachedReticle.trimYaw or 0.0), (DetachedReticle.trimPitch or 0.0), cYaw, cPitch, wYaw, wPitch, bodyYaw, aPitch, t2bYaw, t2bPitch, rYaw, rPitch)
             Log(compLine)
 
             -- Anomaly Watchdogs:
@@ -943,8 +989,8 @@ registerForEvent("onUpdate", function(delta)
                 tPt = aimSys:GetLastShotTargetPt()
                 angle = aimSys:GetLastShotAngleDeg()
             end)
-            Log(string.format("[BALLISTICS RECORD #%d] Divergence=%.2f deg | Muzzle=(%.2f, %.2f, %.2f) | BulletDir=(%.3f, %.3f, %.3f)",
-                shotCount, angle or 0.0,
+            Log(string.format("[BALLISTICS RECORD #%d] Divergence=%.2f deg | RecoilW=(%+.2f, %+.2f) deg | Muzzle=(%.2f, %.2f, %.2f) | BulletDir=(%.3f, %.3f, %.3f)",
+                shotCount, angle or 0.0, wYaw or 0.0, wPitch or 0.0,
                 (mPos and (mPos.x or mPos.X)) or 0.0, (mPos and (mPos.y or mPos.Y)) or 0.0, (mPos and (mPos.z or mPos.Z)) or 0.0,
                 (bDir and (bDir.x or bDir.X)) or 0.0, (bDir and (bDir.y or bDir.Y)) or 0.0, (bDir and (bDir.z or bDir.Z)) or 0.0
             ))
@@ -1011,7 +1057,7 @@ registerForEvent("onDraw", function()
             DetachedReticle.SetCatchUpSpeed(newSpeed)
         end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip("Speed at which the body turns to align with the camera reticle.\n0 = Body doesn't catch up (pure freelook)\n6 = Default realistic smoothed weight\n20+ = Fast / snappy")
+            ImGui.SetTooltip("Speed at which the body turns to align with the camera reticle.\n0 = Body doesn't catch up (pure freelook)\n22.0 = Default responsive weight")
         end
 
         -- Deadzone Slider (Zero deadzone by default)
@@ -1119,12 +1165,17 @@ registerForEvent("onDraw", function()
             local rPitch = 0.0
             local cYaw = 0.0
             local cPitch = 0.0
+            local wYaw = 0.0
+            local wPitch = 0.0
             pcall(function() rYaw = Game.DR_GetResidualYaw() end)
             pcall(function() rPitch = Game.DR_GetResidualPitch() end)
             pcall(function() cYaw = Game.DR_GetCompYaw() end)
             pcall(function() cPitch = Game.DR_GetCompPitch() end)
+            pcall(function() wYaw = Game.DR_GetRecoilYaw() end)
+            pcall(function() wPitch = Game.DR_GetRecoilPitch() end)
             ImGui.Text(string.format("Camera Residual: Yaw=%.2f deg | Pitch=%.2f deg", rYaw, rPitch))
             ImGui.Text(string.format("Tier 2B Compensation: C_yaw=%+.2f deg | C_pitch=%+.2f deg", cYaw, cPitch))
+            ImGui.Text(string.format("Tier 2 Recoil Offset: W_yaw=%+.2f deg | W_pitch=%+.2f deg", wYaw, wPitch))
         end
 
         ImGui.End()
@@ -1158,7 +1209,7 @@ DetachedReticle.SetActiveAimOffset = function(val)
 end
 
 DetachedReticle.SetCatchUpSpeed = function(val)
-    Config.catchUpSpeed = math.max(0.0, tonumber(val) or 6.0)
+    Config.catchUpSpeed = math.max(0.0, tonumber(val) or 22.0)
     SaveConfig()
     SyncSmoothing()
     Log(string.format("[OPTIONS] catchUpSpeed set to: %.2f", Config.catchUpSpeed))

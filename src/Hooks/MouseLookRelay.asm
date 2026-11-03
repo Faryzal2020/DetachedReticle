@@ -33,14 +33,30 @@ MouseLookRelay proc
     mov [rsp+0A8h], r10
     mov [rsp+0B0h], r11
 
-    ; Spill xmm6 (raw yaw delta) and xmm7 (raw pitch delta) to stack variables
+    ; Spill xmm6 (total yaw delta) and xmm7 (total pitch delta) to stack variables
     movss dword ptr [rsp+0C0h], xmm6
     movss dword ptr [rsp+0C4h], xmm7
 
-    ; Invoke OnNativeMouseAim(rcx, &yawDelta, &pitchDelta)
+    ; Read native weapon recoil/sway deltas and raw mouse deltas from sub_51CFA8 stack frame:
+    ; caller_rsp = rsp + 0D8h (local frame) + 8 (return addr) = rsp + 0E0h
+    ; [rbp-78h]        = dRecoilYaw   (written by weapon recoil subsystem [r10+350h] at 0x51D3B0)
+    ; [rbp-7Ch]        = dRecoilPitch (written by weapon recoil subsystem [r10+350h] at 0x51D3B0)
+    ; [caller_rsp+48h] = [rsp+128h] = dMouseYaw   (written by CameraMouseX at 0x51D32D-0x51D352)
+    ; [caller_rsp+44h] = [rsp+124h] = dMousePitch (written by CameraMouseY at 0x51D35E-0x51D385)
+    mov eax, dword ptr [rbp-78h]
+    mov dword ptr [rsp+0C8h], eax
+    mov eax, dword ptr [rbp-7Ch]
+    mov dword ptr [rsp+0CCh], eax
+    mov eax, dword ptr [rsp+128h]
+    mov dword ptr [rsp+0D0h], eax
+    mov eax, dword ptr [rsp+124h]
+    mov dword ptr [rsp+0D4h], eax
+
+    ; Invoke OnNativeMouseAim(rcx, &yawDelta, &pitchDelta, &splitProbe[0])
     ; rcx = context pointer
     lea rdx, [rsp+0C0h]
     lea r8,  [rsp+0C4h]
+    lea r9,  [rsp+0C8h]
     call OnNativeMouseAim
 
     ; Retrieve updated chase deltas back into xmm6 and xmm7
