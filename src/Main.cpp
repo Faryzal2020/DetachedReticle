@@ -224,6 +224,25 @@ void DR_GetBrakeMaxSpeed(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* a
     if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetBrakeMaxSpeed();
 }
 
+void DR_SetExpParams(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(aOut);
+    RED4EXT_UNUSED_PARAMETER(a4);
+
+    float minSpeed = 12.0f;
+    RED4ext::GetParameter(aFrame, &minSpeed);
+    aFrame->code++;
+
+    DetachedReticle::InputHook::SetExpParams(minSpeed);
+}
+
+void DR_GetExpMinSpeed(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetExpMinSpeed();
+}
+
 
 void DR_DrainEvents(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
     RED4EXT_UNUSED_PARAMETER(aContext);
@@ -402,6 +421,16 @@ void PostRegisterTypes() {
     funcGetBrakeMaxSpeed->flags = flags;
     funcGetBrakeMaxSpeed->SetReturnType("Float");
     rtti->RegisterFunction(funcGetBrakeMaxSpeed);
+
+    auto funcSetExpParams = RED4ext::CGlobalFunction::Create("DR_SetExpParams", "DR_SetExpParams", &DR_SetExpParams);
+    funcSetExpParams->flags = flags;
+    funcSetExpParams->AddParam("Float", "minSpeed");
+    rtti->RegisterFunction(funcSetExpParams);
+
+    auto funcGetExpMinSpeed = RED4ext::CGlobalFunction::Create("DR_GetExpMinSpeed", "DR_GetExpMinSpeed", &DR_GetExpMinSpeed);
+    funcGetExpMinSpeed->flags = flags;
+    funcGetExpMinSpeed->SetReturnType("Float");
+    rtti->RegisterFunction(funcGetExpMinSpeed);
 
 
     auto funcDrain = RED4ext::CGlobalFunction::Create("DR_DrainEvents", "DR_DrainEvents", &DR_DrainEvents);

@@ -1,4 +1,4 @@
-# Model A: Rate-Limited Saccade with Smoothstep Braking Zone
+# Dual-Model Decoupled Aim: Model A (Braking Zone) & Exponential (Option 1 Tail-Cutter)
 
 **Date:** 2026-11-03  
 **Status:** Implemented (Feature Branch `feature/model-a-braking-zone`)  
@@ -15,50 +15,56 @@ $$\frac{dA}{dt} = \lambda \cdot (T - A)$$
 
 While exponential smoothing is framerate-independent and prevents overshoot, it suffers from a fundamental human-feel drawback: **the asymptotic tail**.
 
-Because velocity is strictly proportional to remaining distance ($v \propto \text{gap}$), speed drops off continuously from the very first frame of motion. By the time the weapon gets within $2^\circ$ of the camera crosshair, speed has already dropped by $> 90\%$. The reticle then spends the vast majority of its total travel time creeping through the last few degrees ("tail crawl"), making the weapon feel sluggish to settle onto target after a flick.
-
-### Design Goal
-1. **Maintain high, constant cruising speed** throughout large mouse flicks.
-2. **Delay deceleration until the weapon is close to the target** (e.g. within $2.0^\circ$).
-3. **Decelerate rapidly and smoothly** within that braking window using a zero-acceleration boundary curve (Hermite smoothstep), eliminating both abrupt snapping and asymptotic creeping.
-4. **Preserve the Exponential model** as an instant toggle for players who prefer traditional passive sway.
+Because velocity is strictly proportional to remaining distance ($v \propto \text{gap}$), speed drops off continuously from the very first frame of motion. By the time the weapon gets within $1^\circ\text{--}2^\circ$ of the camera crosshair, speed has already dropped by $> 90\%$. The reticle then spends the vast majority of its total travel time creeping through the last few degrees ("tail crawl"), making the weapon feel sluggish to settle onto target after a flick.
 
 ---
 
-## 2. Mathematical Formulation
+## 2. Model Implementations
+
+### Mode 1: Model A — Rate-Limited Saccade with Smoothstep Braking Zone
 
 Model A splits the chase into two distinct kinematic phases based on the 2D Euclidean angular distance between camera gaze and physical aim:
 
 $$\text{gapMag} = \sqrt{\text{effGapYaw}^2 + \text{effGapPitch}^2}$$
 
-### Phase 1: Cruising Phase ($\text{gapMag} > \theta_{\text{brake}}$)
-When the weapon is farther than the braking threshold $\theta_{\text{brake}}$ (default $2.0^\circ$), it travels at constant maximum angular speed $\omega_{\max}$ along the normalized 2D direction vector:
+1. **Cruising Phase ($\text{gapMag} > \theta_{\text{brake}}$):**
+   When the weapon is farther than the braking threshold $\theta_{\text{brake}}$ (default $2.0^\circ$), it travels at constant maximum angular speed $\omega_{\max}$ along the normalized 2D direction vector:
+   $$v = \omega_{\max}$$
+   $$\text{step} = \omega_{\max} \cdot \Delta t$$
 
-$$v = \omega_{\max}$$
-$$\Delta A = \omega_{\max} \cdot \Delta t \cdot \frac{\vec{\text{gap}}}{\text{gapMag}}$$
+2. **Smoothstep Braking Phase ($0.02^\circ < \text{gapMag} \le \theta_{\text{brake}}$):**
+   Inside the braking window, the distance is normalized $u = \frac{\text{gapMag}}{\theta_{\text{brake}}} \in (0, 1]$.
+   A cubic Hermite smoothstep curve calculates the velocity scaling factor:
+   $$S(u) = 3u^2 - 2u^3$$
+   $$v = \omega_{\max} \cdot S(u)$$
+   $$\text{step} = v \cdot \Delta t$$
 
-*(If $\Delta A > \text{gapMag}$, $\Delta A$ is clamped to $\text{gapMag}$ to prevent overshoot).*
+   > [!IMPORTANT]
+   > **Camera-Pull Prevention (Multi-Frame Deceleration Bound):**  
+   > If $\omega_{\max} \cdot \Delta t$ is large (e.g. $6.0^\circ/\text{frame}$ at 60 FPS), clamping `step = gapMag` would cause the weapon to snap the entire remaining $1.5^\circ\text{--}2.0^\circ$ into the target in a single frame. Because the player camera is attached to the puppet body, this sudden 1-frame body delta causes a visible 1-frame camera jerk/pull due to sub-frame tick phase skew between native input and CET's `onUpdate`.  
+   > To prevent this, the per-frame step inside the braking zone is bounded by:
+   > $$\text{maxBrakeStep} = \max(0.04^\circ,\; \text{gapMag} \cdot 0.35)$$
+   > This guarantees the deceleration is smoothly distributed across 5 to 8 frames, completely eliminating camera pull.
 
-### Phase 2: Smoothstep Braking Phase ($0.02^\circ < \text{gapMag} \le \theta_{\text{brake}}$)
-Inside the braking window, the distance is normalized:
+3. **Sub-Pixel Resting Snap ($\text{gapMag} \le 0.02^\circ$):**
+   At $\le 0.02^\circ$ (sub-pixel scale), the remaining gap is closed immediately to eliminate infinitesimal floating-point remainder steps.
 
-$$u = \frac{\text{gapMag}}{\theta_{\text{brake}}} \in (0, 1]$$
+---
 
-A cubic Hermite smoothstep curve calculates the velocity scaling factor:
+### Mode 0: Exponential Model (Option 1: Minimum Speed Floor / Tail-Cutter)
 
-$$S(u) = 3u^2 - 2u^3$$
-$$v = \omega_{\max} \cdot S(u)$$
+For players who prefer the natural, organic curve of exponential smoothing, **Option 1** eliminates the sluggish asymptotic tail while preserving 100% of the natural exponential feel during mouse swings:
 
-Because $\frac{dS}{du} = 6u - 6u^2$:
-- At $u = 1$ (entering the braking zone): $S(1) = 1$ and $\frac{dS}{du} = 0$, producing a seamless $C^1$-continuous transition from constant cruising speed into deceleration.
-- At $u = 0$ (arriving at target): $S(0) = 0$ and $\frac{dS}{du} = 0$, ensuring the deceleration comes to rest with zero jerk.
-
-### Phase 3: Sub-Pixel Resting Snap ($\text{gapMag} \le 0.02^\circ$)
-At $\le 0.02^\circ$ (sub-pixel scale on 1080p/1440p displays), the remaining gap is closed immediately:
-
-$$\Delta A = \vec{\text{gap}}$$
-
-This cuts off infinitesimal floating-point remainder steps, ensuring crisp, definitive resting stability with zero jitter.
+1. **Exponential Swing Phase:**
+   $$\text{expStep} = \text{gapMag} \cdot (1 - e^{-\lambda \Delta t})$$
+2. **Speed Floor Phase:**
+   When the gap shrinks and exponential velocity drops below the configured floor `expMinSpeed` (default $12.0^\circ/\text{s}$), the step is clamped to:
+   $$\text{minStep} = \text{expMinSpeed} \cdot \Delta t$$
+   $$\text{step} = \max(\text{expStep},\; \min(\text{minStep},\; \text{gapMag}))$$
+3. **Behavior:**
+   - Wide flicks move with natural, organic exponential deceleration.
+   - Once inside the final $1.0^\circ\text{--}2.0^\circ$, instead of crawling for 30+ frames, the weapon finishes the remaining distance at a steady, crisp $12.0^\circ/\text{s}$ ($\approx 0.20^\circ/\text{frame}$ at 60 FPS), taking only $\sim 5$ frames to land cleanly on target.
+   - Setting `expMinSpeed = 0.0` restores pure vanilla exponential decay.
 
 ---
 
@@ -67,61 +73,58 @@ This cuts off infinitesimal floating-point remainder steps, ensuring crisp, defi
 ```
 Velocity
   ^
-  |        [ Cruise at Max Speed: 360 deg/s ]
+  |        [ Model A: Cruise at Max Speed ]
   |  ____________________________________________
   |                                              \
-  |                                               \ [ Smoothstep Brake Zone ]
+  |                                               \ [ Smoothstep Multi-Frame Decel ]
   +------------------------------------------------+----------> Distance to T1
                                                    0   (e.g. 2.0°)
 ```
 
-| Metric | Mode 0: Exponential Decay | Mode 1: Model A (Braking Zone) |
-|---|---|---|
-| **Speed at $20^\circ$ gap** | Peak ($20 \lambda \approx 120^\circ/\text{s}$) | Cruising speed ($\omega_{\max} = 360^\circ/\text{s}$) |
-| **Speed at $2^\circ$ gap** | Decelerated by $90\%$ ($12^\circ/\text{s}$) | **100% cruising speed ($360^\circ/\text{s}$)** |
-| **Speed at $1^\circ$ gap** | $6^\circ/\text{s}$ (crawl) | $180^\circ/\text{s}$ (active braking) |
-| **Settling Feel** | Soft, trailing, slow finish | **Crisp, snappy, definitive stop** |
-| **Best Used For** | Heavy cinematic weapons, slow sway | Snappy, competitive gunplay |
+```
+Velocity
+  ^
+  | [ Exponential Option 1: Natural Exponential Decay ]
+  | \
+  |  \
+  |   \
+  |    \__________ [ Steady expMinSpeed Floor (e.g. 12 deg/s) ]
+  |               \ [ Clean Rest ]
+  +----------------+-------------------------------------------> Distance to T1
+                   0 (e.g. 1.0°)
+```
+
+| Metric | Pure Exponential (Old) | Exponential + Option 1 (`expMinSpeed = 12`) | Model A (Braking Zone) |
+|---|---|---|---|
+| **Speed at $20^\circ$ gap** | $\approx 120^\circ/\text{s}$ | $\approx 120^\circ/\text{s}$ (100% identical) | Cruising speed ($360^\circ/\text{s}$) |
+| **Speed at $2^\circ$ gap** | $12^\circ/\text{s}$ | $12^\circ/\text{s}$ | High speed ($\sim 180^\circ/\text{s}$) |
+| **Speed at $0.5^\circ$ gap** | $3^\circ/\text{s}$ (crawling) | **$12^\circ/\text{s}$ (crisp approach)** | Controlled multi-frame decel |
+| **Frames to settle final $1^\circ$** | $> 30$ frames | **$\sim 5$ frames** | $\sim 5\text{--}7$ frames |
+| **Settling Feel** | Sluggish, soft crawl | **Natural swing + decisive finish** | **Saccadic flick + snappy brake** |
 
 ---
 
-## 4. Implementation Details
+## 4. Configuration & Dedicated Parameters
 
-### Native C++ Plugin (`DetachedReticle.dll`)
-1. **[`InputHook.hpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.hpp):**
-   - Added `s_brakeThreshold` (default `2.0f` deg) and `s_brakeMaxSpeed` (default `360.0f` deg/s).
-   - Added declarations for `SetBrakeParams`, `GetBrakeThreshold`, `GetBrakeMaxSpeed`.
-2. **[`InputHook.cpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.cpp):**
-   - Implemented `s_mode` branching in `ProcessMouseAim`:
-     - `s_mode == 0`: Exponential decay filter.
-     - `s_mode == 1`: Model A rate-limited saccade with smoothstep braking zone.
-   - Implemented `SetBrakeParams`, `GetBrakeThreshold`, `GetBrakeMaxSpeed`.
-3. **[`Main.cpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Main.cpp):**
-   - Registered `DR_SetBrakeParams(threshold: Float, maxSpeed: Float)`, `DR_GetBrakeThreshold() -> Float`, and `DR_GetBrakeMaxSpeed() -> Float` in REDengine RTTI.
+### Native RTTI APIs (`DetachedReticle.dll`)
+- `DR_SetSmoothing(lambda: Float, mode: Int32, maxDiv: Float, deadzone: Float, enabled: Bool)`
+- `DR_SetBrakeParams(threshold: Float, maxSpeed: Float)`
+- `DR_GetBrakeThreshold() -> Float`
+- `DR_GetBrakeMaxSpeed() -> Float`
+- `DR_SetExpParams(minSpeed: Float)`
+- `DR_GetExpMinSpeed() -> Float`
 
-### CET Lua Script (`init.lua`) & Config (`config.json`)
-1. **Configuration:** Added `brakeThreshold: 2.0`, `brakeMaxSpeed: 360.0`, and default `smoothingMode: "braking"`.
-2. **`SyncSmoothing()` Helper:** Automatically syncs mode integer (`"braking"` $\to 1$, `"exponential"` $\to 0$) and brake parameters to the native DLL on activation and whenever options change.
-3. **ImGui Overlay & NativeSettings:**
-   - Added `Braking (Model A)` option to the Catch-Up Algorithm radio/dropdown menu.
-   - Added interactive sliders for `Braking Zone` ($0.5^\circ$ to $10.0^\circ$) and `Max Cruise Speed` ($60^\circ/\text{s}$ to $1200^\circ/\text{s}$).
-4. **Console API:**
-   - `DetachedReticle.SetSmoothingMode("braking")` / `DetachedReticle.SetSmoothingMode("exponential")`
-   - `DetachedReticle.SetBrakeThreshold(degrees)`
-   - `DetachedReticle.SetBrakeMaxSpeed(degPerSec)`
+### Config & CET Options (`config.json` & `init.lua`)
+- **`smoothingMode`:** `"exponential"` or `"braking"`
+- **Model A Parameters:**
+  - `brakeThreshold`: Distance from camera gaze where deceleration begins ($0.5^\circ$ to $10.0^\circ$, default: `2.0 deg`).
+  - `brakeMaxSpeed`: Cruising speed outside braking zone ($60^\circ/\text{s}$ to $1200^\circ/\text{s}$, default: `360 deg/s`).
+- **Exponential Model Parameters:**
+  - `catchUpSpeed`: Chase rate constant $\lambda$ ($0.0$ to $30.0$, default: `6.0`).
+  - `expMinSpeed`: Minimum speed floor ($0.0$ to $30.0^\circ/\text{s}$, default: `12.0 deg/s`).
 
----
-
-## 5. Tuning Guide
-
-- **Fast & Snappy (Default Recommended):**
-  - Algorithm: `Braking (Model A)`
-  - Braking Zone: `2.0 deg`
-  - Max Cruise Speed: `360 deg/s`
-- **Ultra-Aggressive / Competitive:**
-  - Algorithm: `Braking (Model A)`
-  - Braking Zone: `1.2 deg`
-  - Max Cruise Speed: `500 deg/s`
-- **Heavy / Cinematic (Alternative):**
-  - Algorithm: `Exponential`
-  - Catch-up Speed: `5.0`
+### CET Console Commands
+- `DetachedReticle.SetSmoothingMode("exponential")` / `DetachedReticle.SetSmoothingMode("braking")`
+- `DetachedReticle.SetExpMinSpeed(12.0)`
+- `DetachedReticle.SetBrakeThreshold(2.0)`
+- `DetachedReticle.SetBrakeMaxSpeed(360.0)`

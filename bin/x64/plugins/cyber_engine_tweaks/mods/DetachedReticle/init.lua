@@ -10,9 +10,10 @@ local Config = {
     catchUpSpeed = 6.0,           -- Catch-up speed (higher = faster, lower = heavier physical weight)
     deadzone = 0.0,               -- Degrees: zero deadzone by default (turns immediately)
     maxDivergence = 65.0,         -- Degrees: maximum angular separation before pulling body
-    smoothingMode = "braking",    -- "braking" (Model A), "exponential", "linear", "spring", or "power"
+    smoothingMode = "exponential",-- "exponential", "braking" (Model A), "linear", "spring", or "power"
     brakeThreshold = 2.0,         -- Model A: Degrees from target where deceleration begins (default: 2.0)
     brakeMaxSpeed = 360.0,        -- Model A: Max cruising speed in deg/s (default: 360.0)
+    expMinSpeed = 12.0,           -- Exponential: Minimum speed floor in deg/s to eliminate tail crawl (default: 12.0)
     -- Tier 2B Barrel Compensation Parameters (Snappy by default)
     compSpeedSettled = 12.0,      -- T2B compensation speed when settled (default: 12.0, old: 4.5)
     compSpeedMoving = 4.0,        -- T2B compensation speed while swinging mouse (default: 4.0, old: 1.0)
@@ -70,12 +71,21 @@ local Algorithms = {
     end,
 
     exponential = function(diffYaw, diffPitch, divergenceMag, effectiveDivergence, dt, cfg, state)
+        if divergenceMag < 0.0001 then return 0.0, 0.0 end
         local decay = 1.0 - math.exp(-cfg.catchUpSpeed * dt)
         decay = math.max(0.0, math.min(1.0, decay))
-        if cfg.deadzone > 0.0 and divergenceMag > 0.001 then
-            decay = decay * (effectiveDivergence / divergenceMag)
+        local step = divergenceMag * decay
+        if cfg.expMinSpeed and cfg.expMinSpeed > 0.0 then
+            local minStep = cfg.expMinSpeed * dt
+            if step < minStep then
+                step = math.min(minStep, divergenceMag)
+            end
         end
-        return diffYaw * decay, diffPitch * decay
+        if divergenceMag <= 0.02 then
+            step = divergenceMag
+        end
+        local ratio = step / divergenceMag
+        return diffYaw * ratio, diffPitch * ratio
     end,
 
     linear = function(diffYaw, diffPitch, divergenceMag, effectiveDivergence, dt, cfg, state)
@@ -127,6 +137,7 @@ local function LoadConfig()
                 if data.smoothingMode ~= nil then Config.smoothingMode = tostring(data.smoothingMode):lower() end
                 if data.brakeThreshold ~= nil then Config.brakeThreshold = tonumber(data.brakeThreshold) or Config.brakeThreshold end
                 if data.brakeMaxSpeed ~= nil then Config.brakeMaxSpeed = tonumber(data.brakeMaxSpeed) or Config.brakeMaxSpeed end
+                if data.expMinSpeed ~= nil then Config.expMinSpeed = tonumber(data.expMinSpeed) or Config.expMinSpeed end
                 if data.compSpeedSettled ~= nil then Config.compSpeedSettled = tonumber(data.compSpeedSettled) or Config.compSpeedSettled end
                 if data.compSpeedMoving ~= nil then Config.compSpeedMoving = tonumber(data.compSpeedMoving) or Config.compSpeedMoving end
                 if data.compMaxSpeed ~= nil then Config.compMaxSpeed = tonumber(data.compMaxSpeed) or Config.compMaxSpeed end
@@ -151,6 +162,7 @@ local function SyncSmoothing()
     pcall(function()
         Game.DR_SetSmoothing(Config.catchUpSpeed, modeInt, Config.maxDivergence, Config.deadzone, DetachedReticle.chaseActive or false)
         Game.DR_SetBrakeParams(Config.brakeThreshold, Config.brakeMaxSpeed)
+        Game.DR_SetExpParams(Config.expMinSpeed)
     end)
 end
 
@@ -328,6 +340,16 @@ local function SetupNativeSettings()
                 60.0, 1200.0, 10.0, "%.0f deg/s", Config.brakeMaxSpeed, 360.0,
                 function(val)
                     DetachedReticle.SetBrakeMaxSpeed(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/aiming",
+                "Exponential Min Tail Speed",
+                "Exponential (Option 1): Minimum speed floor in degrees per second to eliminate end-tail crawl (default: 12.0 deg/s)",
+                0.0, 30.0, 0.5, "%.1f deg/s", Config.expMinSpeed, 12.0,
+                function(val)
+                    DetachedReticle.SetExpMinSpeed(val)
                 end
             )
 
@@ -1031,6 +1053,12 @@ registerForEvent("onDraw", function()
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip("Maximum cruising angular speed before entering braking zone.\nDefault: 360 deg/s")
             end
+        elseif Config.smoothingMode:lower() == "exponential" then
+            local newExpMin, minChanged = ImGui.SliderFloat("Min Tail Speed", Config.expMinSpeed, 0.0, 30.0, "%.1f deg/s")
+            if minChanged then DetachedReticle.SetExpMinSpeed(newExpMin) end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip("Option 1 Tail-Cutter: Minimum speed floor in degrees per second.\nEliminates the slow asymptotic tail-crawl while keeping the natural exponential curve.\nDefault: 12.0 deg/s (0.0 = pure exponential)")
+            end
         end
 
         -- Tier 2B Gun Alignment (T2B-to-T2A) Snappiness Sliders
@@ -1171,6 +1199,13 @@ DetachedReticle.SetBrakeMaxSpeed = function(val)
     Log(string.format("[OPTIONS] brakeMaxSpeed set to: %.1f deg/s", Config.brakeMaxSpeed))
 end
 
+DetachedReticle.SetExpMinSpeed = function(val)
+    Config.expMinSpeed = math.max(0.0, tonumber(val) or 12.0)
+    SaveConfig()
+    SyncSmoothing()
+    Log(string.format("[OPTIONS] expMinSpeed set to: %.1f deg/s", Config.expMinSpeed))
+end
+
 DetachedReticle.SetCompSpeedSettled = function(val)
     Config.compSpeedSettled = math.max(0.1, tonumber(val) or 12.0)
     SaveConfig()
@@ -1213,9 +1248,9 @@ DetachedReticle.SetDebugLogging = function(val)
 end
 
 DetachedReticle.GetOptions = function()
-    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg",
+    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | expMin=%.1f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg",
         tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode,
-        Config.brakeThreshold, Config.brakeMaxSpeed,
+        Config.brakeThreshold, Config.brakeMaxSpeed, Config.expMinSpeed,
         Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.compMinSpeed, Config.compGapThreshold))
     return Config
 end
