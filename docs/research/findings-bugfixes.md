@@ -1,4 +1,4 @@
-# DetachedReticle — Bugfixes & Polish Iterations
+﻿# DetachedReticle — Bugfixes & Polish Iterations
 
 Post-MVP 2 research, bug diagnoses, and iteration tracking for polish and edge-case resolution.
 
@@ -403,6 +403,27 @@ Post-MVP 2 research, bug diagnoses, and iteration tracking for polish and edge-c
      - In `src/Hooks/InputHook.cpp`, adjusted `s_targetCompYaw`, `s_targetCompPitch`, `s_compYaw`, and `s_compPitch` clamps from +/-3.0 deg to +/-8.0 deg to accommodate HMG's 6.6 deg pitch while protecting against runaway spikes.
      - Recompiled `DetachedReticle.dll` (Release) and deployed DLL, `init.lua`, and `DetachedReticle.reds` to repository and `<GAME_ROOT>`.
 - status: deployed, ready for verification.
+
+# iteration 37
+- date: 2026-11-03 13:40 +0700
+- context / review analysis (Round 9 review):
+  1. **Strict Scope Mandate:** Smart weapons MUST keep the chase (Tier 1 & Tier 2A decoupled gun/hand lag). Excluding smart weapons from mouse smoothing is off the table. They receive no Tier 2B torso compensation, no detached gun reticle, no camera center pip, and the vanilla smart crosshair must remain at screen center (0, 0).
+  2. **Core Discovery (Regular Reticle on Smart Weapon):** Testing revealed that drawing a smart weapon displays a regular gun reticle rather than the square smart targeting frame. Target acquisition/brackets fail because the native smart crosshair controller was never spawned/activated, not because brackets are misplaced.
+  3. **Pitch Seed Bug (Fix F0):** Previously, the smart branch in `DetachedReticle.reds` zeroed `aimSys.SetAimState`, causing `aimSys:GetCameraForward()` to return (0, 0, 0) and seeding `initPitch = 0.00` in `init.lua`. This caused horizon roll on weapon draws or swaps between smart and regular weapons.
+  4. **Unconditional Fix F2:** In `DetachedReticle.reds`, `activeWidget.SetVisible(true)` was being called every tick in the smart branch, overriding vanilla hiding during safe/sprint/reload/scan states.
+- implementation:
+  1. **Fix F0 (Universal Camera Pitch Seed):**
+     - In `init.lua`, replaced `aimSys:GetCameraForward()` with direct query to `Game.GetCameraSystem():GetActiveCameraForward()` to calculate `initPitch = atan2(cz, hypot(cx, cy))`.
+     - In `DetachedReticle.reds` smart branch, computed active camera forward vector `camFwd3` and passed it to `aimSys.SetAimState` with `isDetached = false` instead of zeroes.
+  2. **Fix F2 (Vanilla Crosshair State Preservation):**
+     - Removed `activeWidget.SetVisible(true)` from the smart branch in `DetachedReticle.reds`.
+  3. **Section 3.1 Smart Diagnostic Probe:**
+     - Extended `DetachedAimSystem` with probe fields and accessors: `m_smartCalls`, `m_smartTargets`, `m_smartLocked`, `m_smartHasLink`, `m_smartRegion`, `m_smartRootVis`, `m_smartRootOpacity`, `m_smartPreIntro`, `m_smartCtrlClass`, `m_smartWidgetName`, `m_smartExpectedXhair`.
+     - Wrapped `CrosshairGameController_Smart_Rifl.OnSmartGunParams(argParams: Variant) -> Bool` and `CrosshairGameController_Smart_Rifl.OnPreIntro() -> Bool` to track native event publishing, target lock state, and cyberware link status.
+     - In `DetachedReticle.reds:UpdateDetachedAim()`, recorded active controller class, widget name, and expected item TDBID crosshair record.
+     - In `init.lua`, added periodic `[SMART]` telemetry logger running every 30 frames whenever a smart weapon is equipped.
+  4. **Compile Fix:** smartGunUIParameters is an IScriptable class requiring indirection (ef<...>). Fixed FromVariant<smartGunUIParameters> to FromVariant<ref<smartGunUIParameters>>.
+- status: deployed, awaiting user diagnostic probe & bisection session (Round 9 Section 3).
 
 # next iteration above this line
 

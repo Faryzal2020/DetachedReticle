@@ -37,6 +37,11 @@ public:
     static float GetCompGapThreshold();
     static float GetCompMinSpeed();
 
+    // Model A: Braking Zone Chase Parameters
+    static void SetBrakeParams(float aThreshold, float aMaxSpeed);
+    static float GetBrakeThreshold();
+    static float GetBrakeMaxSpeed();
+
     // Sensitivity Mult Direct Memory Access (offsets 0x498, 0x49C on gameFPPCameraComponent)
     static void SetSensitivityMult(RED4ext::IScriptable* aFpp, float aMultX, float aMultY);
     static float GetSensitivityMultX(RED4ext::IScriptable* aFpp);
@@ -81,6 +86,10 @@ public:
     static inline float s_compMaxSpeed{ 240.0f };
     static inline float s_compGapThreshold{ 3.0f };
     static inline float s_compMinSpeed{ 6.0f };
+
+    // Model A (Braking Zone) Parameters
+    static inline float s_brakeThreshold{ 2.0f };   // Degrees: distance from target where deceleration begins
+    static inline float s_brakeMaxSpeed{ 360.0f };  // Deg/s: cruising speed outside braking zone (if <= 0, uses lambda * 60)
 
     static void ResetChase(float aInitialPitch = 0.0f);
     static void ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, float& outYaw, float& outPitch);

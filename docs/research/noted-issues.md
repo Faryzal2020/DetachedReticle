@@ -40,3 +40,4 @@ Redscript / CET language mistakes:
 - Vanilla does not rewrite the camera component's local orientation every frame. Multiplying an offset onto `GetLocalOrientation()` each frame compounds and spins the camera; offsets must be applied to a baseline captured once.
 - Inverting the residual yaw sign (`-rYaw`) made the gun appear to move ahead of the camera; positive engine yaw is left.
 - Hooking RVA 0x39CB63 missed horizontal input (a branch bypasses it); hooking the 0x39CA70 entry gets a zeroed mouse X (caller does `xorps xmm2, xmm2`); hooking the 0x39CBE3 call only moves the camera component, not body yaw. Only 0x51D462 carries both deltas.
+- In REDengine / redscript, smartGunUIParameters is an IScriptable class rather than a plain struct. In redscript, class types cannot be passed or declared as direct value types; they require pointer indirection (ref<...> or wref<...>).

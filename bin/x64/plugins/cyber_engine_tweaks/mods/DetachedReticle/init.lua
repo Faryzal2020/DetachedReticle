@@ -10,7 +10,9 @@ local Config = {
     catchUpSpeed = 6.0,           -- Catch-up speed (higher = faster, lower = heavier physical weight)
     deadzone = 0.0,               -- Degrees: zero deadzone by default (turns immediately)
     maxDivergence = 65.0,         -- Degrees: maximum angular separation before pulling body
-    smoothingMode = "exponential",-- "exponential", "linear", "spring", or "power"
+    smoothingMode = "braking",    -- "braking" (Model A), "exponential", "linear", "spring", or "power"
+    brakeThreshold = 2.0,         -- Model A: Degrees from target where deceleration begins (default: 2.0)
+    brakeMaxSpeed = 360.0,        -- Model A: Max cruising speed in deg/s (default: 360.0)
     -- Tier 2B Barrel Compensation Parameters (Snappy by default)
     compSpeedSettled = 12.0,      -- T2B compensation speed when settled (default: 12.0, old: 4.5)
     compSpeedMoving = 4.0,        -- T2B compensation speed while swinging mouse (default: 4.0, old: 1.0)
@@ -49,6 +51,24 @@ end
 
 -- Modular Catch-Up Smoothing Algorithms (script-side fallbacks/references)
 local Algorithms = {
+    braking = function(diffYaw, diffPitch, divergenceMag, effectiveDivergence, dt, cfg, state)
+        if divergenceMag < 0.0001 then return 0.0, 0.0 end
+        local thresh = cfg.brakeThreshold or 2.0
+        local maxSpd = cfg.brakeMaxSpeed or (cfg.catchUpSpeed * 60.0)
+        if divergenceMag <= 0.02 then
+            return diffYaw, diffPitch
+        end
+        local v = maxSpd
+        if divergenceMag <= thresh then
+            local u = divergenceMag / thresh
+            local smooth = u * u * (3.0 - 2.0 * u)
+            v = maxSpd * smooth
+        end
+        local step = math.min(divergenceMag, v * dt)
+        local ratio = step / divergenceMag
+        return diffYaw * ratio, diffPitch * ratio
+    end,
+
     exponential = function(diffYaw, diffPitch, divergenceMag, effectiveDivergence, dt, cfg, state)
         local decay = 1.0 - math.exp(-cfg.catchUpSpeed * dt)
         decay = math.max(0.0, math.min(1.0, decay))
@@ -105,6 +125,8 @@ local function LoadConfig()
                 if data.deadzone ~= nil then Config.deadzone = tonumber(data.deadzone) or Config.deadzone end
                 if data.maxDivergence ~= nil then Config.maxDivergence = tonumber(data.maxDivergence) or Config.maxDivergence end
                 if data.smoothingMode ~= nil then Config.smoothingMode = tostring(data.smoothingMode):lower() end
+                if data.brakeThreshold ~= nil then Config.brakeThreshold = tonumber(data.brakeThreshold) or Config.brakeThreshold end
+                if data.brakeMaxSpeed ~= nil then Config.brakeMaxSpeed = tonumber(data.brakeMaxSpeed) or Config.brakeMaxSpeed end
                 if data.compSpeedSettled ~= nil then Config.compSpeedSettled = tonumber(data.compSpeedSettled) or Config.compSpeedSettled end
                 if data.compSpeedMoving ~= nil then Config.compSpeedMoving = tonumber(data.compSpeedMoving) or Config.compSpeedMoving end
                 if data.compMaxSpeed ~= nil then Config.compMaxSpeed = tonumber(data.compMaxSpeed) or Config.compMaxSpeed end
@@ -114,6 +136,22 @@ local function LoadConfig()
             end
         end
     end
+end
+
+local function GetSmoothingModeInt()
+    local m = tostring(Config.smoothingMode):lower()
+    if m == "braking" or m == "brake" or m == "modela" or m == "smoothstep" then
+        return 1
+    end
+    return 0 -- default to exponential
+end
+
+local function SyncSmoothing()
+    local modeInt = GetSmoothingModeInt()
+    pcall(function()
+        Game.DR_SetSmoothing(Config.catchUpSpeed, modeInt, Config.maxDivergence, Config.deadzone, DetachedReticle.chaseActive or false)
+        Game.DR_SetBrakeParams(Config.brakeThreshold, Config.brakeMaxSpeed)
+    end)
 end
 
 local function SyncCompParams()
@@ -253,7 +291,7 @@ local function SetupNativeSettings()
                 end
             )
 
-            local algoOptions = { "Exponential", "Linear", "Spring", "Power" }
+            local algoOptions = { "Braking", "Exponential", "Linear", "Spring", "Power" }
             local currentIdx = 1
             for i, name in ipairs(algoOptions) do
                 if name:lower() == Config.smoothingMode:lower() then
@@ -265,11 +303,31 @@ local function SetupNativeSettings()
             ns.addSelectorString(
                 "/detachedReticle/aiming",
                 "Catch-up Algorithm",
-                "Modular algorithm used to calculate the catch-up curve towards the camera reticle",
+                "Algorithm used to calculate the catch-up curve towards the camera reticle (Braking = Model A, Exponential = classic)",
                 algoOptions, currentIdx, 1,
                 function(idx)
-                    local selected = algoOptions[idx] or "Exponential"
+                    local selected = algoOptions[idx] or "Braking"
                     DetachedReticle.SetSmoothingMode(selected:lower())
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/aiming",
+                "Braking Threshold Angle",
+                "Model A: Distance in degrees from camera gaze where deceleration begins (default: 2.0 deg)",
+                0.5, 10.0, 0.1, "%.1f deg", Config.brakeThreshold, 2.0,
+                function(val)
+                    DetachedReticle.SetBrakeThreshold(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/aiming",
+                "Max Cruise Speed",
+                "Model A: Maximum cruising angular speed in degrees per second before entering braking zone (default: 360 deg/s)",
+                60.0, 1200.0, 10.0, "%.0f deg/s", Config.brakeMaxSpeed, 360.0,
+                function(val)
+                    DetachedReticle.SetBrakeMaxSpeed(val)
                 end
             )
 
@@ -415,27 +473,24 @@ registerForEvent("onUpdate", function(delta)
             local okHead, headLocked = pcall(function() return Game.DR_GetHeadingLocked(fpp) end)
             DetachedReticle.origHeadingLocked = (okHead and headLocked) or false
 
-            -- Get initial camera pitch before chase begins
+            -- Get initial camera pitch before chase begins from rendered active camera (Fix F0)
             local initPitch = 0.0
             pcall(function()
-                local aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
-                if aimSys then
-                    local fwd = aimSys:GetCameraForward()
-                    if fwd and (fwd.x ~= 0 or fwd.y ~= 0 or fwd.z ~= 0) then
-                        local fx = fwd.x or fwd.X or 0.0
-                        local fy = fwd.y or fwd.Y or 0.0
-                        local fz = fwd.z or fwd.Z or 0.0
-                        local xy = math.sqrt(fx * fx + fy * fy)
-                        if xy > 0.0001 or math.abs(fz) > 0.0001 then
-                            initPitch = math.deg(math.atan2(fz, xy))
-                        end
+                local cf = Game.GetCameraSystem():GetActiveCameraForward()
+                if cf then
+                    local cx = cf.x or cf.X or 0.0
+                    local cy = cf.y or cf.Y or 0.0
+                    local cz = cf.z or cf.Z or 0.0
+                    local xy = math.sqrt(cx * cx + cy * cy)
+                    if xy > 0.0001 or math.abs(cz) > 0.0001 then
+                        initPitch = math.deg(math.atan2(cz, xy))
                     end
                 end
             end)
 
             -- Reset native chase state with initial pitch and activate native look smoothing
             pcall(function() Game.DR_ResetChasePitch(initPitch) end)
-            pcall(function() Game.DR_SetSmoothing(Config.catchUpSpeed, 0, Config.maxDivergence, Config.deadzone, true) end)
+            SyncSmoothing()
             SyncCompParams()
 
             -- Ensure heading lock is FALSE so engine actuates native chase deltas
@@ -447,8 +502,8 @@ registerForEvent("onUpdate", function(delta)
             pcall(function() fpp.sensitivityMultX = DetachedReticle.origSensX end)
             pcall(function() fpp.sensitivityMultY = DetachedReticle.origSensY end)
 
-            Log(string.format("Decoupled Aim ACTIVE: speed=%.1f maxDiv=%.1f deadzone=%.1f initPitch=%.2f",
-                Config.catchUpSpeed, Config.maxDivergence, Config.deadzone, initPitch))
+            Log(string.format("Decoupled Aim ACTIVE: mode=%s speed=%.1f brakeThresh=%.1f brakeMax=%.0f maxDiv=%.1f deadzone=%.1f initPitch=%.2f",
+                Config.smoothingMode, Config.catchUpSpeed, Config.brakeThreshold, Config.brakeMaxSpeed, Config.maxDivergence, Config.deadzone, initPitch))
         end
 
         -- Read native camera residuals (R = T - A)
@@ -556,6 +611,69 @@ registerForEvent("onUpdate", function(delta)
             end
             if not isSmartWeapon and weaponName and (weaponName:find("Smart") or weaponName:find("smart")) then
                 isSmartWeapon = true
+            end
+        end
+
+        -- [PROBE SMART] Log smart weapon targeting parameters and UI state every 30 frames
+        if isSmartWeapon then
+            DetachedReticle.smartFrameCounter = (DetachedReticle.smartFrameCounter or 0) + 1
+            if DetachedReticle.smartFrameCounter % 30 == 0 then
+                local ctrlClass = "NULL"
+                local widgetName = "NULL"
+                local xhairRecord = "NULL"
+                local calls = 0
+                local preIntro = 0
+                local targets = 0
+                local locked = 0
+                local hasLink = false
+                local regX, regY = 0.0, 0.0
+                local rootVis = false
+                local rootOpacity = 0.0
+
+                pcall(function()
+                    local probeAimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
+                    if probeAimSys then
+                        ctrlClass = probeAimSys:GetSmartCtrlClass()
+                        widgetName = probeAimSys:GetSmartWidgetName()
+                        xhairRecord = probeAimSys:GetSmartExpectedXhair()
+                        calls = probeAimSys:GetSmartCalls()
+                        preIntro = probeAimSys:GetSmartPreIntro()
+                        targets = probeAimSys:GetSmartTargets()
+                        locked = probeAimSys:GetSmartLocked()
+                        hasLink = probeAimSys:GetSmartHasLink()
+                        local reg = probeAimSys:GetSmartRegion()
+                        if reg then
+                            regX = reg.x or reg.X or 0.0
+                            regY = reg.y or reg.Y or 0.0
+                        end
+                        rootVis = probeAimSys:GetSmartRootVis()
+                        rootOpacity = probeAimSys:GetSmartRootOpacity()
+                    end
+                end)
+
+                local deltaCalls = calls - (DetachedReticle.lastSmartCalls or 0)
+                DetachedReticle.lastSmartCalls = calls
+
+                local psmLocked = false
+                pcall(function()
+                    if psmBB then
+                        psmLocked = psmBB:GetBool(GetAllBlackboardDefs().PlayerStateMachine.HasSmartGunLockedOnTarget)
+                    end
+                end)
+
+                local playerSmartLink = 0.0
+                pcall(function()
+                    local statsSys = Game.GetStatsSystem()
+                    if statsSys and player then
+                        playerSmartLink = statsSys:GetStatValue(player:GetEntityID(), gamedataStatType.HasSmartLink)
+                    end
+                end)
+
+                local smartLine = string.format("[SMART] ctrl=%s widget=%s xhairRecord=%s calls=%d preIntro=%d targets=%d locked=%d hasLink=%s region=(%.1f,%.1f) rootVis=%s rootOpacity=%.2f psmLocked=%s playerSmartLink=%.0f chase=%s",
+                    tostring(ctrlClass), tostring(widgetName), tostring(xhairRecord), deltaCalls, preIntro, targets, locked,
+                    tostring(hasLink), regX, regY, tostring(rootVis), rootOpacity,
+                    tostring(psmLocked), playerSmartLink, tostring(DetachedReticle.chaseActive))
+                Log(smartLine)
             end
         end
 
@@ -754,7 +872,7 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.restingFrames = 0
             if DetachedReticle.chaseActive then
                 DetachedReticle.chaseActive = false
-                pcall(function() Game.DR_SetSmoothing(Config.catchUpSpeed, 0, Config.maxDivergence, Config.deadzone, false) end)
+                pcall(function() Game.DR_SetSmoothing(Config.catchUpSpeed, GetSmoothingModeInt(), Config.maxDivergence, Config.deadzone, false) end)
             end
             if fpp then
                 if DetachedReticle.baselineRot then
@@ -890,15 +1008,30 @@ registerForEvent("onDraw", function()
         -- Algorithm Selector
         ImGui.Separator()
         ImGui.Text("Catch-Up Algorithm:")
-        local algoList = { "exponential", "linear", "spring", "power" }
+        local algoList = { "braking", "exponential", "linear", "spring", "power" }
         for _, algoName in ipairs(algoList) do
             local isSelected = (Config.smoothingMode:lower() == algoName)
-            if ImGui.RadioButton(algoName:gsub("^%l", string.upper), isSelected) then
+            local label = (algoName == "braking") and "Braking (Model A)" or algoName:gsub("^%l", string.upper)
+            if ImGui.RadioButton(label, isSelected) then
                 DetachedReticle.SetSmoothingMode(algoName)
             end
             ImGui.SameLine()
         end
         ImGui.NewLine()
+
+        if Config.smoothingMode:lower() == "braking" then
+            local newBrakeThresh, threshChanged = ImGui.SliderFloat("Braking Zone", Config.brakeThreshold, 0.5, 10.0, "%.1f deg")
+            if threshChanged then DetachedReticle.SetBrakeThreshold(newBrakeThresh) end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip("Distance in degrees from camera gaze where deceleration begins.\nDefault: 2.0 deg")
+            end
+
+            local newBrakeMax, maxSpdChanged = ImGui.SliderFloat("Max Cruise Speed", Config.brakeMaxSpeed, 60.0, 1200.0, "%.0f deg/s")
+            if maxSpdChanged then DetachedReticle.SetBrakeMaxSpeed(newBrakeMax) end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip("Maximum cruising angular speed before entering braking zone.\nDefault: 360 deg/s")
+            end
+        end
 
         -- Tier 2B Gun Alignment (T2B-to-T2A) Snappiness Sliders
         ImGui.Separator()
@@ -972,7 +1105,7 @@ DetachedReticle.SetEnabled = function(val)
     if not Config.enabled and DetachedReticle.chaseActive then
         DetachedReticle.chaseActive = false
         pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
-        pcall(function() Game.DR_SetSmoothing(Config.catchUpSpeed, 0, Config.maxDivergence, Config.deadzone, false) end)
+        pcall(function() Game.DR_SetSmoothing(Config.catchUpSpeed, GetSmoothingModeInt(), Config.maxDivergence, Config.deadzone, false) end)
         local player = Game.GetPlayer()
         local fpp = player and player:GetFPPCameraComponent()
         if fpp and DetachedReticle.baselineRot then
@@ -994,30 +1127,48 @@ end
 DetachedReticle.SetCatchUpSpeed = function(val)
     Config.catchUpSpeed = math.max(0.0, tonumber(val) or 6.0)
     SaveConfig()
+    SyncSmoothing()
     Log(string.format("[OPTIONS] catchUpSpeed set to: %.2f", Config.catchUpSpeed))
 end
 
 DetachedReticle.SetDeadzone = function(val)
     Config.deadzone = math.max(0.0, tonumber(val) or 0.0)
     SaveConfig()
+    SyncSmoothing()
     Log(string.format("[OPTIONS] deadzone set to: %.2f deg", Config.deadzone))
 end
 
 DetachedReticle.SetMaxDivergence = function(val)
     Config.maxDivergence = math.max(10.0, tonumber(val) or 65.0)
     SaveConfig()
+    SyncSmoothing()
     Log(string.format("[OPTIONS] maxDivergence set to: %.2f deg", Config.maxDivergence))
 end
 
 DetachedReticle.SetSmoothingMode = function(mode)
     local m = tostring(mode):lower()
-    if Algorithms[m] then
+    if Algorithms[m] or m == "braking" then
         Config.smoothingMode = m
         SaveConfig()
+        SyncSmoothing()
         Log(string.format("[OPTIONS] smoothingMode set to: %s", Config.smoothingMode))
     else
         Log(string.format("[OPTIONS] Unknown smoothing mode '%s'. Available: %s", mode, table.concat(DetachedReticle.GetAlgorithms(), ", ")))
     end
+end
+
+DetachedReticle.SetBrakeThreshold = function(val)
+    Config.brakeThreshold = math.max(0.1, tonumber(val) or 2.0)
+    SaveConfig()
+    SyncSmoothing()
+    Log(string.format("[OPTIONS] brakeThreshold set to: %.2f deg", Config.brakeThreshold))
+end
+
+DetachedReticle.SetBrakeMaxSpeed = function(val)
+    Config.brakeMaxSpeed = math.max(10.0, tonumber(val) or 360.0)
+    SaveConfig()
+    SyncSmoothing()
+    Log(string.format("[OPTIONS] brakeMaxSpeed set to: %.1f deg/s", Config.brakeMaxSpeed))
 end
 
 DetachedReticle.SetCompSpeedSettled = function(val)
@@ -1062,8 +1213,9 @@ DetachedReticle.SetDebugLogging = function(val)
 end
 
 DetachedReticle.GetOptions = function()
-    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg",
+    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg",
         tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode,
+        Config.brakeThreshold, Config.brakeMaxSpeed,
         Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.compMinSpeed, Config.compGapThreshold))
     return Config
 end

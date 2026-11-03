@@ -153,6 +153,13 @@ float InputHook::GetCompMaxSpeed() { return s_compMaxSpeed; }
 float InputHook::GetCompGapThreshold() { return s_compGapThreshold; }
 float InputHook::GetCompMinSpeed() { return s_compMinSpeed; }
 
+void InputHook::SetBrakeParams(float aThreshold, float aMaxSpeed) {
+    s_brakeThreshold = (aThreshold > 0.05f) ? aThreshold : 0.05f;
+    s_brakeMaxSpeed = (aMaxSpeed > 10.0f) ? aMaxSpeed : 10.0f;
+}
+float InputHook::GetBrakeThreshold() { return s_brakeThreshold; }
+float InputHook::GetBrakeMaxSpeed() { return s_brakeMaxSpeed; }
+
 void InputHook::SetSmoothing(float aLambda, int32_t aMode, float aMaxDiv, float aDeadzone, bool aEnabled) {
     s_lambda = aLambda;
     s_mode = aMode;
@@ -209,10 +216,45 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
     }
     float effGapPitch = gapPitch;
 
-    // 5. Exponential filter: step dA = gap * (1 - exp(-lambda * dt))
-    float factor = 1.0f - std::exp(-s_lambda * dt);
-    float dAYaw = effGapYaw * factor;
-    float dAPitch = effGapPitch * factor;
+    // 5. Chase Filter (s_mode 0 = Exponential, s_mode 1 = Model A Braking Zone)
+    float dAYaw = 0.0f;
+    float dAPitch = 0.0f;
+
+    if (s_mode == 1) {
+        // Model A: Rate-Limited Saccade with Smoothstep Braking Zone
+        float gapMag = std::sqrt(effGapYaw * effGapYaw + effGapPitch * effGapPitch);
+        if (gapMag > 0.0001f) {
+            float thresh = (s_brakeThreshold > 0.05f) ? s_brakeThreshold : 2.0f;
+            float maxSpd = (s_brakeMaxSpeed > 10.0f) ? s_brakeMaxSpeed : (s_lambda * 60.0f);
+
+            // Sub-pixel resting tolerance: snap cleanly without asymptotic tail
+            if (gapMag <= 0.02f) {
+                dAYaw = effGapYaw;
+                dAPitch = effGapPitch;
+            } else {
+                float v = maxSpd;
+                if (gapMag <= thresh) {
+                    float u = gapMag / thresh;
+                    // Cubic Hermite smoothstep: 3u^2 - 2u^3
+                    float smooth = u * u * (3.0f - 2.0f * u);
+                    v = maxSpd * smooth;
+                }
+
+                float step = v * dt;
+                if (step > gapMag) {
+                    step = gapMag;
+                }
+
+                dAYaw = (effGapYaw / gapMag) * step;
+                dAPitch = (effGapPitch / gapMag) * step;
+            }
+        }
+    } else {
+        // Mode 0: Exponential filter: step dA = gap * (1 - exp(-lambda * dt))
+        float factor = 1.0f - std::exp(-s_lambda * dt);
+        dAYaw = effGapYaw * factor;
+        dAPitch = effGapPitch * factor;
+    }
 
     // 6. Advance Tier 2A (Anchor Aim Direction)
     s_aimYaw += dAYaw;

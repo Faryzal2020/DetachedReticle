@@ -195,6 +195,35 @@ void DR_GetCompMinSpeed(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aF
     if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetCompMinSpeed();
 }
 
+void DR_SetBrakeParams(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(aOut);
+    RED4EXT_UNUSED_PARAMETER(a4);
+
+    float threshold = 2.0f;
+    float maxSpeed = 360.0f;
+
+    RED4ext::GetParameter(aFrame, &threshold);
+    RED4ext::GetParameter(aFrame, &maxSpeed);
+    aFrame->code++;
+
+    DetachedReticle::InputHook::SetBrakeParams(threshold, maxSpeed);
+}
+
+void DR_GetBrakeThreshold(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetBrakeThreshold();
+}
+
+void DR_GetBrakeMaxSpeed(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetBrakeMaxSpeed();
+}
+
 
 void DR_DrainEvents(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
     RED4EXT_UNUSED_PARAMETER(aContext);
@@ -357,6 +386,22 @@ void PostRegisterTypes() {
     funcSetCompParams->AddParam("Float", "gapThreshold");
     funcSetCompParams->AddParam("Float", "minAngularSpeed");
     rtti->RegisterFunction(funcSetCompParams);
+
+    auto funcSetBrakeParams = RED4ext::CGlobalFunction::Create("DR_SetBrakeParams", "DR_SetBrakeParams", &DR_SetBrakeParams);
+    funcSetBrakeParams->flags = flags;
+    funcSetBrakeParams->AddParam("Float", "threshold");
+    funcSetBrakeParams->AddParam("Float", "maxSpeed");
+    rtti->RegisterFunction(funcSetBrakeParams);
+
+    auto funcGetBrakeThreshold = RED4ext::CGlobalFunction::Create("DR_GetBrakeThreshold", "DR_GetBrakeThreshold", &DR_GetBrakeThreshold);
+    funcGetBrakeThreshold->flags = flags;
+    funcGetBrakeThreshold->SetReturnType("Float");
+    rtti->RegisterFunction(funcGetBrakeThreshold);
+
+    auto funcGetBrakeMaxSpeed = RED4ext::CGlobalFunction::Create("DR_GetBrakeMaxSpeed", "DR_GetBrakeMaxSpeed", &DR_GetBrakeMaxSpeed);
+    funcGetBrakeMaxSpeed->flags = flags;
+    funcGetBrakeMaxSpeed->SetReturnType("Float");
+    rtti->RegisterFunction(funcGetBrakeMaxSpeed);
 
 
     auto funcDrain = RED4ext::CGlobalFunction::Create("DR_DrainEvents", "DR_DrainEvents", &DR_DrainEvents);

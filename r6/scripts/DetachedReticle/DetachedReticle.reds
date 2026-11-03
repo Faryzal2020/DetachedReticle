@@ -69,6 +69,51 @@ public class DetachedAimSystem extends ScriptableSystem {
         return this.m_currentCycleIndex;
     }
 
+    // Smart gun diagnostic probe fields
+    private let m_smartCalls: Int32;
+    private let m_smartTargets: Int32;
+    private let m_smartLocked: Int32;
+    private let m_smartHasLink: Bool;
+    private let m_smartRegion: Vector2;
+    private let m_smartRootVis: Bool;
+    private let m_smartRootOpacity: Float;
+    private let m_smartPreIntro: Int32;
+    private let m_smartCtrlClass: String;
+    private let m_smartWidgetName: String;
+    private let m_smartExpectedXhair: String;
+
+    public func RecordSmartParams(targets: Int32, locked: Int32, hasLink: Bool, region: Vector2, rootVis: Bool, rootOpacity: Float) -> Void {
+        this.m_smartCalls += 1;
+        this.m_smartTargets = targets;
+        this.m_smartLocked = locked;
+        this.m_smartHasLink = hasLink;
+        this.m_smartRegion = region;
+        this.m_smartRootVis = rootVis;
+        this.m_smartRootOpacity = rootOpacity;
+    }
+
+    public func RecordSmartPreIntro() -> Void {
+        this.m_smartPreIntro += 1;
+    }
+
+    public func RecordSmartUIIdentity(ctrlClass: String, widgetName: String, expectedXhair: String) -> Void {
+        this.m_smartCtrlClass = ctrlClass;
+        this.m_smartWidgetName = widgetName;
+        this.m_smartExpectedXhair = expectedXhair;
+    }
+
+    public func GetSmartCalls() -> Int32 { return this.m_smartCalls; }
+    public func GetSmartTargets() -> Int32 { return this.m_smartTargets; }
+    public func GetSmartLocked() -> Int32 { return this.m_smartLocked; }
+    public func GetSmartHasLink() -> Bool { return this.m_smartHasLink; }
+    public func GetSmartRegion() -> Vector2 { return this.m_smartRegion; }
+    public func GetSmartRootVis() -> Bool { return this.m_smartRootVis; }
+    public func GetSmartRootOpacity() -> Float { return this.m_smartRootOpacity; }
+    public func GetSmartPreIntro() -> Int32 { return this.m_smartPreIntro; }
+    public func GetSmartCtrlClass() -> String { return this.m_smartCtrlClass; }
+    public func GetSmartWidgetName() -> String { return this.m_smartWidgetName; }
+    public func GetSmartExpectedXhair() -> String { return this.m_smartExpectedXhair; }
+
     public func GetGunForward() -> Vector4 { return this.m_gunForward; }
     public func GetTargetPoint() -> Vector4 { return this.m_targetPoint; }
     public func GetMuzzlePos() -> Vector4 { return this.m_muzzlePos; }
@@ -297,11 +342,24 @@ private func UpdateDetachedAim() -> Void {
     if isSmartWeapon {
         if IsDefined(this.m_cameraCrosshair) { this.m_cameraCrosshair.SetVisible(false); }
         if IsDefined(activeWidget) {
-            activeWidget.SetVisible(true);
             activeWidget.SetTranslation(new Vector2(0.0, 0.0));
         }
+
+        let camTransform: Transform;
+        let camSys: ref<CameraSystem> = GameInstance.GetCameraSystem(player.GetGame());
+        let camFwd3: Vector4 = new Vector4(0.0, 1.0, 0.0, 0.0);
+        if IsDefined(camSys) && camSys.GetActiveCameraWorldTransform(camTransform) {
+            camFwd3 = Vector4.Normalize(Transform.GetForward(camTransform));
+        }
+
         if IsDefined(aimSys) {
-            aimSys.SetAimState(new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector2(0.0, 0.0), 0.0, 0.0, 0.0, false);
+            aimSys.SetAimState(camFwd3, new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), camFwd3, new Vector2(0.0, 0.0), 0.0, 0.0, 0.0, false);
+
+            let activeCtrl: ref<gameuiCrosshairBaseGameController> = this.GetActiveCrosshairGameController();
+            let ctrlClassStr: String = IsDefined(activeCtrl) ? NameToString(activeCtrl.GetClassName()) : "NULL";
+            let widgetNameStr: String = IsDefined(activeWidget) ? NameToString(activeWidget.GetName()) : "NULL";
+            let expectedXhairStr: String = TDBID.ToStringDEBUG(TweakDBInterface.GetItemRecord(ItemID.GetTDBID(weapon.GetItemID())).Crosshair().GetID());
+            aimSys.RecordSmartUIIdentity(ctrlClassStr, widgetNameStr, expectedXhairStr);
         }
         SetMuzzleAimState(new Vector4(0.0, 0.0, 0.0, 1.0), new Vector4(0.0, 1.0, 0.0, 0.0), new Vector4(0.0, 1.0, 0.0, 0.0), false);
         return;
@@ -572,6 +630,44 @@ protected cb func OnZoomLevel(argZoom: Float) -> Bool {
     if IsDefined(root) {
         root.SetTranslation(new Vector2(0.0, 0.0));
     }
+}
+
+// Diagnostic probe for smart weapons targeting parameters and lifecycle
+@wrapMethod(CrosshairGameController_Smart_Rifl)
+protected cb func OnSmartGunParams(argParams: Variant) -> Bool {
+    let result: Bool = wrappedMethod(argParams);
+
+    let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(this.GetGame());
+    if IsDefined(aimSys) {
+        let smartData: ref<smartGunUIParameters> = FromVariant<ref<smartGunUIParameters>>(argParams);
+        if IsDefined(smartData) {
+            let numTargets: Int32 = ArraySize(smartData.targets);
+            let numLocked: Int32 = 0;
+            let i: Int32 = 0;
+            while i < numTargets {
+                if Equals(smartData.targets[i].state, gamesmartGunTargetState.Locked) {
+                    numLocked += 1;
+                }
+                i += 1;
+            }
+            let root: ref<inkWidget> = this.GetRootWidget();
+            let rootVis: Bool = IsDefined(root) ? root.IsVisible() : false;
+            let rootOpacity: Float = IsDefined(root) ? root.GetOpacity() : 0.0;
+            aimSys.RecordSmartParams(numTargets, numLocked, smartData.hasRequiredCyberware, smartData.sight.targetableRegionSize, rootVis, rootOpacity);
+        }
+    }
+
+    return result;
+}
+
+@wrapMethod(CrosshairGameController_Smart_Rifl)
+protected cb func OnPreIntro() -> Bool {
+    let result: Bool = wrappedMethod();
+    let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(this.GetGame());
+    if IsDefined(aimSys) {
+        aimSys.RecordSmartPreIntro();
+    }
+    return result;
 }
 
 
