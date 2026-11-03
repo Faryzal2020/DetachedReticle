@@ -229,18 +229,18 @@ void DR_SetExpParams(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFram
     RED4EXT_UNUSED_PARAMETER(aOut);
     RED4EXT_UNUSED_PARAMETER(a4);
 
-    float minSpeed = 12.0f;
-    RED4ext::GetParameter(aFrame, &minSpeed);
+    float power = 0.6f;
+    RED4ext::GetParameter(aFrame, &power);
     aFrame->code++;
 
-    DetachedReticle::InputHook::SetExpParams(minSpeed);
+    DetachedReticle::InputHook::SetExpParams(power);
 }
 
-void DR_GetExpMinSpeed(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+void DR_GetExpPower(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
     RED4EXT_UNUSED_PARAMETER(aContext);
     RED4EXT_UNUSED_PARAMETER(a4);
     aFrame->code++;
-    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetExpMinSpeed();
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetExpPower();
 }
 
 
@@ -424,13 +424,13 @@ void PostRegisterTypes() {
 
     auto funcSetExpParams = RED4ext::CGlobalFunction::Create("DR_SetExpParams", "DR_SetExpParams", &DR_SetExpParams);
     funcSetExpParams->flags = flags;
-    funcSetExpParams->AddParam("Float", "minSpeed");
+    funcSetExpParams->AddParam("Float", "power");
     rtti->RegisterFunction(funcSetExpParams);
 
-    auto funcGetExpMinSpeed = RED4ext::CGlobalFunction::Create("DR_GetExpMinSpeed", "DR_GetExpMinSpeed", &DR_GetExpMinSpeed);
-    funcGetExpMinSpeed->flags = flags;
-    funcGetExpMinSpeed->SetReturnType("Float");
-    rtti->RegisterFunction(funcGetExpMinSpeed);
+    auto funcGetExpPower = RED4ext::CGlobalFunction::Create("DR_GetExpPower", "DR_GetExpPower", &DR_GetExpPower);
+    funcGetExpPower->flags = flags;
+    funcGetExpPower->SetReturnType("Float");
+    rtti->RegisterFunction(funcGetExpPower);
 
 
     auto funcDrain = RED4ext::CGlobalFunction::Create("DR_DrainEvents", "DR_DrainEvents", &DR_DrainEvents);

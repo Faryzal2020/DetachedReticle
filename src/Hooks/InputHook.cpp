@@ -160,10 +160,10 @@ void InputHook::SetBrakeParams(float aThreshold, float aMaxSpeed) {
 float InputHook::GetBrakeThreshold() { return s_brakeThreshold; }
 float InputHook::GetBrakeMaxSpeed() { return s_brakeMaxSpeed; }
 
-void InputHook::SetExpParams(float aMinSpeed) {
-    s_expMinSpeed = (aMinSpeed >= 0.0f) ? aMinSpeed : 0.0f;
+void InputHook::SetExpParams(float aPower) {
+    s_expPower = std::clamp(aPower, 0.1f, 1.5f);
 }
-float InputHook::GetExpMinSpeed() { return s_expMinSpeed; }
+float InputHook::GetExpPower() { return s_expPower; }
 
 void InputHook::SetSmoothing(float aLambda, int32_t aMode, float aMaxDiv, float aDeadzone, bool aEnabled) {
     s_lambda = aLambda;
@@ -252,15 +252,22 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
                 }
             }
         } else {
-            // Mode 0: Exponential filter with Option 1: Minimum Speed Floor
-            float expFactor = 1.0f - std::exp(-s_lambda * dt);
-            step = gapMag * expFactor;
-
-            // Option 1: Minimum speed floor to eliminate asymptotic tail crawl
-            if (s_expMinSpeed > 0.0f) {
-                float minStep = s_expMinSpeed * dt;
-                if (step < minStep) {
-                    step = std::min(minStep, gapMag);
+            // Mode 0: Option A Power-Law Curve (exact analytical integration of dG/dt = -k * G^p)
+            // Governed purely by continuous graph; no piecewise distance switches or speed floor clamps.
+            float power = std::clamp(s_expPower, 0.1f, 1.5f);
+            if (std::abs(power - 1.0f) < 0.001f) {
+                // Linear exponential curve (p = 1.0)
+                float expFactor = 1.0f - std::exp(-s_lambda * dt);
+                step = gapMag * expFactor;
+            } else {
+                // Sub-linear / custom power curve (p < 1.0, default 0.6)
+                float oneMinusP = 1.0f - power;
+                float rem = std::pow(gapMag, oneMinusP) - (oneMinusP * s_lambda * dt);
+                if (rem <= 0.0f) {
+                    step = gapMag;
+                } else {
+                    float nextGap = std::pow(rem, 1.0f / oneMinusP);
+                    step = gapMag - nextGap;
                 }
             }
         }
@@ -271,7 +278,7 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, floa
         }
 
         // Sub-pixel resting tolerance: snap cleanly to rest
-        if (gapMag <= 0.02f) {
+        if (gapMag <= 0.005f) {
             step = gapMag;
         }
 

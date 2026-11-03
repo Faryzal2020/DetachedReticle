@@ -7,13 +7,13 @@
 local Config = {
     enabled = true,               -- Master switch for decoupled aiming
     activeAimOffset = true,       -- Tier 2B: Actively offset aiming direction to center gun reticle
-    catchUpSpeed = 6.0,           -- Catch-up speed (higher = faster, lower = heavier physical weight)
+    catchUpSpeed = 22.0,          -- Responsiveness gain factor k (default: 22.0, yields ~0.7 deg lag at 20 deg/s)
     deadzone = 0.0,               -- Degrees: zero deadzone by default (turns immediately)
     maxDivergence = 65.0,         -- Degrees: maximum angular separation before pulling body
-    smoothingMode = "exponential",-- "exponential", "braking" (Model A), "linear", "spring", or "power"
+    smoothingMode = "exponential",-- "exponential" (Option A Power-Law), "braking" (Model A), "linear", "spring", or "power"
+    expPower = 0.60,              -- Option A: Continuous Power-Law Exponent (1.0 = linear, 0.60 = tight sub-linear chase, default: 0.60)
     brakeThreshold = 2.0,         -- Model A: Degrees from target where deceleration begins (default: 2.0)
     brakeMaxSpeed = 360.0,        -- Model A: Max cruising speed in deg/s (default: 360.0)
-    expMinSpeed = 12.0,           -- Exponential: Minimum speed floor in deg/s to eliminate tail crawl (default: 12.0)
     -- Tier 2B Barrel Compensation Parameters (Snappy by default)
     compSpeedSettled = 12.0,      -- T2B compensation speed when settled (default: 12.0, old: 4.5)
     compSpeedMoving = 4.0,        -- T2B compensation speed while swinging mouse (default: 4.0, old: 1.0)
@@ -72,18 +72,23 @@ local Algorithms = {
 
     exponential = function(diffYaw, diffPitch, divergenceMag, effectiveDivergence, dt, cfg, state)
         if divergenceMag < 0.0001 then return 0.0, 0.0 end
-        local decay = 1.0 - math.exp(-cfg.catchUpSpeed * dt)
-        decay = math.max(0.0, math.min(1.0, decay))
-        local step = divergenceMag * decay
-        if cfg.expMinSpeed and cfg.expMinSpeed > 0.0 then
-            local minStep = cfg.expMinSpeed * dt
-            if step < minStep then
-                step = math.min(minStep, divergenceMag)
+        local p = cfg.expPower or 0.60
+        local step = 0.0
+        if math.abs(p - 1.0) < 0.001 then
+            local decay = 1.0 - math.exp(-cfg.catchUpSpeed * dt)
+            step = divergenceMag * math.max(0.0, math.min(1.0, decay))
+        else
+            local oneMinusP = 1.0 - p
+            local rem = (divergenceMag ^ oneMinusP) - (oneMinusP * cfg.catchUpSpeed * dt)
+            if rem <= 0.0 then
+                step = divergenceMag
+            else
+                local nextGap = rem ^ (1.0 / oneMinusP)
+                step = divergenceMag - nextGap
             end
         end
-        if divergenceMag <= 0.02 then
-            step = divergenceMag
-        end
+        if step > divergenceMag then step = divergenceMag end
+        if divergenceMag <= 0.005 then step = divergenceMag end
         local ratio = step / divergenceMag
         return diffYaw * ratio, diffPitch * ratio
     end,
@@ -137,7 +142,7 @@ local function LoadConfig()
                 if data.smoothingMode ~= nil then Config.smoothingMode = tostring(data.smoothingMode):lower() end
                 if data.brakeThreshold ~= nil then Config.brakeThreshold = tonumber(data.brakeThreshold) or Config.brakeThreshold end
                 if data.brakeMaxSpeed ~= nil then Config.brakeMaxSpeed = tonumber(data.brakeMaxSpeed) or Config.brakeMaxSpeed end
-                if data.expMinSpeed ~= nil then Config.expMinSpeed = tonumber(data.expMinSpeed) or Config.expMinSpeed end
+                if data.expPower ~= nil then Config.expPower = tonumber(data.expPower) or Config.expPower end
                 if data.compSpeedSettled ~= nil then Config.compSpeedSettled = tonumber(data.compSpeedSettled) or Config.compSpeedSettled end
                 if data.compSpeedMoving ~= nil then Config.compSpeedMoving = tonumber(data.compSpeedMoving) or Config.compSpeedMoving end
                 if data.compMaxSpeed ~= nil then Config.compMaxSpeed = tonumber(data.compMaxSpeed) or Config.compMaxSpeed end
@@ -162,7 +167,7 @@ local function SyncSmoothing()
     pcall(function()
         Game.DR_SetSmoothing(Config.catchUpSpeed, modeInt, Config.maxDivergence, Config.deadzone, DetachedReticle.chaseActive or false)
         Game.DR_SetBrakeParams(Config.brakeThreshold, Config.brakeMaxSpeed)
-        Game.DR_SetExpParams(Config.expMinSpeed)
+        Game.DR_SetExpParams(Config.expPower)
     end)
 end
 
@@ -345,11 +350,11 @@ local function SetupNativeSettings()
 
             ns.addRangeFloat(
                 "/detachedReticle/aiming",
-                "Exponential Min Tail Speed",
-                "Exponential (Option 1): Minimum speed floor in degrees per second to eliminate end-tail crawl (default: 12.0 deg/s)",
-                0.0, 30.0, 0.5, "%.1f deg/s", Config.expMinSpeed, 12.0,
+                "Curve Exponent (Power-Law)",
+                "Option A: Continuous Power-Law curve exponent p. 1.0 = linear exponential, 0.60 = tight sub-linear chase (reaches 20% distance at normal speed, default: 0.60)",
+                0.30, 1.20, 0.05, "%.2f", Config.expPower, 0.60,
                 function(val)
-                    DetachedReticle.SetExpMinSpeed(val)
+                    DetachedReticle.SetExpPower(val)
                 end
             )
 
@@ -524,8 +529,8 @@ registerForEvent("onUpdate", function(delta)
             pcall(function() fpp.sensitivityMultX = DetachedReticle.origSensX end)
             pcall(function() fpp.sensitivityMultY = DetachedReticle.origSensY end)
 
-            Log(string.format("Decoupled Aim ACTIVE: mode=%s speed=%.1f brakeThresh=%.1f brakeMax=%.0f maxDiv=%.1f deadzone=%.1f initPitch=%.2f",
-                Config.smoothingMode, Config.catchUpSpeed, Config.brakeThreshold, Config.brakeMaxSpeed, Config.maxDivergence, Config.deadzone, initPitch))
+            Log(string.format("Decoupled Aim ACTIVE: mode=%s speed=%.1f expPower=%.2f brakeThresh=%.1f brakeMax=%.0f maxDiv=%.1f deadzone=%.1f initPitch=%.2f",
+                Config.smoothingMode, Config.catchUpSpeed, Config.expPower, Config.brakeThreshold, Config.brakeMaxSpeed, Config.maxDivergence, Config.deadzone, initPitch))
         end
 
         -- Read native camera residuals (R = T - A)
@@ -1054,10 +1059,10 @@ registerForEvent("onDraw", function()
                 ImGui.SetTooltip("Maximum cruising angular speed before entering braking zone.\nDefault: 360 deg/s")
             end
         elseif Config.smoothingMode:lower() == "exponential" then
-            local newExpMin, minChanged = ImGui.SliderFloat("Min Tail Speed", Config.expMinSpeed, 0.0, 30.0, "%.1f deg/s")
-            if minChanged then DetachedReticle.SetExpMinSpeed(newExpMin) end
+            local newExpPower, powerChanged = ImGui.SliderFloat("Curve Exponent (p)", Config.expPower, 0.30, 1.20, "%.2f")
+            if powerChanged then DetachedReticle.SetExpPower(newExpPower) end
             if ImGui.IsItemHovered() then
-                ImGui.SetTooltip("Option 1 Tail-Cutter: Minimum speed floor in degrees per second.\nEliminates the slow asymptotic tail-crawl while keeping the natural exponential curve.\nDefault: 12.0 deg/s (0.0 = pure exponential)")
+                ImGui.SetTooltip("Option A: Continuous Power-Law Exponent (v = k * gap^p).\n1.0 = linear exponential, 0.60 = tight sub-linear chase (reaches 20% distance at normal speed).\nNaturally settles to rest in 4 frames with ZERO artificial thresholds.\nDefault: 0.60")
             end
         end
 
@@ -1199,11 +1204,16 @@ DetachedReticle.SetBrakeMaxSpeed = function(val)
     Log(string.format("[OPTIONS] brakeMaxSpeed set to: %.1f deg/s", Config.brakeMaxSpeed))
 end
 
-DetachedReticle.SetExpMinSpeed = function(val)
-    Config.expMinSpeed = math.max(0.0, tonumber(val) or 12.0)
+DetachedReticle.SetExpPower = function(val)
+    Config.expPower = math.max(0.1, math.min(1.5, tonumber(val) or 0.60))
     SaveConfig()
     SyncSmoothing()
-    Log(string.format("[OPTIONS] expMinSpeed set to: %.1f deg/s", Config.expMinSpeed))
+    Log(string.format("[OPTIONS] expPower set to: %.2f", Config.expPower))
+end
+
+-- Backward compatibility alias
+DetachedReticle.SetExpMinSpeed = function(val)
+    DetachedReticle.SetExpPower(val)
 end
 
 DetachedReticle.SetCompSpeedSettled = function(val)
@@ -1248,9 +1258,9 @@ DetachedReticle.SetDebugLogging = function(val)
 end
 
 DetachedReticle.GetOptions = function()
-    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | expMin=%.1f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg",
+    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | expPower=%.2f | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg",
         tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode,
-        Config.brakeThreshold, Config.brakeMaxSpeed, Config.expMinSpeed,
+        Config.expPower, Config.brakeThreshold, Config.brakeMaxSpeed,
         Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.compMinSpeed, Config.compGapThreshold))
     return Config
 end

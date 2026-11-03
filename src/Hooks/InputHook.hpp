@@ -42,9 +42,9 @@ public:
     static float GetBrakeThreshold();
     static float GetBrakeMaxSpeed();
 
-    // Exponential Chase Parameters (Option 1)
-    static void SetExpParams(float aMinSpeed);
-    static float GetExpMinSpeed();
+    // Option A: Continuous Power-Law Curve Parameters
+    static void SetExpParams(float aPower);
+    static float GetExpPower();
 
     // Sensitivity Mult Direct Memory Access (offsets 0x498, 0x49C on gameFPPCameraComponent)
     static void SetSensitivityMult(RED4ext::IScriptable* aFpp, float aMultX, float aMultY);
@@ -95,8 +95,8 @@ public:
     static inline float s_brakeThreshold{ 2.0f };   // Degrees: distance from target where deceleration begins
     static inline float s_brakeMaxSpeed{ 360.0f };  // Deg/s: cruising speed outside braking zone (if <= 0, uses lambda * 60)
 
-    // Exponential (Option 1) Parameters
-    static inline float s_expMinSpeed{ 12.0f };     // Deg/s: speed floor to eliminate asymptotic tail crawl (0 = pure exponential)
+    // Option A: Continuous Power-Law Curve Parameters
+    static inline float s_expPower{ 0.6f };         // Curve exponent: 1.0 = linear exponential, 0.6 = tight power-law chase
 
     static void ResetChase(float aInitialPitch = 0.0f);
     static void ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, float& outYaw, float& outPitch);
