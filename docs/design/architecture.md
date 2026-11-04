@@ -74,10 +74,13 @@ fpp:SetLocalTransform(pos, qYaw * qPitch * baselineRot)   baselineRot captured o
 |---|---|---|---|---|---|
 | Regular firearms | on | 2.5° / 4.0° / ±2° | on | on | Shotgun spread rotated into the barrel frame |
 | HMG (`IsHeavyWeapon`) | on | 8.5° / 12° / ±8.5° | on | on (remapped to hitscan) | Trim kept across zoom 4↔8 flips |
-| LMG (`Wea_LightMachineGun`) | on | 8.5° / 12° / ±8.5° | on | on | REC#6, untested |
-| Smart | on | off | off (vanilla crosshair centered) | off | Open bug: see FINDINGS §7 |
+| LMG (`Wea_LightMachineGun`) | on | 8.5° / 12° / ±8.5° | on | on | REC#6; confirmed within tolerance 2026-11-04 |
+| Smart | on | off | off (vanilla crosshair centered) | off | Bug on hold pending a Smart Link retest: see FINDINGS §7 |
 | Melee, unarmed, dual wield | off | — | — | — | Vanilla (`init.lua:486`, `DetachedReticle.reds:322`) |
-| Vehicle, scanning | ? | — | — | — | The README claims vanilla, but no explicit gate exists. Unconfirmed. |
+| Scanning | — | — | — | — | Owner-confirmed working 2026-11-04 |
+| Vehicle combat | ? | — | — | — | Untested. The README claims vanilla, but no explicit gate exists. |
+
+**Scope:** first person only. Third person is out of scope (owner decision, 2026-11-04).
 
 ## 5. Build
 

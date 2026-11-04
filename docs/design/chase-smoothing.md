@@ -2,6 +2,7 @@
 
 **Date:** 2026-11-03  
 **Status:** Implemented (Feature Branch `feature/model-a-braking-zone`, now on `testing`; Option A is the default `smoothingMode = "exponential"`)  
+**Playtest verdict (owner, 2026-11-04):** Model A (`"braking"`) feels too stiff. The owner uses Option A (the modified exponential). Model A stays in the code for future reference only.  
 **Scope:** Cyberpunk 2077 Decoupled Aim Mod (`DetachedReticle`)  
 **Design Reference:** `docs/design/convergence.md`, `src/Hooks/InputHook.cpp`, `init.lua`
 

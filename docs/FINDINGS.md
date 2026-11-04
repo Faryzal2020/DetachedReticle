@@ -21,10 +21,31 @@ One-file digest of what the project has established so far. It is compiled from 
 | MVP 2: body and weapon chase the camera with lag, camera never wobbles | Done, owner-confirmed 2026-10-29 | MVP#22, R5 |
 | Gimbal roll fix, Tier 2B barrel compensation, holster/draw continuity | Done | POL#23–#32 |
 | Trim sign fix, resting-pose jolt, HMG roll | Done (regular guns confirmed "less jittery") | POL#33–#36 |
-| Chase curve: Option A power law (default), Model A braking zone (option) | Implemented | [design/chase-smoothing.md](design/chase-smoothing.md) |
-| Recoil moved from the camera to Tier 2, drift-free recovery, rubber leash | Implemented; leash confirmed working | REC#1–#5 |
-| LMG hip-cradle compensation | Deployed, **untested** | REC#6 |
-| Smart weapons: regular reticle shown, no lock-on | **Open.** Iteration 37 is deployed; the bisection is still waiting to run | POL#37, R9 |
+| Chase curve: Option A power law (in use) | Done. Owner uses it; Model A braking proved too stiff and is kept for reference only | [design/chase-smoothing.md](design/chase-smoothing.md), §1.1 |
+| HMG with compensation, no horizon roll | Done, owner-confirmed | POL#36, §1.1 |
+| Recoil moved from the camera to Tier 2, drift-free recovery, rubber leash | Done; leash confirmed working | REC#1–#5 |
+| LMG hip-cradle compensation | Done, within tolerance (owner, 2026-11-04) | REC#6, §1.1 |
+| Smart weapons: regular reticle shown, no lock-on | **On hold.** Possibly caused by the test character lacking Smart Link; retest with Smart Link installed | POL#37, R9, §1.1 |
+
+### 1.1 Owner playtest results, 2026-11-04
+
+Reported in chat after the docs consolidation. They close the untested iterations. Later problems open new iterations.
+
+| # | Item | Result |
+|---|---|---|
+| 1 | LMG compensation (REC#6) | Resolved, at least within tolerance. |
+| 2 | Smart weapons (POL#37) | Testing on hold. The missing smart crosshair may come from the test character having no Smart Link cyberware (R9 §1b cause 2). It will be retested with Smart Link installed. **Caveat (R9 §1):** the vanilla smart controller has its own "firmware offline" visuals, which suggests the square reticle is meant to appear even without the link. If it is still missing with Smart Link installed, resume the R9 §3 bisection. |
+| 3 | Chase curves | Model A (braking) feels too stiff. The owner uses the modified exponential model (Option A power law). Braking stays in the code for reference. |
+| 4 | HMG horizon roll with compensation on (POL#36) | Resolved. |
+| 5 | WASD jitter (R8 Issue 1) | Gone with the default config. Still noticeable with some altered settings. Not worth diagnosing for now: it would take many tests to pin down. |
+| 6a | Tech (charged) weapons | Bullets land at the gun reticle. |
+| 6b | Other non-HMG weapon types | Tested types land at the gun reticle. Some types are untested; they'll be reported only if a problem shows up. |
+| 6c | Shotgun spread | Solved. Weapon mods that reduce spread are not tested yet (expected to be fine). |
+| 6d | Scanning | Works. |
+| 6e | Vehicle combat (shooting from a vehicle window) | Not tested yet. |
+| 6f | Gamepad | Can't test: no gamepad available. |
+| 6g | Third-person camera | **Out of scope (owner decision):** the mod targets vanilla first person only. AGENTS.md §1 now says so too. |
+| 7 | Gun reticle on NPCs | Works fine on NPC bodies. The trace is still `n"World Static"` only (`DetachedReticle.reds:417`). That it looks right is inferred: the static hit point lies on the barrel line, so the on-screen error comes only from parallax between the NPC and the wall behind it, which is small at normal ranges. |
 
 ---
 
@@ -167,7 +188,7 @@ The patches check the bytes before writing and refuse to patch on any other buil
 |---|---|---|---|
 | Body actuator | Smoothed mouse delta into the native integrator. Never `Teleport`. | Teleport breaks locomotion and physics, and can't pitch. | MVP#12, R4 |
 | Chase curve (default) | Option A power law `dG/dt = −k·G^p`, k = 22, p = 0.60, closed form | No distance branches; frame-rate independent; settles in 4 frames; tames flicks | [design/chase-smoothing.md](design/chase-smoothing.md) |
-| Chase curve (option) | Model A braking: 360°/s cruise, smoothstep inside 2° | Distinct cruise feel | same |
+| Chase curve (option) | Model A braking: 360°/s cruise, smoothstep inside 2°. Kept for reference, not in use. | Felt too stiff in playtest (owner, 2026-11-04) | same, §1.1 |
 | Max divergence / deadzone | 65° (advances A, never T) / 0° | Camera is never pulled | MVP#10–#11 |
 | Tier 2B target | Body-relative `C = O` (`gunYaw − bodyYaw`, `gunPitch − t2bPitch`) | A camera-relative target converges to O/2 (half-gain bug) | POL#32, R5 §2 |
 | Tier 2B rates | settled 12 s⁻¹, moving 4 s⁻¹, max 240 °/s, min 6 °/s, gap threshold 3° | Snappy settling without eating the swing | `init.lua` Config |
@@ -180,6 +201,7 @@ The patches check the bytes before writing and refuse to patch on any other buil
 | Recoil | W goes to Tier 2 only. Recovery runs straight to (0, 0), scaled to cancel the drift. Leash `g = 1 − (r/7°)^1.5` keeps 50% of the tangential jitter. | Camera free of recoil; no random rest point | REC#1–#5 |
 | Exclusions | Melee, unarmed and dual wielding (`GameObject.IsDualWielding`) fall back to vanilla (`init.lua:486`). The README also lists vehicles and scanning, but the activation code has no explicit gate for them (unconfirmed). | Scope | README, R1 |
 | Smart weapons | Keep the chase (T1 → T2A). No Tier 2B, no gun reticle, no camera pip, ray hook off. Vanilla smart crosshair stays at center. | Owner decision 2026-11-03 | R9 §0 |
+| Camera scope | First person only. Third person is out of scope. | Owner decision 2026-11-04 (AGENTS.md §1) | §1.1 |
 
 ---
 
@@ -232,24 +254,21 @@ The complete list is [research/noted-issues.md](research/noted-issues.md); the a
 
 ## 7. Open issues and untested hypotheses
 
-1. **Smart weapons**:
+1. **Smart weapons: on hold.**
    - Symptom: a regular reticle where the square smart reticle should be, and no lock-on.
    - What's in: iteration 37 shipped the F0 seed fix, F2 (no forced `SetVisible`) and the `[SMART]` probe.
-   - What's pending: the R9 §3 bisection (steps 0 to 4) and the probe readout. No fix should go in before that session.
-   - Ranked causes (R9 §1b), all **inferred**: (1) the weapon's `crosshair` flat or another mod; (2) the Smart Link state; (3) this mod's container wraps or added canvas.
-2. **LMG compensation** (REC#6) has not been tested in game.
-3. **WASD jitter** (R8 Issue 1):
-   - Origin unclear: the locomotion turn (1A) is unverified and the R8 P2 hook-count probe has no recorded result.
-   - It is likely mitigated by REC#4's one-frame lead compensation. **inferred**; not separately confirmed.
-4. **The gun trace uses only `n"World Static"`** (`DetachedReticle.reds:417, :574`). On NPCs and other dynamic objects the reticle and trim target the wall behind. This affects the display only, not the ballistics. (R8 2C)
-5. **Close range (< ~5 m):** the ±3° trim can't close the parallax. This is by design; revisit if it bothers players.
-6. **Never reported:**
-   - impact test on tech (charged) and non-HMG projectile weapons (R2 Request C)
-   - spread under ADS and tech charge (R3 Q3)
-   - gamepad right stick (R2 Request E)
-   - TPP camera (an AGENTS.md §1 requirement; no TPP test on record)
-   - the byte dump of `0x51D46A–0x51D490` confirming no flags dependency (R5 H1)
-7. **Release hygiene still open:**
+   - Next step: retest with Smart Link installed (§1.1 #2). If the square reticle comes back, the cause was the save, not the mod (R9 F4). If it doesn't, run the R9 §3 bisection and the probe readout before writing any fix.
+   - Ranked causes (R9 §1b), all **inferred**: (1) the weapon's `crosshair` flat or another mod; (2) the Smart Link state (now the leading suspect); (3) this mod's container wraps or added canvas.
+2. **WASD jitter under non-default settings** (R8 Issue 1). Gone with the default config, still visible with some altered settings (§1.1 #5). Diagnosis deferred by the owner. If it's picked up later, start with the R8 P0–P2 probes and record which settings trigger it.
+3. **Not tested yet** (owner will report only if a problem shows up):
+   - vehicle combat (shooting from a vehicle window); the activation code has no explicit vehicle gate
+   - the remaining weapon types
+   - weapon mods that reduce spread, combined with the shotgun spread rotation
+4. **Can't be tested:** gamepad right stick (no gamepad available).
+5. **Gun trace is `n"World Static"` only** (`DetachedReticle.reds:417, :574`). It looks fine on NPCs (§1.1 #7). Only revisit if a reticle mismatch shows up at close range with an NPC in front of a distant wall. (R8 2C)
+6. **Close range (< ~5 m):** the ±3° trim can't close the parallax. This is by design; revisit if it bothers players.
+7. **Never reported, low priority:** the byte dump of `0x51D46A–0x51D490` confirming there is no flags dependency (R5 H1).
+8. **Release hygiene still open:**
    - The HMG redirect is still triple: TweakXL `hmg_attack.yaml` + `GetDesiredAttackRecord` wrap + `SetAttack` re-assert (R5 H4).
    - `config.json` is tracked and rewritten on every slider change (R5 H6).
    - `AnimationHook` is a standby no-op (R3 C9).
