@@ -8,6 +8,13 @@
 - Vanilla Tweaks: `tools/redmod/tweaks/`
 - Plugin APIs: `red4ext/plugins/` (`Codeware`, `ArchiveXL`, `TweakXL`)
 
+> **Later corrections (added 2026-11-04, docs consolidation; the body below is unchanged Phase 0 text):**
+> - Line numbers cite the REDmod `.script` sources. The 2.5 decompile in `reference/game-scripts/` (`.swift`) differs in line numbers and sometimes in bodies (round 1 §5).
+> - §2 / §3: the hitscan bullet is fired from native `SetTriggerDown` → `gameEffectObjectProvider_PhysicalRay::Execute`, not from `ShootEvents.OnEnter`. `ShootEvents.OnEnter` is cosmetic (iteration 8).
+> - §3: `ShootStraight(true)` does not redirect along the barrel. It disables spread (iteration 9).
+> - §8: the arm and gun pose follows the engine's input state (body yaw plus a native pitch accumulator), not the camera component. It was decoupled through the native look integrator at RVA `0x51D462`, without any bone hook (iterations 13–22).
+> - See `docs/FINDINGS.md` §3 for the current engine facts.
+
 ---
 
 ## 1. Executive Summary

@@ -1,9 +1,9 @@
 # Dual-Model Decoupled Aim: Option A Continuous Power-Law Curve & Model A Braking Zone
 
 **Date:** 2026-11-03  
-**Status:** Implemented (Feature Branch `feature/model-a-braking-zone`)  
+**Status:** Implemented (Feature Branch `feature/model-a-braking-zone`, now on `testing`; Option A is the default `smoothingMode = "exponential"`)  
 **Scope:** Cyberpunk 2077 Decoupled Aim Mod (`DetachedReticle`)  
-**Design Reference:** `docs/research/convergence-design.md`, `src/Hooks/InputHook.cpp`, `init.lua`
+**Design Reference:** `docs/design/convergence.md`, `src/Hooks/InputHook.cpp`, `init.lua`
 
 ---
 
