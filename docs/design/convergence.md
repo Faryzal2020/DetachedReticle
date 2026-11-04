@@ -2,7 +2,9 @@
 
 **Date:** 2026-10-29  
 **Scope:** Cyberpunk 2077 Decoupled Aim Mod (`DetachedReticle`)  
-**Design Reference:** `AGENTS.md` Section 1, `docs/review-2026-10-29-round5.md` Section 2
+**Design Reference:** `AGENTS.md` Section 1, `docs/archive/reviews/review-2026-10-29-round5.md` Section 2
+
+> **Correction (added 2026-11-04, docs consolidation):** the `trimYaw` formula in §2 below has the wrong sign. `+ scrX` is positive feedback, and it drove the gun off-screen into the +3° clamp (round 8 §2A). Iteration 33 changed it to `trimYaw − scrX · kᵢ · Δt`, so both axes now use negative feedback. Two more rules have been added since: the trim resets on HIP↔ADS edges (iteration 33), and the HMG keeps its trim when the crosshair flips 4↔8 while zoomed (recoil iteration 4).
 
 ---
 

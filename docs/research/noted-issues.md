@@ -41,3 +41,19 @@ Redscript / CET language mistakes:
 - Inverting the residual yaw sign (`-rYaw`) made the gun appear to move ahead of the camera; positive engine yaw is left.
 - Hooking RVA 0x39CB63 missed horizontal input (a branch bypasses it); hooking the 0x39CA70 entry gets a zeroed mouse X (caller does `xorps xmm2, xmm2`); hooking the 0x39CBE3 call only moves the camera component, not body yaw. Only 0x51D462 carries both deltas.
 - In REDengine / redscript, smartGunUIParameters is an IScriptable class rather than a plain struct. In redscript, class types cannot be passed or declared as direct value types; they require pointer indirection (ref<...> or wref<...>).
+
+Added 2026-11-04 during the docs consolidation. Each item is a proven mistake taken from the iteration logs (`docs/iterations/`) that was missing from the list above:
+- Measuring the Tier 2B target relative to the camera (`yawLag` / `pitchLag`) makes the loop converge to C = O/2, leaving half the barrel offset uncorrected. Measure it relative to the body (polish iteration 32, round 5 §2).
+- Feeding live camera-relative lag plus a proportional screen trim into the fast compensator erases the chase gap and locks T2 to T1 (iteration 31).
+- Restarting a timed smoothstep return (`DR_StartReturnToT2A`) every frame means C never decays ("Zeno's holster"). Deactivating on `isArmed` alone snaps the camera by C (iteration 31).
+- `+ scrX` in the yaw integral trim is positive feedback and pins the gun at the +3° clamp. Pitch (`- scrY`) was already correct (iteration 33, round 8 §2A).
+- A binary readiness gate (hard 15° cutoff, or a wide 10–16° blend) chases the arm-lowering animation and jolts the camera when the weapon enters or leaves the low-ready pose (iterations 33, 35).
+- Building the residual-yaw gravity axis from `DR_GetAimPitch()` (A) instead of `DR_GetT2BPitch()` (A − C) tilts the axis by C_pitch and rolls the HMG horizon by about 6° (iteration 35).
+- Bypassing Tier 2B for heavy weapons leaves the HMG reticle permanently upper-left of center (iteration 36).
+- `weapon:IsHeavyWeapon()` is false for LMGs (`Wea_LightMachineGun`). Gating the heavy cradle profile on it leaves LMG compensation at 0 (recoil iteration 6).
+- When a smart weapon is out, zeroing `aimSys.SetAimState` makes `aimSys:GetCameraForward()` return (0, 0, 0), so any later activation seeds pitch 0 and rolls the horizon (iteration 37, round 9).
+- In `MouseLookRelay`, `[rbp-78h]` / `[rbp-7Ch]` hold the native recoil delta and `[rsp+128h]` / `[rsp+124h]` hold the pure mouse delta. Swapping them sends the mouse into Tier 2 and freezes the camera (recoil iterations 1–2).
+- Trusting the engine's recoil recovery leaves Tier 2 parked at a random `RecoilDrift` point (0.6–0.9°) and then a ~1 s idle bleed (recoil iteration 3).
+- Resetting the stored Tier 2B target on every `isADS` change breaks the zoomed HMG: firing flips `crosshairState` 4→8 mid-burst. Lua `0.0 or x` returns `0.0` (0 is truthy), so the "fallback" passed a zero offset for the whole burst (recoil iteration 4).
+- Writing the camera residual without the next frame's predicted body step leaves the camera one scene-graph frame behind the body: it drifts toward the catching-up gun and shakes with raw-`dt` jitter (recoil iteration 4).
+- Deploying a DLL or `init.lua` built from uncommitted source invalidates a test session. Keep the repo, the game folder and `src/` in sync (iteration 34).
