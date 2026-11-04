@@ -135,6 +135,10 @@ void InputHook::ResetChase(float aInitialPitch) {
     s_recoilPitch = 0.0f;
     s_recoilPeakYaw = 0.0f;
     s_recoilPeakPitch = 0.0f;
+    s_nativeRecoilYaw = 0.0f;
+    s_nativeRecoilPitch = 0.0f;
+    s_nativeRecoilPeakYaw = 0.0f;
+    s_nativeRecoilPeakPitch = 0.0f;
     s_recoilDriftPitch = 0.0f;
     s_recoilRecovering = false;
     s_recoilIdleTimer = 0.0f;
@@ -176,6 +180,13 @@ void InputHook::SetExpParams(float aPower) {
     s_expPower = std::clamp(aPower, 0.1f, 1.5f);
 }
 float InputHook::GetExpPower() { return s_expPower; }
+
+void InputHook::SetRecoilLeashParams(float aMaxRadius, float aLeashCurve) {
+    s_recoilMaxRadius = std::clamp(aMaxRadius, 0.0f, 45.0f);
+    s_recoilLeashCurve = std::clamp(aLeashCurve, 0.2f, 6.0f);
+}
+float InputHook::GetRecoilMaxRadius() { return s_recoilMaxRadius; }
+float InputHook::GetRecoilLeashCurve() { return s_recoilLeashCurve; }
 
 void InputHook::SetSmoothing(float aLambda, int32_t aMode, float aMaxDiv, float aDeadzone, bool aEnabled) {
     s_lambda = aLambda;
@@ -386,34 +397,80 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
     float effDRecoilYaw = 0.0f;
     float effDRecoilPitch = 0.0f;
     if (dRecoilPitch > 1e-5f || (!s_recoilRecovering && std::abs(dRecoilYaw) > 1e-5f && dRecoilPitch >= -1e-5f)) {
-        // Kick Phase
+        // Kick Phase: track unattenuated native recoil for recovery span normalization,
+        // and apply Option A Radial Soft-Wall Attenuation ("Rubber Leash") to Tier 2 recoil W.
         s_recoilRecovering = false;
         s_recoilIdleTimer = 0.0f;
+        s_nativeRecoilYaw = std::clamp(s_nativeRecoilYaw + dRecoilYaw, -45.0f, 45.0f);
+        s_nativeRecoilPitch = std::clamp(s_nativeRecoilPitch + dRecoilPitch, -45.0f, 45.0f);
+
         effDRecoilYaw = dRecoilYaw;
         effDRecoilPitch = dRecoilPitch;
+
+        if (s_recoilMaxRadius > 0.1f) {
+            float Rmax = s_recoilMaxRadius;
+            float p = std::clamp(s_recoilLeashCurve, 0.2f, 6.0f);
+            float r = std::hypot(s_recoilYaw, s_recoilPitch);
+            if (r > 1e-4f) {
+                float ux = s_recoilYaw / r;
+                float uy = s_recoilPitch / r;
+                float dRad = dRecoilYaw * ux + dRecoilPitch * uy;
+                float dTanX = dRecoilYaw - dRad * ux;
+                float dTanY = dRecoilPitch - dRad * uy;
+
+                float u = std::clamp(r / Rmax, 0.0f, 1.0f);
+                float uPow = std::pow(u, p);
+                if (dRad > 0.0f) {
+                    // Progressive power-law rubber resistance against outward climb
+                    float gRad = 1.0f - uPow;
+                    dRad = std::min(dRad * gRad, std::max(0.0f, Rmax - r));
+                }
+                // Retain 50% tangential jitter at the leash rim so HMG/LMG sustained fire stays lively
+                float gTan = 1.0f - 0.5f * uPow;
+                effDRecoilYaw = dRad * ux + dTanX * gTan;
+                effDRecoilPitch = dRad * uy + dTanY * gTan;
+            }
+            // Enforce strict outer circle invariant |W + effDRecoil| <= Rmax
+            float candYaw = s_recoilYaw + effDRecoilYaw;
+            float candPitch = s_recoilPitch + effDRecoilPitch;
+            float candMag = std::hypot(candYaw, candPitch);
+            if (candMag > Rmax && candMag > 1e-5f) {
+                float clampScale = Rmax / candMag;
+                candYaw *= clampScale;
+                candPitch *= clampScale;
+                effDRecoilYaw = candYaw - s_recoilYaw;
+                effDRecoilPitch = candPitch - s_recoilPitch;
+            }
+        }
     } else if (dRecoilPitch < -1e-5f) {
         // Native Recovery Phase
         if (!s_recoilRecovering) {
             s_recoilRecovering = true;
             s_recoilPeakYaw = s_recoilYaw;
             s_recoilPeakPitch = s_recoilPitch;
+            if (s_nativeRecoilPitch < s_recoilPitch) {
+                s_nativeRecoilYaw = s_recoilYaw;
+                s_nativeRecoilPitch = s_recoilPitch;
+            }
+            s_nativeRecoilPeakYaw = s_nativeRecoilYaw;
+            s_nativeRecoilPeakPitch = s_nativeRecoilPitch;
             s_recoilDriftPitch = 0.0f;
 
             // Detect if vanilla RecoilDrift is active by comparing the native recovery direction
-            // (dRecoilYaw, dRecoilPitch) against the radial origin direction (-W_peak_yaw, -W_peak_pitch)
-            float peakMag = std::hypot(s_recoilPeakYaw, s_recoilPeakPitch);
+            // (dRecoilYaw, dRecoilPitch) against the unattenuated native peak (-W_native_yaw, -W_native_pitch)
+            float peakMag = std::hypot(s_nativeRecoilPeakYaw, s_nativeRecoilPeakPitch);
             float dMag = std::hypot(dRecoilYaw, dRecoilPitch);
             if (peakMag > 0.05f && dMag > 1e-5f) {
-                float cross = std::abs(dRecoilYaw * s_recoilPeakPitch - dRecoilPitch * s_recoilPeakYaw) / (peakMag * dMag);
-                if (cross > 0.02f && s_recoilPeakPitch > 0.15f) {
+                float cross = std::abs(dRecoilYaw * s_nativeRecoilPeakPitch - dRecoilPitch * s_nativeRecoilPeakYaw) / (peakMag * dMag);
+                if (cross > 0.02f && s_nativeRecoilPeakPitch > 0.15f) {
                     // Vanilla BaseStats: RecoilDriftRandomRangeMin = 0.6, Max = 0.9 (mean 0.75 deg),
                     // RecoilMagForFullDrift = 3.0 deg.
-                    // Exact line equation: (W_peak_yaw - D_yaw) / (W_peak_pitch - D_pitch) = m = dRecoilYaw / dRecoilPitch
+                    // Exact line equation: (W_native_yaw - D_yaw) / (W_native_pitch - D_pitch) = m = dRecoilYaw / dRecoilPitch
                     float m = dRecoilYaw / dRecoilPitch;
                     float scale = std::clamp(peakMag / 3.0f, 0.0f, 1.0f);
                     float rTarget = 0.75f * scale;
                     // Closest point on the recovery line to the origin has radius |c| / sqrt(1 + m^2)
-                    float c = s_recoilPeakYaw - m * s_recoilPeakPitch;
+                    float c = s_nativeRecoilPeakYaw - m * s_nativeRecoilPeakPitch;
                     float m2p1 = 1.0f + m * m;
                     float rMin2 = (c * c) / m2p1;
                     float r2 = std::max(rTarget * rTarget, rMin2);
@@ -421,12 +478,12 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
                     float halfChord = std::sqrt(std::max(0.0f, r2 - rMin2) / m2p1);
                     // Choose the positive-pitch branch matching vanilla upward recovery drift
                     float estDriftPitch = dPitchClosest + halfChord;
-                    s_recoilDriftPitch = std::clamp(estDriftPitch, 0.0f, s_recoilPeakPitch * 0.45f);
+                    s_recoilDriftPitch = std::clamp(estDriftPitch, 0.0f, s_nativeRecoilPeakPitch * 0.45f);
                 }
             }
         }
         s_recoilIdleTimer = 0.0f;
-        float nativeSpanPitch = std::max(s_recoilPeakPitch - s_recoilDriftPitch, 0.05f);
+        float nativeSpanPitch = std::max(s_nativeRecoilPeakPitch - s_recoilDriftPitch, 0.05f);
         if (s_recoilPitch > 1e-4f) {
             float scale = s_recoilPeakPitch / nativeSpanPitch;
             effDRecoilPitch = std::max(dRecoilPitch * scale, -s_recoilPitch);
@@ -435,6 +492,8 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
             effDRecoilPitch = -s_recoilPitch;
             effDRecoilYaw = -s_recoilYaw;
         }
+        s_nativeRecoilYaw = std::max(0.0f, s_nativeRecoilYaw + dRecoilYaw);
+        s_nativeRecoilPitch = std::max(0.0f, s_nativeRecoilPitch + dRecoilPitch);
     } else {
         // Native recoil delta is 0 (either in RecoilHoldDuration, or post-recovery idle)
         if (s_recoilRecovering) {
@@ -447,6 +506,8 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
                     effDRecoilYaw = -s_recoilYaw;
                     effDRecoilPitch = -s_recoilPitch;
                     s_recoilRecovering = false;
+                    s_nativeRecoilYaw = 0.0f;
+                    s_nativeRecoilPitch = 0.0f;
                 } else {
                     float ratio = finishStep / remMag;
                     effDRecoilYaw = -s_recoilYaw * ratio;
@@ -456,6 +517,8 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
                 effDRecoilYaw = -s_recoilYaw;
                 effDRecoilPitch = -s_recoilPitch;
                 s_recoilRecovering = false;
+                s_nativeRecoilYaw = 0.0f;
+                s_nativeRecoilPitch = 0.0f;
             }
         } else {
             // In RecoilHoldDuration (waiting for native recovery to begin) or aborted by reload
@@ -468,6 +531,11 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
                 if (std::abs(s_recoilPitch) <= 0.005f) bleedPitch = -s_recoilPitch;
                 effDRecoilYaw = bleedYaw;
                 effDRecoilPitch = bleedPitch;
+                s_nativeRecoilYaw += bleedYaw;
+                s_nativeRecoilPitch += bleedPitch;
+            } else if (std::abs(s_recoilYaw) <= 0.001f && std::abs(s_recoilPitch) <= 0.001f) {
+                s_nativeRecoilYaw = 0.0f;
+                s_nativeRecoilPitch = 0.0f;
             }
         }
     }
@@ -481,6 +549,8 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
     if (dRecoilPitch > 1e-5f) {
         s_recoilPeakYaw = s_recoilYaw;
         s_recoilPeakPitch = s_recoilPitch;
+        s_nativeRecoilPeakYaw = s_nativeRecoilYaw;
+        s_nativeRecoilPeakPitch = s_nativeRecoilPitch;
     }
 
     // 9. Residual for camera offset: R = T - T2B - predNextDBodyYaw

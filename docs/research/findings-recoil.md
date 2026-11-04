@@ -162,6 +162,35 @@
   1. Equip HMG, hold right-click (zoomed in), fire a burst, and stop firing while still holding right-click; verify the gun reticle returns directly to center without pausing at the top-left.
   2. Equip Copperhead (unholstered, not firing), pan the mouse horizontally left and right and stop abruptly; verify the camera remains steady without shaking sideways or drifting toward the catching-up gun.
 
+# iteration 5
+- date: 2026-11-04 08:42 +0700
+- status: untested (deployed to repo and `<GAME_ROOT>`, awaiting in-game test)
+- previous_iteration_results (Iteration 4 Playtest & Extended Fire Design Goal):
+  1. **User Observation & Design Request:**
+     - Iteration 4 resolved the zoomed HMG post-burst top-left stall and horizontal pan camera shake (`d3cc8ac` merged into `testing`).
+     - During extended full-auto firing (e.g., HMG or LMG belts, where vanilla `BaseStats.RecoilMaxLength = 30.0f` allows recoil to climb up to `30°`), we need a **"rubber leash" (Option A Radial Soft-Wall Attenuation)** mechanic on Tier 2 recoil pull so the gun reticle never climbs past a configurable maximum distance from the center reticle, with a new configuration section for 1–2 tunable parameters.
+- target_goal:
+  1. Implement **Option A Radial Soft-Wall Attenuation ("Rubber Leash")** on Tier 2 recoil accumulation $\vec{W}$ in [`InputHook::ProcessMouseAim`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.cpp) so outward recoil kicks are progressively resisted by $g_{\text{rad}}(r) = 1 - (r / R_{\text{max}})^p$ as $r = |\vec{W}| \to R_{\text{max}}$ and never exceed $R_{\text{max}}$, while preserving tangential jitter along the leash boundary so sustained HMG/LMG fire remains lively.
+  2. Preserve exact native `RecoilRecoveryTime` duration when releasing the trigger after a leashed burst by tracking the unattenuated shadow native recoil (`s_nativeRecoilYaw`, `s_nativeRecoilPitch`, `s_nativeRecoilPeakYaw`, `s_nativeRecoilPeakPitch`) for the recovery span denominator.
+  3. Add a new configuration section (**Tier 2 Recoil Rubber Leash**) in `Config`, NativeSettings UI, and CET ImGui overlay with two configurable parameters:
+     - `recoilMaxRadius` ($R_{\text{max}}$, default `7.0` deg, `0.0` = unlimited)
+     - `recoilLeashCurve` ($p$, default `1.5`, power-law resistance exponent)
+- changes_made:
+  1. [`src/Hooks/InputHook.hpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.hpp) & [`src/Hooks/InputHook.cpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.cpp):
+     - Added `s_recoilMaxRadius` (default `7.0f`), `s_recoilLeashCurve` (default `1.5f`), and shadow unattenuated native recoil tracking (`s_nativeRecoilYaw`, `s_nativeRecoilPitch`, `s_nativeRecoilPeakYaw`, `s_nativeRecoilPeakPitch`) plus `SetRecoilLeashParams` / `GetRecoilMaxRadius` / `GetRecoilLeashCurve`.
+     - During Kick, decomposed `(dRecoilYaw, dRecoilPitch)` into outward radial component $\Delta W_{\text{rad}}\,\hat{u}$ and tangential component $\Delta\vec{W}_{\perp}$, attenuating outward climb by $1 - (r / R_{\text{max}})^p$ and clamping $|\vec{W}| \le R_{\text{max}}$ while retaining `50%` tangential jitter at the rim.
+     - During Native Recovery, scaled native recovery steps by `s_recoilPeakPitch / (s_nativeRecoilPeakPitch - s_recoilDriftPitch)` so leashed bursts still recover smoothly over the full `RecoilRecoveryTime`.
+  2. [`src/Main.cpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Main.cpp):
+     - Registered RTTI functions `DR_SetRecoilLeashParams`, `DR_GetRecoilMaxRadius`, and `DR_GetRecoilLeashCurve`.
+  3. [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - Added `recoilMaxRadius = 7.0` and `recoilLeashCurve = 1.5` to `Config`, `LoadConfig`, `SyncRecoilLeashParams`, NativeSettings subcategory `/detachedReticle/recoilLeash` ("Tier 2 Recoil Rubber Leash"), CET ImGui section, and console setters `SetRecoilMaxRadius` / `SetRecoilLeashCurve`.
+- expected_outcome:
+  1. Short bursts feel natural, while extended full-auto firing (HMG / LMG) smoothly decelerates outward climb against the rubber leash and dances around the $R_{\text{max}}$ (`7.0°` default) boundary without ever escaping further away.
+  2. Releasing the trigger after a sustained leashed burst recovers smoothly to the center reticle over normal `RecoilRecoveryTime`.
+- test_procedure:
+  1. Fire extended 30–50 round bursts with HMG / LMG / Copperhead and verify the gun reticle stays bounded within `recoilMaxRadius` while remaining lively at the boundary.
+  2. Adjust **Max Recoil Leash Angle** (`recoilMaxRadius`) and **Leash Resistance Curve** (`recoilLeashCurve`) in CET overlay or NativeSettings to verify real-time responsiveness.
+
 # next iteration above this line
 
 ### Findings Writing Rules:

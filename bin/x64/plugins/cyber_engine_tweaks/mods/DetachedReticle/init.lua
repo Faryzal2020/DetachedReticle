@@ -20,6 +20,9 @@ local Config = {
     compMaxSpeed = 240.0,         -- T2B maximum angular speed in deg/s (default: 240.0 deg/s)
     compMinSpeed = 6.0,           -- T2B minimum angular speed in deg/s (prevents early slowdown tail crawl, default: 6.0)
     compGapThreshold = 3.0,       -- Mouse gap threshold in degrees between moving and settled (default: 3.0, old: 5.0)
+    -- Tier 2 Recoil Rubber Leash (Option A Radial Soft-Wall Attenuation)
+    recoilMaxRadius = 7.0,        -- Degrees: max recoil distance from center reticle during sustained fire (0 = unlimited, default: 7.0)
+    recoilLeashCurve = 1.5,       -- Power-law resistance exponent as recoil approaches recoilMaxRadius (default: 1.5)
     debugLogging = false          -- Verbose telemetry logging to DetachedReticle.log
 }
 
@@ -148,6 +151,8 @@ local function LoadConfig()
                 if data.compMaxSpeed ~= nil then Config.compMaxSpeed = tonumber(data.compMaxSpeed) or Config.compMaxSpeed end
                 if data.compMinSpeed ~= nil then Config.compMinSpeed = tonumber(data.compMinSpeed) or Config.compMinSpeed end
                 if data.compGapThreshold ~= nil then Config.compGapThreshold = tonumber(data.compGapThreshold) or Config.compGapThreshold end
+                if data.recoilMaxRadius ~= nil then Config.recoilMaxRadius = tonumber(data.recoilMaxRadius) or Config.recoilMaxRadius end
+                if data.recoilLeashCurve ~= nil then Config.recoilLeashCurve = tonumber(data.recoilLeashCurve) or Config.recoilLeashCurve end
                 if data.debugLogging ~= nil then Config.debugLogging = (data.debugLogging == true) end
             end
         end
@@ -168,6 +173,7 @@ local function SyncSmoothing()
         Game.DR_SetSmoothing(Config.catchUpSpeed, modeInt, Config.maxDivergence, Config.deadzone, DetachedReticle.chaseActive or false)
         Game.DR_SetBrakeParams(Config.brakeThreshold, Config.brakeMaxSpeed)
         Game.DR_SetExpParams(Config.expPower)
+        Game.DR_SetRecoilLeashParams(Config.recoilMaxRadius, Config.recoilLeashCurve)
     end)
 end
 
@@ -180,6 +186,12 @@ local function SyncCompParams()
             Config.compGapThreshold,
             Config.compMinSpeed
         )
+    end)
+end
+
+local function SyncRecoilLeashParams()
+    pcall(function()
+        Game.DR_SetRecoilLeashParams(Config.recoilMaxRadius, Config.recoilLeashCurve)
     end)
 end
 
@@ -410,6 +422,28 @@ local function SetupNativeSettings()
                 end
             )
 
+            ns.addSubcategory("/detachedReticle/recoilLeash", "Tier 2 Recoil Rubber Leash")
+
+            ns.addRangeFloat(
+                "/detachedReticle/recoilLeash",
+                "Max Recoil Leash Angle",
+                "Maximum angular distance the gun reticle can climb from center during extended fire (0.0 = unlimited, default: 7.0 deg)",
+                0.0, 25.0, 0.5, "%.1f deg", Config.recoilMaxRadius, 7.0,
+                function(val)
+                    DetachedReticle.SetRecoilMaxRadius(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/recoilLeash",
+                "Leash Resistance Curve",
+                "Rubber resistance exponent p (1 - (r/Rmax)^p). Lower = earlier progressive pull; Higher = freer climb then firm wall near Rmax (default: 1.5)",
+                0.5, 4.0, 0.1, "%.1f", Config.recoilLeashCurve, 1.5,
+                function(val)
+                    DetachedReticle.SetRecoilLeashCurve(val)
+                end
+            )
+
             Log("[SETTINGS] NativeSettings tab '/detachedReticle' successfully initialized.")
         end
     end)
@@ -421,15 +455,22 @@ end
 registerForEvent("onInit", function()
     LoadConfig()
     SyncCompParams()
-    Log(string.format("Initializing Decoupled Aiming System v%s | Enabled=%s | Speed=%.1f | Deadzone=%.1f deg | MaxDiv=%.1f deg | CompSettled=%.1f | CompMoving=%.1f | CompMax=%.0f deg/s",
-        DetachedReticle.version, tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed))
+    SyncRecoilLeashParams()
+    Log(string.format("Initializing Decoupled Aiming System v%s | Enabled=%s | Speed=%.1f | Deadzone=%.1f deg | MaxDiv=%.1f deg | CompSettled=%.1f | CompMoving=%.1f | CompMax=%.0f deg/s | RecoilLeash=%.1f deg (p=%.1f)",
+        DetachedReticle.version, tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.recoilMaxRadius, Config.recoilLeashCurve))
 
     SetupNativeSettings()
 end)
 
 registerForEvent("onUpdate", function(delta)
     local player = Game.GetPlayer()
-    if not player then return end
+    if not player then
+        DetachedReticle.isActive = false
+        DetachedReticle.chaseActive = false
+        DetachedReticle.wasArmed = false
+        DetachedReticle.lastWrittenRPitch = 0.0
+        return
+    end
 
     if not DetachedReticle.nativeSettingsInitAttempted then
         SetupNativeSettings()
@@ -461,6 +502,32 @@ registerForEvent("onUpdate", function(delta)
     pcall(function() wPitch = Game.DR_GetRecoilPitch() end)
     local settling = (math.abs(rYaw) + math.abs(rPitch) > 0.10) or (math.abs(cYaw) + math.abs(cPitch) > 0.10) or (math.abs(wYaw) + math.abs(wPitch) > 0.05)
 
+    -- Prevent settling deadlock when unarmed and native mouse hook (0x51D462) is not ticking (e.g. Hacking UI, menus, dialogs)
+    if not isArmed and settling then
+        local settleDelta = math.abs(rYaw - (DetachedReticle.lastSettleRYaw or 0.0))
+                          + math.abs(rPitch - (DetachedReticle.lastSettleRPitch or 0.0))
+                          + math.abs(cYaw - (DetachedReticle.lastSettleCYaw or 0.0))
+                          + math.abs(cPitch - (DetachedReticle.lastSettleCPitch or 0.0))
+                          + math.abs(wYaw - (DetachedReticle.lastSettleWYaw or 0.0))
+                          + math.abs(wPitch - (DetachedReticle.lastSettleWPitch or 0.0))
+        if settleDelta < 1e-5 then
+            DetachedReticle.stalledSettleFrames = (DetachedReticle.stalledSettleFrames or 0) + 1
+            if DetachedReticle.stalledSettleFrames >= 3 then
+                settling = false
+            end
+        else
+            DetachedReticle.stalledSettleFrames = 0
+        end
+    else
+        DetachedReticle.stalledSettleFrames = 0
+    end
+    DetachedReticle.lastSettleRYaw = rYaw
+    DetachedReticle.lastSettleRPitch = rPitch
+    DetachedReticle.lastSettleCYaw = cYaw
+    DetachedReticle.lastSettleCPitch = cPitch
+    DetachedReticle.lastSettleWYaw = wYaw
+    DetachedReticle.lastSettleWPitch = wPitch
+
     local shouldBeActive = Config.enabled and fpp and (isArmed or settling)
 
     if shouldBeActive then
@@ -481,14 +548,32 @@ registerForEvent("onUpdate", function(delta)
         end
         DetachedReticle.bodyYaw = bodyYaw
 
-        -- 2. Read camera component local orientation
+        -- 2. Read camera component local orientation and rendered camera forward
         local localRot = nil
         pcall(function() localRot = fpp:GetLocalOrientation() end)
+
+        local camYaw, camPitch = 0.0, 0.0
+        local hasCamFwd = false
+        pcall(function()
+            local cf = Game.GetCameraSystem():GetActiveCameraForward()
+            if cf then
+                local cx = cf.x or cf.X or 0.0
+                local cy = cf.y or cf.Y or 0.0
+                local cz = cf.z or cf.Z or 0.0
+                local xy = math.sqrt(cx * cx + cy * cy)
+                if xy > 0.0001 or math.abs(cz) > 0.0001 then
+                    camYaw = Vector4.Heading(cf)
+                    camPitch = math.deg(math.atan2(cz, xy))
+                    hasCamFwd = true
+                end
+            end
+        end)
 
         if not DetachedReticle.chaseActive then
             DetachedReticle.chaseActive = true
             DetachedReticle.baselineRot = localRot or Quaternion.new(0, 0, 0, 1)
             DetachedReticle.lastWrittenRot = nil
+            DetachedReticle.lastWrittenRPitch = 0.0
             DetachedReticle.lastCamYaw = nil
             DetachedReticle.lastBodyYaw = nil
             DetachedReticle.lastCYaw = nil
@@ -507,19 +592,7 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.origHeadingLocked = (okHead and headLocked) or false
 
             -- Get initial camera pitch before chase begins from rendered active camera (Fix F0)
-            local initPitch = 0.0
-            pcall(function()
-                local cf = Game.GetCameraSystem():GetActiveCameraForward()
-                if cf then
-                    local cx = cf.x or cf.X or 0.0
-                    local cy = cf.y or cf.Y or 0.0
-                    local cz = cf.z or cf.Z or 0.0
-                    local xy = math.sqrt(cx * cx + cy * cy)
-                    if xy > 0.0001 or math.abs(cz) > 0.0001 then
-                        initPitch = math.deg(math.atan2(cz, xy))
-                    end
-                end
-            end)
+            local initPitch = hasCamFwd and camPitch or 0.0
 
             -- Reset native chase state with initial pitch and activate native look smoothing
             pcall(function() Game.DR_ResetChasePitch(initPitch) end)
@@ -537,6 +610,18 @@ registerForEvent("onUpdate", function(delta)
 
             Log(string.format("Decoupled Aim ACTIVE: mode=%s speed=%.1f expPower=%.2f brakeThresh=%.1f brakeMax=%.0f maxDiv=%.1f deadzone=%.1f initPitch=%.2f",
                 Config.smoothingMode, Config.catchUpSpeed, Config.expPower, Config.brakeThreshold, Config.brakeMaxSpeed, Config.maxDivergence, Config.deadzone, initPitch))
+        elseif isArmed and not DetachedReticle.wasArmed and hasCamFwd then
+            -- Re-arming while chaseActive remained true (e.g. exiting Hacking UI or cancelling holster):
+            -- Re-seed pitch if external camera controller shifted pitch while unarmed.
+            local curTPitch = camPitch
+            pcall(function() curTPitch = Game.DR_GetTargetPitch() end)
+            if math.abs(camPitch - curTPitch) > 0.5 then
+                pcall(function() Game.DR_ResetChasePitch(camPitch) end)
+                DetachedReticle.lastWrittenRPitch = 0.0
+                DetachedReticle.lastSettledCompTargetYaw = 0.0
+                DetachedReticle.lastSettledCompTargetPitch = 0.0
+                Log(string.format("Decoupled Aim RE-SEED on re-arm: camPitch=%.2f prevTPitch=%.2f", camPitch, curTPitch))
+            end
         end
 
         -- Read native camera residuals (R = T - T2B = (T - A) + C - W)
@@ -547,9 +632,26 @@ registerForEvent("onUpdate", function(delta)
         pcall(function() wYaw = Game.DR_GetRecoilYaw() end)
         pcall(function() wPitch = Game.DR_GetRecoilPitch() end)
 
-        -- Read native physical socket pitch angle (T2B = A - C + W) so the gravity-up axis matches the parent coordinate frame
+        -- When fully settled at rest, silently re-sync native dead-reckoned pitch if external camera shifted it
+        if hasCamFwd and math.abs(rYaw) < 0.05 and math.abs(rPitch) < 0.05 and math.abs(cYaw) < 0.05 and math.abs(cPitch) < 0.05 and math.abs(wYaw) < 0.05 and math.abs(wPitch) < 0.05 then
+            local curTPitch = camPitch
+            pcall(function() curTPitch = Game.DR_GetTargetPitch() end)
+            if math.abs(camPitch - curTPitch) > 0.5 then
+                pcall(function() Game.DR_ResetChasePitch(camPitch) end)
+                rYaw, rPitch = 0.0, 0.0
+                DetachedReticle.lastWrittenRPitch = 0.0
+            end
+        end
+
+        -- Physical socket pitch angle in parent coordinate frame:
+        -- Derived directly from rendered camera pitch minus the previous frame's written local pitch residual,
+        -- guaranteeing the horizontal yaw axis is always aligned with true world-up even if the engine alters pitch externally.
         local socketPitch = 0.0
-        pcall(function() socketPitch = Game.DR_GetT2BPitch() end)
+        if hasCamFwd then
+            socketPitch = camPitch - (DetachedReticle.lastWrittenRPitch or 0.0)
+        else
+            pcall(function() socketPitch = Game.DR_GetT2BPitch() end)
+        end
         local pitchRad = math.rad(socketPitch)
         local fwdZ = math.sin(pitchRad)
         local fwdXY = math.cos(pitchRad)
@@ -576,6 +678,7 @@ registerForEvent("onUpdate", function(delta)
             fpp:SetLocalTransform(fpp:GetLocalPosition(), targetRot)
         end)
         DetachedReticle.lastWrittenRot = targetRot
+        DetachedReticle.lastWrittenRPitch = rPitch
 
         if Config.debugLogging then
             local tYaw = 0.0
@@ -598,13 +701,6 @@ registerForEvent("onUpdate", function(delta)
             pcall(function() splitErrPitch = Game.DR_GetSplitErrPitch() end)
 
             -- [PROBE P1] Rendered camera heading/pitch (CameraSystem.GetActiveCameraForward, cameraSystem.script:14)
-            local camYaw, camPitch = 0.0, 0.0
-            pcall(function()
-                local cf = Game.GetCameraSystem():GetActiveCameraForward()
-                local cx, cy, cz = cf.x or 0.0, cf.y or 0.0, cf.z or 0.0
-                camYaw = Vector4.Heading(cf)
-                camPitch = math.deg(math.atan2(cz, math.sqrt(cx * cx + cy * cy)))
-            end)
             local dCamYaw = normalizeDeg(camYaw - (DetachedReticle.lastCamYaw or camYaw))
             local dBody = normalizeDeg(bodyYaw - (DetachedReticle.lastBodyYaw or bodyYaw))
             -- Predicted puppet step from the hook: dA - dC + dRec
@@ -797,7 +893,7 @@ registerForEvent("onUpdate", function(delta)
                 gunYaw = math.deg(math.atan2(-fx, fy))
             end
 
-            pcall(function() t2bPitch = Game.DR_GetT2BPitch() end)
+            t2bPitch = socketPitch
 
             -- Body-relative anatomical offset (fixed-point target C = O):
             -- Eliminates the half-gain error and dynamic chase gap pollution
@@ -965,6 +1061,8 @@ registerForEvent("onUpdate", function(delta)
                 end
             end
             DetachedReticle.baselineRot = nil
+            DetachedReticle.lastWrittenRot = nil
+            DetachedReticle.lastWrittenRPitch = 0.0
             DetachedReticle.origHeadingLocked = nil
             DetachedReticle.origSensX = nil
             DetachedReticle.origSensY = nil
@@ -972,6 +1070,7 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.lastLoggedADS = nil
         end
     end
+    DetachedReticle.wasArmed = isArmed
 
     -- Telemetry bridge: poll DetachedAimSystem for ballistics shot telemetry
     local aimSys = nil
@@ -1146,6 +1245,22 @@ registerForEvent("onDraw", function()
             ImGui.SetTooltip("Angle threshold in degrees between moving and settled alignment speeds.\nDefault: 3.0 deg (Old hardcoded: 5.0 deg)")
         end
 
+        -- Tier 2 Recoil Rubber Leash (Option A Radial Soft-Wall Attenuation)
+        ImGui.Separator()
+        ImGui.Text("Tier 2 Recoil Rubber Leash (Extended Fire Ceiling):")
+
+        local newLeashMax, leashMaxChanged = ImGui.SliderFloat("Max Recoil Leash", Config.recoilMaxRadius, 0.0, 25.0, "%.1f deg")
+        if leashMaxChanged then DetachedReticle.SetRecoilMaxRadius(newLeashMax) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Maximum angular distance from center reticle that the gun reticle can climb during extended fire (e.g. HMG / LMG).\n0.0 deg = Unlimited\nDefault: 7.0 deg")
+        end
+
+        local newLeashCurve, leashCurveChanged = ImGui.SliderFloat("Leash Resistance Curve", Config.recoilLeashCurve, 0.5, 4.0, "%.1f")
+        if leashCurveChanged then DetachedReticle.SetRecoilLeashCurve(newLeashCurve) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Power-law rubber resistance exponent p (1 - (r/Rmax)^p).\nLower (0.8-1.2) = earlier elastic resistance\nHigher (2.0-3.5) = free climb then firm wall near Max Leash\nDefault: 1.5")
+        end
+
         -- Debug Telemetry Checkbox
         local newDebug, debugChanged = ImGui.Checkbox("Verbose Debug Logging", Config.debugLogging)
         if debugChanged then
@@ -1302,6 +1417,20 @@ DetachedReticle.SetCompGapThreshold = function(val)
     Log(string.format("[OPTIONS] compGapThreshold set to: %.1f deg", Config.compGapThreshold))
 end
 
+DetachedReticle.SetRecoilMaxRadius = function(val)
+    Config.recoilMaxRadius = math.max(0.0, math.min(45.0, tonumber(val) or 7.0))
+    SaveConfig()
+    SyncRecoilLeashParams()
+    Log(string.format("[OPTIONS] recoilMaxRadius set to: %.1f deg", Config.recoilMaxRadius))
+end
+
+DetachedReticle.SetRecoilLeashCurve = function(val)
+    Config.recoilLeashCurve = math.max(0.2, math.min(6.0, tonumber(val) or 1.5))
+    SaveConfig()
+    SyncRecoilLeashParams()
+    Log(string.format("[OPTIONS] recoilLeashCurve set to: %.2f", Config.recoilLeashCurve))
+end
+
 DetachedReticle.SetDebugLogging = function(val)
     Config.debugLogging = val and true or false
     SaveConfig()
@@ -1309,10 +1438,11 @@ DetachedReticle.SetDebugLogging = function(val)
 end
 
 DetachedReticle.GetOptions = function()
-    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | expPower=%.2f | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg",
+    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | expPower=%.2f | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg | recoilMaxRadius=%.1f deg | recoilLeashCurve=%.2f",
         tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode,
         Config.expPower, Config.brakeThreshold, Config.brakeMaxSpeed,
-        Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.compMinSpeed, Config.compGapThreshold))
+        Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.compMinSpeed, Config.compGapThreshold,
+        Config.recoilMaxRadius, Config.recoilLeashCurve))
     return Config
 end
 

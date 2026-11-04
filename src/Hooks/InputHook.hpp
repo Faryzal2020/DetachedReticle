@@ -53,6 +53,11 @@ public:
     static void SetExpParams(float aPower);
     static float GetExpPower();
 
+    // Tier 2 Recoil Rubber Leash (Option A Radial Soft-Wall Attenuation) Parameters
+    static void SetRecoilLeashParams(float aMaxRadius, float aLeashCurve);
+    static float GetRecoilMaxRadius();
+    static float GetRecoilLeashCurve();
+
     // Sensitivity Mult Direct Memory Access (offsets 0x498, 0x49C on gameFPPCameraComponent)
     static void SetSensitivityMult(RED4ext::IScriptable* aFpp, float aMultX, float aMultY);
     static float GetSensitivityMultX(RED4ext::IScriptable* aFpp);
@@ -96,6 +101,10 @@ public:
     static inline float s_recoilPitch{ 0.0f };
     static inline float s_recoilPeakYaw{ 0.0f };
     static inline float s_recoilPeakPitch{ 0.0f };
+    static inline float s_nativeRecoilYaw{ 0.0f };
+    static inline float s_nativeRecoilPitch{ 0.0f };
+    static inline float s_nativeRecoilPeakYaw{ 0.0f };
+    static inline float s_nativeRecoilPeakPitch{ 0.0f };
     static inline float s_recoilDriftPitch{ 0.0f };
     static inline bool s_recoilRecovering{ false };
     static inline float s_recoilIdleTimer{ 0.0f };
@@ -103,6 +112,10 @@ public:
     static inline float s_lastDRecoilPitch{ 0.0f };
     static inline float s_splitErrYaw{ 0.0f };
     static inline float s_splitErrPitch{ 0.0f };
+
+    // Tier 2 Recoil Rubber Leash Parameters
+    static inline float s_recoilMaxRadius{ 7.0f };   // Degrees: max recoil distance from center reticle (0 = unlimited)
+    static inline float s_recoilLeashCurve{ 1.5f };  // Power-law resistance exponent as recoil approaches s_recoilMaxRadius
 
     // Tier 2B Compensation Parameters
     static inline float s_compSpeedSettled{ 12.0f };

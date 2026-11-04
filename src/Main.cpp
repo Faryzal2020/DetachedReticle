@@ -285,6 +285,34 @@ void DR_GetExpPower(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame
     if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetExpPower();
 }
 
+void DR_SetRecoilLeashParams(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(aOut);
+    RED4EXT_UNUSED_PARAMETER(a4);
+
+    float maxRadius = 7.0f;
+    float leashCurve = 1.5f;
+    RED4ext::GetParameter(aFrame, &maxRadius);
+    RED4ext::GetParameter(aFrame, &leashCurve);
+    aFrame->code++;
+
+    DetachedReticle::InputHook::SetRecoilLeashParams(maxRadius, leashCurve);
+}
+
+void DR_GetRecoilMaxRadius(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetRecoilMaxRadius();
+}
+
+void DR_GetRecoilLeashCurve(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetRecoilLeashCurve();
+}
+
 
 void DR_DrainEvents(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
     RED4EXT_UNUSED_PARAMETER(aContext);
@@ -479,6 +507,15 @@ void PostRegisterTypes() {
     funcGetExpPower->flags = flags;
     funcGetExpPower->SetReturnType("Float");
     rtti->RegisterFunction(funcGetExpPower);
+
+    auto funcSetRecoilLeashParams = RED4ext::CGlobalFunction::Create("DR_SetRecoilLeashParams", "DR_SetRecoilLeashParams", &DR_SetRecoilLeashParams);
+    funcSetRecoilLeashParams->flags = flags;
+    funcSetRecoilLeashParams->AddParam("Float", "maxRadius");
+    funcSetRecoilLeashParams->AddParam("Float", "leashCurve");
+    rtti->RegisterFunction(funcSetRecoilLeashParams);
+
+    regGetter("DR_GetRecoilMaxRadius", &DR_GetRecoilMaxRadius);
+    regGetter("DR_GetRecoilLeashCurve", &DR_GetRecoilLeashCurve);
 
 
     auto funcDrain = RED4ext::CGlobalFunction::Create("DR_DrainEvents", "DR_DrainEvents", &DR_DrainEvents);
