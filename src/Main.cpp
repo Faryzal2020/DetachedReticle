@@ -313,6 +313,52 @@ void DR_GetRecoilLeashCurve(RED4ext::IScriptable* aContext, RED4ext::CStackFrame
     if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetRecoilLeashCurve();
 }
 
+void DR_SetRecoilHorizontalParams(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(aOut);
+    RED4EXT_UNUSED_PARAMETER(a4);
+
+    bool statScaling = true;
+    float scatter = 1.0f;
+    float damping = 0.70f;
+    float strengthFactor = 0.0f;
+    RED4ext::GetParameter(aFrame, &statScaling);
+    RED4ext::GetParameter(aFrame, &scatter);
+    RED4ext::GetParameter(aFrame, &damping);
+    RED4ext::GetParameter(aFrame, &strengthFactor);
+    aFrame->code++;
+
+    DetachedReticle::InputHook::SetRecoilHorizontalParams(statScaling, scatter, damping, strengthFactor);
+}
+
+void DR_GetRecoilHoriStatScaling(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<bool*>(aOut) = DetachedReticle::InputHook::GetRecoilHoriStatScaling();
+}
+
+void DR_GetRecoilHoriScatter(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetRecoilHoriScatter();
+}
+
+void DR_GetRecoilHoriDamping(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetRecoilHoriDamping();
+}
+
+void DR_GetPlayerStrengthFactor(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetPlayerStrengthFactor();
+}
+
 
 void DR_DrainEvents(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
     RED4EXT_UNUSED_PARAMETER(aContext);
@@ -516,6 +562,23 @@ void PostRegisterTypes() {
 
     regGetter("DR_GetRecoilMaxRadius", &DR_GetRecoilMaxRadius);
     regGetter("DR_GetRecoilLeashCurve", &DR_GetRecoilLeashCurve);
+
+    auto funcSetRecoilHoriParams = RED4ext::CGlobalFunction::Create("DR_SetRecoilHorizontalParams", "DR_SetRecoilHorizontalParams", &DR_SetRecoilHorizontalParams);
+    funcSetRecoilHoriParams->flags = flags;
+    funcSetRecoilHoriParams->AddParam("Bool", "statScaling");
+    funcSetRecoilHoriParams->AddParam("Float", "scatter");
+    funcSetRecoilHoriParams->AddParam("Float", "damping");
+    funcSetRecoilHoriParams->AddParam("Float", "strengthFactor");
+    rtti->RegisterFunction(funcSetRecoilHoriParams);
+
+    auto funcGetRecoilHoriStatScaling = RED4ext::CGlobalFunction::Create("DR_GetRecoilHoriStatScaling", "DR_GetRecoilHoriStatScaling", &DR_GetRecoilHoriStatScaling);
+    funcGetRecoilHoriStatScaling->flags = flags;
+    funcGetRecoilHoriStatScaling->SetReturnType("Bool");
+    rtti->RegisterFunction(funcGetRecoilHoriStatScaling);
+
+    regGetter("DR_GetRecoilHoriScatter", &DR_GetRecoilHoriScatter);
+    regGetter("DR_GetRecoilHoriDamping", &DR_GetRecoilHoriDamping);
+    regGetter("DR_GetPlayerStrengthFactor", &DR_GetPlayerStrengthFactor);
 
 
     auto funcDrain = RED4ext::CGlobalFunction::Create("DR_DrainEvents", "DR_DrainEvents", &DR_DrainEvents);

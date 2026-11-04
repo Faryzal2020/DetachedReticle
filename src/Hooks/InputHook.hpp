@@ -58,6 +58,13 @@ public:
     static float GetRecoilMaxRadius();
     static float GetRecoilLeashCurve();
 
+    // Tier 2 Strength-Scaled Horizontal Recoil Dynamics Parameters
+    static void SetRecoilHorizontalParams(bool aStatScaling, float aScatter, float aDamping, float aStrengthFactor);
+    static bool GetRecoilHoriStatScaling();
+    static float GetRecoilHoriScatter();
+    static float GetRecoilHoriDamping();
+    static float GetPlayerStrengthFactor();
+
     // Sensitivity Mult Direct Memory Access (offsets 0x498, 0x49C on gameFPPCameraComponent)
     static void SetSensitivityMult(RED4ext::IScriptable* aFpp, float aMultX, float aMultY);
     static float GetSensitivityMultX(RED4ext::IScriptable* aFpp);
@@ -116,6 +123,19 @@ public:
     // Tier 2 Recoil Rubber Leash Parameters
     static inline float s_recoilMaxRadius{ 7.0f };   // Degrees: max recoil distance from center reticle (0 = unlimited)
     static inline float s_recoilLeashCurve{ 1.5f };  // Power-law resistance exponent as recoil approaches s_recoilMaxRadius
+
+    // Tier 2 Strength-Scaled Horizontal Recoil Dynamics State & Parameters
+    static inline bool s_recoilHoriStatScaling{ true }; // Scale scatter/damping with player Body/Strength stat [3..20]
+    static inline float s_recoilHoriScatter{ 1.0f };    // Low-Strength alternating horizontal scatter multiplier (default: 1.0)
+    static inline float s_recoilHoriDamping{ 0.70f };   // High-Strength native horizontal recoil neutralization factor (default: 0.70)
+    static inline float s_playerStrengthFactor{ 0.0f }; // Normalized Body/Strength in [0.0, 1.0] ((Body - 3) / 17)
+    static inline float s_shotKickTimer{ 0.0f };        // Duration of current shot kick window (s)
+    static inline float s_prevDRecoilPitch{ 0.0f };     // Previous frame native recoil pitch delta for rising-edge shot detection
+    static inline float s_lastHoriPushSign{ 1.0f };     // Direction (+1 right, -1 left) of the previous shot's net horizontal kick
+    static inline float s_currentShotRandSign{ 1.0f };  // Per-shot randomized horizontal impulse sign (+1 or -1)
+    static inline float s_currentShotRandMag{ 0.8f };   // Per-shot randomized horizontal impulse magnitude [0.40, 1.25]
+    static inline float s_currentShotCompMult{ 0.9f };  // Per-shot randomized neutralization multiplier [0.65, 1.15]
+    static inline uint32_t s_rngState{ 0xA341316Cu };   // Fast xorshift32 PRNG state for per-shot horizontal recoil dynamics
 
     // Tier 2B Compensation Parameters
     static inline float s_compSpeedSettled{ 12.0f };

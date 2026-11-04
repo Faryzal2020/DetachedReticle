@@ -23,6 +23,10 @@ local Config = {
     -- Tier 2 Recoil Rubber Leash (Option A Radial Soft-Wall Attenuation)
     recoilMaxRadius = 7.0,        -- Degrees: max recoil distance from center reticle during sustained fire (0 = unlimited, default: 7.0)
     recoilLeashCurve = 1.5,       -- Power-law resistance exponent as recoil approaches recoilMaxRadius (default: 1.5)
+    -- Tier 2 Strength-Scaled Horizontal Recoil Dynamics
+    recoilHoriStatScaling = true, -- Scale horizontal scatter (low Strength) & damping (high Strength) with player Body/Strength [3..20]
+    recoilHoriScatter = 1.0,      -- Low-Strength alternating horizontal scatter multiplier (default: 1.0)
+    recoilHoriDamping = 0.70,     -- High-Strength native horizontal recoil neutralization factor (default: 0.70)
     -- ADS Lever-Arm Drop Compensation
     adsLeverArmComp = true,       -- Dynamically lower lever-arm root during ADS recoil to prevent sight occlusion
     adsLeverArmLength = 0.35,     -- Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.35)
@@ -37,6 +41,8 @@ local DetachedReticle = {
     baselineRot = nil,
     baselinePos = nil,
     lastAppliedDrop = 0.0,
+    playerBodyStat = 3.0,
+    playerStrengthFactor = 0.0,
     origHeadingLocked = nil,
     origSensX = nil,
     origSensY = nil,
@@ -158,6 +164,9 @@ local function LoadConfig()
                 if data.compGapThreshold ~= nil then Config.compGapThreshold = tonumber(data.compGapThreshold) or Config.compGapThreshold end
                 if data.recoilMaxRadius ~= nil then Config.recoilMaxRadius = tonumber(data.recoilMaxRadius) or Config.recoilMaxRadius end
                 if data.recoilLeashCurve ~= nil then Config.recoilLeashCurve = tonumber(data.recoilLeashCurve) or Config.recoilLeashCurve end
+                if data.recoilHoriStatScaling ~= nil then Config.recoilHoriStatScaling = (data.recoilHoriStatScaling == true) end
+                if data.recoilHoriScatter ~= nil then Config.recoilHoriScatter = tonumber(data.recoilHoriScatter) or Config.recoilHoriScatter end
+                if data.recoilHoriDamping ~= nil then Config.recoilHoriDamping = tonumber(data.recoilHoriDamping) or Config.recoilHoriDamping end
                 if data.adsLeverArmComp ~= nil then Config.adsLeverArmComp = (data.adsLeverArmComp == true) end
                 if data.adsLeverArmLength ~= nil then Config.adsLeverArmLength = tonumber(data.adsLeverArmLength) or Config.adsLeverArmLength end
                 if data.debugLogging ~= nil then Config.debugLogging = (data.debugLogging == true) end
@@ -174,6 +183,33 @@ local function GetSmoothingModeInt()
     return 0 -- default to exponential
 end
 
+local function SyncRecoilHorizontalParams()
+    pcall(function()
+        Game.DR_SetRecoilHorizontalParams(
+            Config.recoilHoriStatScaling and true or false,
+            Config.recoilHoriScatter,
+            Config.recoilHoriDamping,
+            DetachedReticle.playerStrengthFactor or 0.0
+        )
+    end)
+end
+
+local function UpdatePlayerStrengthStat(player)
+    if not player then return end
+    local ok, val = pcall(function()
+        local statsSys = Game.GetStatsSystem()
+        if statsSys then
+            return statsSys:GetStatValue(player:GetEntityID(), gamedataStatType.Strength)
+        end
+        return nil
+    end)
+    if ok and type(val) == "number" and val > 0.0 then
+        DetachedReticle.playerBodyStat = val
+        DetachedReticle.playerStrengthFactor = math.max(0.0, math.min(1.0, (val - 3.0) / 17.0))
+        SyncRecoilHorizontalParams()
+    end
+end
+
 local function SyncSmoothing()
     local modeInt = GetSmoothingModeInt()
     pcall(function()
@@ -181,6 +217,12 @@ local function SyncSmoothing()
         Game.DR_SetBrakeParams(Config.brakeThreshold, Config.brakeMaxSpeed)
         Game.DR_SetExpParams(Config.expPower)
         Game.DR_SetRecoilLeashParams(Config.recoilMaxRadius, Config.recoilLeashCurve)
+        Game.DR_SetRecoilHorizontalParams(
+            Config.recoilHoriStatScaling and true or false,
+            Config.recoilHoriScatter,
+            Config.recoilHoriDamping,
+            DetachedReticle.playerStrengthFactor or 0.0
+        )
     end)
 end
 
@@ -451,6 +493,38 @@ local function SetupNativeSettings()
                 end
             )
 
+            ns.addSubcategory("/detachedReticle/recoilHorizontal", "Tier 2 Horizontal Recoil & Strength Scaling")
+
+            ns.addSwitch(
+                "/detachedReticle/recoilHorizontal",
+                "Scale with Body/Strength Stat",
+                "Automatically scales low-Strength alternating horizontal scatter (Body 3 -> 100%, Body 20 -> 0%) and high-Strength native recoil neutralization (Body 3 -> 0%, Body 20 -> 100%) (default: On)",
+                Config.recoilHoriStatScaling, true,
+                function(val)
+                    DetachedReticle.SetRecoilHoriStatScaling(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/recoilHorizontal",
+                "Low-Strength Horizontal Scatter",
+                "Alternating left/right horizontal recoil push multiplier at low Body/Strength (0.0 = off, default: 1.0)",
+                0.0, 3.0, 0.05, "%.2f", Config.recoilHoriScatter, 1.0,
+                function(val)
+                    DetachedReticle.SetRecoilHoriScatter(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/recoilHorizontal",
+                "High-Strength Horizontal Damping",
+                "Fraction of native horizontal recoil counteracted in the opposite direction at high Body/Strength (0.0 = off, default: 0.70)",
+                0.0, 0.95, 0.05, "%.2f", Config.recoilHoriDamping, 0.70,
+                function(val)
+                    DetachedReticle.SetRecoilHoriDamping(val)
+                end
+            )
+
             ns.addSubcategory("/detachedReticle/leverArm", "ADS Lever-Arm Sight-Line Compensation")
 
             ns.addSwitch(
@@ -485,8 +559,9 @@ registerForEvent("onInit", function()
     LoadConfig()
     SyncCompParams()
     SyncRecoilLeashParams()
-    Log(string.format("Initializing Decoupled Aiming System v%s | Enabled=%s | Speed=%.1f | Deadzone=%.1f deg | MaxDiv=%.1f deg | CompSettled=%.1f | CompMoving=%.1f | CompMax=%.0f deg/s | RecoilLeash=%.1f deg (p=%.1f)",
-        DetachedReticle.version, tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.recoilMaxRadius, Config.recoilLeashCurve))
+    SyncRecoilHorizontalParams()
+    Log(string.format("Initializing Decoupled Aiming System v%s | Enabled=%s | Speed=%.1f | Deadzone=%.1f deg | MaxDiv=%.1f deg | CompSettled=%.1f | CompMoving=%.1f | CompMax=%.0f deg/s | RecoilLeash=%.1f deg (p=%.1f) | HoriScale=%s (Scatter=%.2f, Damping=%.2f)",
+        DetachedReticle.version, tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.recoilMaxRadius, Config.recoilLeashCurve, tostring(Config.recoilHoriStatScaling), Config.recoilHoriScatter, Config.recoilHoriDamping))
 
     SetupNativeSettings()
 end)
@@ -562,6 +637,9 @@ registerForEvent("onUpdate", function(delta)
     if shouldBeActive then
         DetachedReticle.isActive = true
         DetachedReticle.frameCounter = (DetachedReticle.frameCounter or 0) + 1
+        if DetachedReticle.frameCounter % 30 == 1 then
+            UpdatePlayerStrengthStat(player)
+        end
 
         -- 1. Read player puppet world yaw in engine convention
         local bodyYaw = 0.0
@@ -629,6 +707,7 @@ registerForEvent("onUpdate", function(delta)
             local initPitch = hasCamFwd and camPitch or 0.0
 
             -- Reset native chase state with initial pitch and activate native look smoothing
+            UpdatePlayerStrengthStat(player)
             pcall(function() Game.DR_ResetChasePitch(initPitch) end)
             SyncSmoothing()
             SyncCompParams()
@@ -1366,6 +1445,28 @@ registerForEvent("onDraw", function()
             ImGui.SetTooltip("Power-law rubber resistance exponent p (1 - (r/Rmax)^p).\nLower (0.8-1.2) = earlier elastic resistance\nHigher (2.0-3.5) = free climb then firm wall near Max Leash\nDefault: 1.5")
         end
 
+        -- Tier 2 Horizontal Recoil & Strength Scaling
+        ImGui.Separator()
+        ImGui.Text("Tier 2 Horizontal Recoil & Strength Scaling:")
+
+        local newHoriScale, horiScaleChanged = ImGui.Checkbox("Scale with Body/Strength Stat", Config.recoilHoriStatScaling)
+        if horiScaleChanged then DetachedReticle.SetRecoilHoriStatScaling(newHoriScale) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Scales Low-Strength Scatter with (1 - s) and High-Strength Damping with s,\nwhere s = (Body - 3) / 17 in [0, 1].\nWhen unchecked, both sliders apply directly regardless of Body stat.\nDefault: On")
+        end
+
+        local newHoriScatter, horiScatterChanged = ImGui.SliderFloat("Low-Strength Scatter", Config.recoilHoriScatter, 0.0, 3.0, "%.2f")
+        if horiScatterChanged then DetachedReticle.SetRecoilHoriScatter(newHoriScatter) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Alternating left/right horizontal recoil push multiplier at low Body/Strength.\nWhen a shot kicks right, the next shot is biased (~75% chance) to kick left with random strength.\nDefault: 1.00")
+        end
+
+        local newHoriDamping, horiDampingChanged = ImGui.SliderFloat("High-Strength Damping", Config.recoilHoriDamping, 0.0, 0.95, "%.2f")
+        if horiDampingChanged then DetachedReticle.SetRecoilHoriDamping(newHoriDamping) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Fraction of native horizontal recoil counteracted in the opposite direction at high Body/Strength.\nDefault: 0.70")
+        end
+
         -- ADS Lever-Arm Sight-Line Compensation
         ImGui.Separator()
         ImGui.Text("ADS Lever-Arm Sight-Line Compensation:")
@@ -1412,6 +1513,7 @@ registerForEvent("onDraw", function()
             ImGui.Text(string.format("Camera Residual: Yaw=%.2f deg | Pitch=%.2f deg", rYaw, rPitch))
             ImGui.Text(string.format("Tier 2B Compensation: C_yaw=%+.2f deg | C_pitch=%+.2f deg", cYaw, cPitch))
             ImGui.Text(string.format("Tier 2 Recoil Offset: W_yaw=%+.2f deg | W_pitch=%+.2f deg", wYaw, wPitch))
+            ImGui.Text(string.format("Player Body/Strength: %.0f (Factor s=%.2f)", DetachedReticle.playerBodyStat or 3.0, DetachedReticle.playerStrengthFactor or 0.0))
             if DetachedReticle.lastAppliedDrop and DetachedReticle.lastAppliedDrop > 0.0001 then
                 ImGui.Text(string.format("ADS Lever Drop: %+.1f cm", DetachedReticle.lastAppliedDrop * 100.0))
             end
@@ -1554,6 +1656,27 @@ DetachedReticle.SetRecoilLeashCurve = function(val)
     SaveConfig()
     SyncRecoilLeashParams()
     Log(string.format("[OPTIONS] recoilLeashCurve set to: %.2f", Config.recoilLeashCurve))
+end
+
+DetachedReticle.SetRecoilHoriStatScaling = function(val)
+    Config.recoilHoriStatScaling = val and true or false
+    SaveConfig()
+    SyncRecoilHorizontalParams()
+    Log(string.format("[OPTIONS] recoilHoriStatScaling set to: %s", tostring(Config.recoilHoriStatScaling)))
+end
+
+DetachedReticle.SetRecoilHoriScatter = function(val)
+    Config.recoilHoriScatter = math.max(0.0, math.min(4.0, tonumber(val) or 1.0))
+    SaveConfig()
+    SyncRecoilHorizontalParams()
+    Log(string.format("[OPTIONS] recoilHoriScatter set to: %.2f", Config.recoilHoriScatter))
+end
+
+DetachedReticle.SetRecoilHoriDamping = function(val)
+    Config.recoilHoriDamping = math.max(0.0, math.min(0.95, tonumber(val) or 0.70))
+    SaveConfig()
+    SyncRecoilHorizontalParams()
+    Log(string.format("[OPTIONS] recoilHoriDamping set to: %.2f", Config.recoilHoriDamping))
 end
 
 DetachedReticle.SetAdsLeverArmComp = function(val)

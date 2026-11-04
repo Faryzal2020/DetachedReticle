@@ -262,6 +262,49 @@
   2. Observe whether the gun body stays below the T3 reticle, allowing an unobstructed view of the target.
   3. Adjust `adsLeverArmLength` (e.g. from `0.20` to `0.50`) in the CET overlay to customize the vertical sight clearance.
 
+# iteration 8
+- date: 2026-11-04 22:25 +0700
+- status: untested (deployed to branch `recoil-horizontal-dynamics` in repo and `<GAME_ROOT>`, awaiting in-game test)
+- previous_iteration_results (Iteration 7 Design & User Request):
+  1. **User Request & Design Goal:**
+     - User requested adding Strength-scaled horizontal recoil dynamics (`gamedataStatType.Strength`, Body attribute $B \in [3, 20]$) to every shot's recoil kick:
+       - **Low Strength ($B \approx 3$, normalized $s \to 0$):** Make horizontal recoil more randomized with an alternating / mean-reverting bias—when a shot kicks to the right, our mod adds a randomized left or right push, and on the *next* shot our mod is much more likely to kick left (while remaining randomized in both sign and strength).
+       - **High Strength ($B \approx 20$, normalized $s \to 1$):** Make our mod counteract/neutralize a portion of the game's native horizontal recoil kick in the opposite direction (e.g. when native recoil kicks right by 10 units, neutralize a randomized fraction of it in the opposite direction) and gently stabilize horizontal drift toward center.
+  2. **Mathematical & Architectural Design:**
+     - Normalize the player's `gamedataStatType.Strength` ($B \in [3, 20]$) to $s = \text{clamp}\!\left(\frac{B - 3.0}{17.0},\; 0.0,\; 1.0\right)$.
+     - When `recoilHoriStatScaling` is enabled, low-strength scatter scales with $(1 - s) \cdot K_{\text{scatter}}$ and high-strength damping scales with $s \cdot C_{\text{damping}}$. When `recoilHoriStatScaling` is disabled, both `recoilHoriScatter` and `recoilHoriDamping` act directly as manual sliders ($1 - s \to 1$, $s \to 1$).
+     - **Coherent Per-Shot Impulse Window:** Because Cyberpunk 2077 interpolates a single shot's recoil kick across multiple frames (`~30–55 ms`), drawing a new random sign every frame would self-cancel via the central limit theorem. Instead, detect the onset of each new shot kick impulse (when transitioning into kick or after `s_shotKickTimer >= 0.045s` / rising `dRecoilPitch` edge) and draw per-shot random variables:
+       - **Alternating / Mean-Reverting Bias (`s_currentShotRandSign`, `s_currentShotRandMag`):**
+         - Compute bias $b = \text{clamp}\!\left(0.55 \cdot s_{\text{lastSign}} + 0.45 \cdot \text{clamp}(W_{\text{yaw}} / 1.5^\circ, -1.0, 1.0),\; -0.85,\; 0.85\right)$, where $s_{\text{lastSign}} \in \{-1, +1\}$ is the sign of the previous shot's net horizontal kick.
+         - Probability of kicking left ($\text{sign} = -1$) is $P(\text{left}) = 0.50 + 0.35 \cdot b \in [0.20, 0.80]$. Thus, after kicking right ($s_{\text{lastSign}} = +1, W_{\text{yaw}} > 0$), the next shot has an $\approx 70\%\text{–}85\%$ chance of kicking left, while still allowing occasional double-kicks for organic randomness.
+         - Draw random strength multiplier $\text{shotRandMag} \in [0.40, 1.25]$ per shot.
+         - Frame kick contribution: $\Delta_{\text{rand}} = \text{shotRandSign} \cdot \text{shotRandMag} \cdot (0.35 \cdot dRecoilPitch + 0.25 \cdot |dRecoilYaw|) \cdot w_{\text{scatter}}$.
+       - **High-Strength Native Horizontal Recoil Neutralization ($\Delta_{\text{comp}}$):**
+         - Per shot, draw $\eta \in [0.65, 1.15]$ so each shot neutralizes a randomized fraction of native `dRecoilYaw` in the opposite direction:
+           $$\Delta_{\text{comp}} = -\text{clamp}(\eta \cdot w_{\text{damping}},\; 0.0,\; 0.95) \cdot dRecoilYaw$$
+         - Plus a gentle horizontal centering pull during kick:
+           $$\Delta_{\text{center}} = -0.15 \cdot w_{\text{damping}} \cdot dRecoilPitch \cdot \text{clamp}(W_{\text{yaw}} / 1.5^\circ,\; -1.0,\; 1.0)$$
+     - **Unmodified Shadow Native Recoil Tracking:** Keep `s_nativeRecoilYaw` and `s_nativeRecoilPitch` accumulating the **unmodified** engine deltas `(dRecoilYaw, dRecoilPitch)` so the `RecoilDrift` estimator and `RecoilRecoveryTime` span normalization remain 100% exact.
+- target_goal:
+  1. Implement per-shot alternating horizontal recoil randomization and high-Strength native horizontal recoil neutralization in [`src/Hooks/InputHook.hpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.hpp) and [`src/Hooks/InputHook.cpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.cpp).
+  2. Expose RTTI bridge functions (`DR_SetRecoilHorizontalParams`, `DR_GetRecoilHoriStatScaling`, `DR_GetRecoilHoriScatter`, `DR_GetRecoilHoriDamping`, `DR_GetPlayerStrengthFactor`) in [`src/Main.cpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Main.cpp).
+  3. Query `gamedataStatType.Strength` in [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua) and expose `recoilHoriStatScaling`, `recoilHoriScatter`, and `recoilHoriDamping` in `Config`, NativeSettings, CET ImGui overlay, and CET console setters.
+- changes_made:
+  1. [`src/Hooks/InputHook.hpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.hpp) & [`src/Hooks/InputHook.cpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.cpp):
+     - Added `s_recoilHoriStatScaling`, `s_recoilHoriScatter`, `s_recoilHoriDamping`, `s_playerStrengthFactor`, and per-shot PRNG state (`s_shotKickTimer`, `s_prevDRecoilPitch`, `s_lastHoriPushSign`, `s_currentShotRandSign`, `s_currentShotRandMag`, `s_currentShotCompMult`).
+     - In `InputHook::ProcessMouseAim`, applied $\Delta_{\text{comp}} + \Delta_{\text{rand}} + \Delta_{\text{center}}$ to `rawModifiedYaw` during the kick phase prior to the Option A Radial Soft-Wall Attenuation ("Rubber Leash").
+  2. [`src/Main.cpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Main.cpp):
+     - Registered `DR_SetRecoilHorizontalParams`, `DR_GetRecoilHoriStatScaling`, `DR_GetRecoilHoriScatter`, `DR_GetRecoilHoriDamping`, and `DR_GetPlayerStrengthFactor`.
+  3. [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - Added `recoilHoriStatScaling = true`, `recoilHoriScatter = 1.0`, `recoilHoriDamping = 0.70` to `Config`, `LoadConfig`, NativeSettings, CET overlay, and console API.
+     - Polled player's `gamedataStatType.Strength` (`StatsSystem:GetStatValue(player:GetEntityID(), gamedataStatType.Strength)`) and synced `strengthFactor` to the native hook.
+- expected_outcome:
+  1. At low Body/Strength ($B \approx 3\text{–}6$), shots exhibit lively, organic left-right horizontal kick where a right kick is followed with high probability ($\approx 75\%$) by a left kick of randomized strength on the next shot.
+  2. At high Body/Strength ($B \approx 15\text{–}20$), native horizontal kicks are counteracted by up to $\approx 70\%\text{–}85\%$ in the opposite direction, keeping horizontal spread tight and controlled.
+- test_procedure:
+  1. Fire automatic bursts and compare horizontal reticle behavior across different Body/Strength stat levels (or toggle `Scale with Body/Strength Stat` and adjust `Low-Strength Horizontal Scatter` / `High-Strength Horizontal Damping` in the CET overlay).
+  2. Verify in `DetachedReticle.log` that recoil recovery still returns cleanly to `(0, 0)` after bursts.
+
 # next iteration above this line
 
 ### Findings Writing Rules:

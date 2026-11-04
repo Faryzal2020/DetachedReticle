@@ -146,6 +146,8 @@ void InputHook::ResetChase(float aInitialPitch) {
     s_lastDRecoilPitch = 0.0f;
     s_splitErrYaw = 0.0f;
     s_splitErrPitch = 0.0f;
+    s_shotKickTimer = 0.0f;
+    s_prevDRecoilPitch = 0.0f;
     s_lastTime = std::chrono::steady_clock::now();
     s_smoothedDt = 1.0f / 60.0f;
 }
@@ -187,6 +189,27 @@ void InputHook::SetRecoilLeashParams(float aMaxRadius, float aLeashCurve) {
 }
 float InputHook::GetRecoilMaxRadius() { return s_recoilMaxRadius; }
 float InputHook::GetRecoilLeashCurve() { return s_recoilLeashCurve; }
+
+void InputHook::SetRecoilHorizontalParams(bool aStatScaling, float aScatter, float aDamping, float aStrengthFactor) {
+    s_recoilHoriStatScaling = aStatScaling;
+    s_recoilHoriScatter = std::clamp(aScatter, 0.0f, 4.0f);
+    s_recoilHoriDamping = std::clamp(aDamping, 0.0f, 1.0f);
+    s_playerStrengthFactor = std::clamp(aStrengthFactor, 0.0f, 1.0f);
+}
+bool InputHook::GetRecoilHoriStatScaling() { return s_recoilHoriStatScaling; }
+float InputHook::GetRecoilHoriScatter() { return s_recoilHoriScatter; }
+float InputHook::GetRecoilHoriDamping() { return s_recoilHoriDamping; }
+float InputHook::GetPlayerStrengthFactor() { return s_playerStrengthFactor; }
+
+static float NextRecoilRand01() {
+    uint32_t x = InputHook::s_rngState;
+    if (x == 0) x = 0xA341316Cu;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    InputHook::s_rngState = x;
+    return static_cast<float>(x & 0x00FFFFFFu) / static_cast<float>(0x01000000u);
+}
 
 void InputHook::SetSmoothing(float aLambda, int32_t aMode, float aMaxDiv, float aDeadzone, bool aEnabled) {
     s_lambda = aLambda;
@@ -398,13 +421,60 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
     float effDRecoilPitch = 0.0f;
     if (dRecoilPitch > 1e-5f || (!s_recoilRecovering && std::abs(dRecoilYaw) > 1e-5f && dRecoilPitch >= -1e-5f)) {
         // Kick Phase: track unattenuated native recoil for recovery span normalization,
-        // and apply Option A Radial Soft-Wall Attenuation ("Rubber Leash") to Tier 2 recoil W.
+        // apply Strength-Scaled Horizontal Recoil Dynamics, and then apply Option A Radial
+        // Soft-Wall Attenuation ("Rubber Leash") to Tier 2 recoil W.
         s_recoilRecovering = false;
         s_recoilIdleTimer = 0.0f;
         s_nativeRecoilYaw = std::clamp(s_nativeRecoilYaw + dRecoilYaw, -45.0f, 45.0f);
         s_nativeRecoilPitch = std::clamp(s_nativeRecoilPitch + dRecoilPitch, -45.0f, 45.0f);
 
-        effDRecoilYaw = dRecoilYaw;
+        // Coherent Per-Shot Impulse Detection:
+        // Cyberpunk interpolates each shot's recoil kick across ~30-55 ms. Detect the start of a new
+        // shot impulse (rising edge from idle/recovery, rising spike > 1.35x previous frame, or 45ms window)
+        // so that each shot draws a single coherent random kick sign, strength, and neutralization factor.
+        bool isNewShotImpulse = (s_prevDRecoilPitch <= 1e-5f) ||
+                                (s_shotKickTimer >= 0.045f) ||
+                                (dRecoilPitch > s_prevDRecoilPitch * 1.35f + 0.01f);
+        if (isNewShotImpulse) {
+            s_shotKickTimer = 0.0f;
+            // Alternating / Mean-Reverting Directional Bias:
+            // Combine previous shot's net horizontal direction (s_lastHoriPushSign) and current
+            // horizontal deflection (s_recoilYaw) so that after kicking right (+1), the next shot
+            // has a ~70%-80% probability of kicking left (-1) and vice-versa, while staying randomized.
+            float deflectionBias = std::clamp(s_recoilYaw / 1.5f, -1.0f, 1.0f);
+            float bias = std::clamp(0.55f * s_lastHoriPushSign + 0.45f * deflectionBias, -0.85f, 0.85f);
+            float probLeft = 0.50f + 0.35f * bias; // in [0.2025, 0.7975]
+            s_currentShotRandSign = (NextRecoilRand01() < probLeft) ? -1.0f : 1.0f;
+            s_currentShotRandMag = 0.40f + 0.85f * NextRecoilRand01();  // in [0.40, 1.25]
+            s_currentShotCompMult = 0.65f + 0.50f * NextRecoilRand01(); // in [0.65, 1.15]
+        }
+        s_shotKickTimer += dt;
+
+        // Strength-Scaled Horizontal Recoil Weights:
+        // s in [0, 1] maps Body/Strength stat [3..20] -> (Body - 3) / 17.
+        float s = std::clamp(s_playerStrengthFactor, 0.0f, 1.0f);
+        float wScatter = s_recoilHoriStatScaling ? ((1.0f - s) * s_recoilHoriScatter) : s_recoilHoriScatter;
+        float wDamping = s_recoilHoriStatScaling ? (s * s_recoilHoriDamping) : s_recoilHoriDamping;
+
+        // 1. High-Strength Native Horizontal Recoil Neutralization:
+        // Counteract a randomized fraction of the game's native horizontal kick in the opposite direction.
+        float compFrac = std::clamp(s_currentShotCompMult * wDamping, 0.0f, 0.95f);
+        float deltaComp = -compFrac * dRecoilYaw;
+
+        // 2. Low-Strength Alternating Horizontal Randomization:
+        // Add a randomized left/right push proportional to the shot's recoil impulse.
+        float baseKickMag = 0.35f * std::max(0.0f, dRecoilPitch) + 0.25f * std::abs(dRecoilYaw);
+        float deltaRand = s_currentShotRandSign * s_currentShotRandMag * baseKickMag * wScatter;
+
+        // 3. High-Strength Horizontal Centering Stabilization:
+        float deltaCenter = -0.15f * wDamping * std::max(0.0f, dRecoilPitch) * std::clamp(s_recoilYaw / 1.5f, -1.0f, 1.0f);
+
+        float rawModifiedYaw = dRecoilYaw + deltaComp + deltaRand + deltaCenter;
+        if (std::abs(rawModifiedYaw) > 1e-4f) {
+            s_lastHoriPushSign = (rawModifiedYaw >= 0.0f) ? 1.0f : -1.0f;
+        }
+
+        effDRecoilYaw = rawModifiedYaw;
         effDRecoilPitch = dRecoilPitch;
 
         if (s_recoilMaxRadius > 0.1f) {
@@ -414,9 +484,9 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
             if (r > 1e-4f) {
                 float ux = s_recoilYaw / r;
                 float uy = s_recoilPitch / r;
-                float dRad = dRecoilYaw * ux + dRecoilPitch * uy;
-                float dTanX = dRecoilYaw - dRad * ux;
-                float dTanY = dRecoilPitch - dRad * uy;
+                float dRad = effDRecoilYaw * ux + effDRecoilPitch * uy;
+                float dTanX = effDRecoilYaw - dRad * ux;
+                float dTanY = effDRecoilPitch - dRad * uy;
 
                 float u = std::clamp(r / Rmax, 0.0f, 1.0f);
                 float uPow = std::pow(u, p);
@@ -443,6 +513,7 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
             }
         }
     } else if (dRecoilPitch < -1e-5f) {
+        s_shotKickTimer = 0.0f;
         // Native Recovery Phase
         if (!s_recoilRecovering) {
             s_recoilRecovering = true;
@@ -496,6 +567,7 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
         s_nativeRecoilPitch = std::max(0.0f, s_nativeRecoilPitch + dRecoilPitch);
     } else {
         // Native recoil delta is 0 (either in RecoilHoldDuration, or post-recovery idle)
+        s_shotKickTimer = 0.0f;
         if (s_recoilRecovering) {
             // Native recovery just finished (or paused at D_drift): complete any tiny remaining
             // fraction smoothly and immediately without waiting 0.50s
@@ -546,12 +618,13 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
     effDRecoilPitch = nextRecoilPitch - s_recoilPitch;
     s_recoilYaw = nextRecoilYaw;
     s_recoilPitch = nextRecoilPitch;
-    if (dRecoilPitch > 1e-5f) {
+    if (dRecoilPitch > 1e-5f || (!s_recoilRecovering && std::abs(effDRecoilYaw) > 1e-5f && dRecoilPitch >= -1e-5f)) {
         s_recoilPeakYaw = s_recoilYaw;
         s_recoilPeakPitch = s_recoilPitch;
         s_nativeRecoilPeakYaw = s_nativeRecoilYaw;
         s_nativeRecoilPeakPitch = s_nativeRecoilPitch;
     }
+    s_prevDRecoilPitch = dRecoilPitch;
 
     // 9. Residual for camera offset: R = T - T2B - predNextDBodyYaw
     // Because MouseLookRelay updates puppet bodyYaw [rcx+9Ch] BEFORE the engine's scene graph
