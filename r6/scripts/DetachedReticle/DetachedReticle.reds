@@ -14,6 +14,9 @@ public class DetachedAimSystem extends ScriptableSystem {
     private let m_yawLagDeg: Float;
     private let m_pitchLagDeg: Float;
     private let m_isDetachedActive: Bool;
+    private let m_cameraPos: Vector4;
+    private let m_muzzleRelCam: Vector4;
+    private let m_muzzleScreen: Vector2;
     private let m_shotCount: Int32;
     private let m_lastShotMuzzlePos: Vector4;
     private let m_lastShotBulletDir: Vector4;
@@ -39,6 +42,16 @@ public class DetachedAimSystem extends ScriptableSystem {
         this.m_pitchLagDeg = pitchLagDeg;
         this.m_isDetachedActive = isDetached;
     }
+
+    public func SetMuzzleTelemetry(camPos: Vector4, muzRelCam: Vector4, muzScreen: Vector2) -> Void {
+        this.m_cameraPos = camPos;
+        this.m_muzzleRelCam = muzRelCam;
+        this.m_muzzleScreen = muzScreen;
+    }
+
+    public func GetCameraPos() -> Vector4 { return this.m_cameraPos; }
+    public func GetMuzzleRelCam() -> Vector4 { return this.m_muzzleRelCam; }
+    public func GetMuzzleScreen() -> Vector2 { return this.m_muzzleScreen; }
 
     public func RecordShot(muzzlePos: Vector4, bulletDir: Vector4, targetPt: Vector4, testMode: Int32, modeName: String) -> Void {
         this.m_shotCount += 1;
@@ -508,6 +521,29 @@ private func UpdateDetachedAim() -> Void {
     // Update global DetachedAimSystem for state query and telemetry
     if IsDefined(aimSys) {
         aimSys.SetAimState(this.m_gunForward, targetPoint, muzzlePos, camFwd3, screenOffset, angleDeg, yawLagDeg, pitchLagDeg, true);
+
+        // Project physical 3D muzzle location and compute camera-relative coordinates
+        let toMuzzle: Vector4 = muzzlePos - camPos;
+        let muzRightM: Float = Vector4.Dot(toMuzzle, camRight);
+        let muzFwdM: Float = Vector4.Dot(toMuzzle, camFwd3);
+        let muzUpM: Float = Vector4.Dot(toMuzzle, camUp);
+        let muzRelCam: Vector4 = new Vector4(muzRightM, muzFwdM, muzUpM, 1.0);
+
+        let muzProj: Vector2 = this.ProjectWorldToScreen(muzzlePos);
+        let rCanvas: ref<inkCanvas> = this.m_rootWidget;
+        if !IsDefined(rCanvas) {
+            rCanvas = this.GetRootWidget() as inkCanvas;
+        }
+        let rSize: Vector2 = IsDefined(rCanvas) ? rCanvas.GetSize() : new Vector2(3840.0, 2160.0);
+        if rSize.X <= 0.0 || rSize.Y <= 0.0 {
+            rSize = new Vector2(3840.0, 2160.0);
+        }
+        let muzScreen: Vector2 = new Vector2(
+            rSize.X * 0.5 * muzProj.X,
+            -rSize.Y * 0.5 * muzProj.Y
+        );
+
+        aimSys.SetMuzzleTelemetry(camPos, muzRelCam, muzScreen);
     }
 
     // Feed continuous live barrel tracking to native ShootingHook

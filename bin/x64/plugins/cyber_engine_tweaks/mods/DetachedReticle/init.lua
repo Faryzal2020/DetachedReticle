@@ -23,6 +23,9 @@ local Config = {
     -- Tier 2 Recoil Rubber Leash (Option A Radial Soft-Wall Attenuation)
     recoilMaxRadius = 7.0,        -- Degrees: max recoil distance from center reticle during sustained fire (0 = unlimited, default: 7.0)
     recoilLeashCurve = 1.5,       -- Power-law resistance exponent as recoil approaches recoilMaxRadius (default: 1.5)
+    -- ADS Lever-Arm Drop Compensation
+    adsLeverArmComp = true,       -- Dynamically lower lever-arm root during ADS recoil to prevent sight occlusion
+    adsLeverArmLength = 0.35,     -- Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.35)
     debugLogging = false          -- Verbose telemetry logging to DetachedReticle.log
 }
 
@@ -32,6 +35,8 @@ local DetachedReticle = {
     frameCounter = 0,
     bodyYaw = 0.0,
     baselineRot = nil,
+    baselinePos = nil,
+    lastAppliedDrop = 0.0,
     origHeadingLocked = nil,
     origSensX = nil,
     origSensY = nil,
@@ -153,6 +158,8 @@ local function LoadConfig()
                 if data.compGapThreshold ~= nil then Config.compGapThreshold = tonumber(data.compGapThreshold) or Config.compGapThreshold end
                 if data.recoilMaxRadius ~= nil then Config.recoilMaxRadius = tonumber(data.recoilMaxRadius) or Config.recoilMaxRadius end
                 if data.recoilLeashCurve ~= nil then Config.recoilLeashCurve = tonumber(data.recoilLeashCurve) or Config.recoilLeashCurve end
+                if data.adsLeverArmComp ~= nil then Config.adsLeverArmComp = (data.adsLeverArmComp == true) end
+                if data.adsLeverArmLength ~= nil then Config.adsLeverArmLength = tonumber(data.adsLeverArmLength) or Config.adsLeverArmLength end
                 if data.debugLogging ~= nil then Config.debugLogging = (data.debugLogging == true) end
             end
         end
@@ -444,6 +451,28 @@ local function SetupNativeSettings()
                 end
             )
 
+            ns.addSubcategory("/detachedReticle/leverArm", "ADS Lever-Arm Sight-Line Compensation")
+
+            ns.addSwitch(
+                "/detachedReticle/leverArm",
+                "Enable ADS Lever-Arm Drop",
+                "Dynamically lower the lever-arm root during ADS in proportion to upward gun recoil pitch, keeping the gun body/receiver below the sight-line to T3 (default: On)",
+                Config.adsLeverArmComp, true,
+                function(val)
+                    DetachedReticle.SetAdsLeverArmComp(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/leverArm",
+                "Lever-Arm Drop Length",
+                "Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.35m)",
+                0.10, 1.00, 0.05, "%.2f m", Config.adsLeverArmLength, 0.35,
+                function(val)
+                    DetachedReticle.SetAdsLeverArmLength(val)
+                end
+            )
+
             Log("[SETTINGS] NativeSettings tab '/detachedReticle' successfully initialized.")
         end
     end)
@@ -572,6 +601,11 @@ registerForEvent("onUpdate", function(delta)
         if not DetachedReticle.chaseActive then
             DetachedReticle.chaseActive = true
             DetachedReticle.baselineRot = localRot or Quaternion.new(0, 0, 0, 1)
+            local okPos, bPos = pcall(function() return fpp:GetLocalPosition() end)
+            if okPos and bPos then
+                DetachedReticle.baselinePos = Vector4.new(bPos.x or 0.0, bPos.y or 0.0, bPos.z or 0.0, bPos.w or 1.0)
+            end
+            DetachedReticle.lastAppliedDrop = 0.0
             DetachedReticle.lastWrittenRot = nil
             DetachedReticle.lastWrittenRPitch = 0.0
             DetachedReticle.lastCamYaw = nil
@@ -643,6 +677,19 @@ registerForEvent("onUpdate", function(delta)
             end
         end
 
+        -- Resolve aiming posture and ADS state
+        local psmBB = nil
+        pcall(function() psmBB = player:GetPlayerStateMachineBlackboard() end)
+        local crosshairState = -1
+        local upperBodyState = -1
+        if psmBB then
+            pcall(function()
+                crosshairState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.Crosshair)
+                upperBodyState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.UpperBody)
+            end)
+        end
+        local isADS = (crosshairState == 4 or upperBodyState == 6)
+
         -- Physical socket pitch angle in parent coordinate frame:
         -- Derived directly from rendered camera pitch minus the previous frame's written local pitch residual,
         -- guaranteeing the horizontal yaw axis is always aligned with true world-up even if the engine alters pitch externally.
@@ -674,8 +721,40 @@ registerForEvent("onUpdate", function(delta)
             fppOverwriteDeg = math.deg(2.0 * math.acos(math.min(1.0, math.abs(dot))))
         end
 
+        -- Apply ADS Lever-Arm Drop Compensation:
+        -- In ADS, when the gun pitches up due to weapon recoil (wPitch > 0), the skeletal lever arm
+        -- around the shoulder pivot causes the gun body/receiver to rise up faster than the distant T3 sight line.
+        -- We lower the root of the lever arm (elevate camera along world-up) by h = L_drop * sin(wPitch),
+        -- keeping the gun receiver from occluding the line of sight between the camera and T3.
+        local dropDist = 0.0
+        if Config.adsLeverArmComp and isADS and (wPitch > 0.001) then
+            local armLen = (type(Config.adsLeverArmLength) == "number") and Config.adsLeverArmLength or 0.35
+            dropDist = armLen * math.sin(math.rad(wPitch))
+        end
+
+        local curPos = nil
+        local okCurPos, cp = pcall(function() return fpp:GetLocalPosition() end)
+        if okCurPos and cp then
+            curPos = cp
+        else
+            curPos = DetachedReticle.baselinePos or Vector4.new(0.0, 0.0, 0.0, 1.0)
+        end
+
+        local lastDrop = DetachedReticle.lastAppliedDrop or 0.0
+        DetachedReticle.lastAppliedDrop = dropDist
+
+        -- In the parent coordinate frame (head socket tilted by socketPitch):
+        -- True world-up is (0.0, fwdZ, fwdXY).
+        -- Moving the camera along world-up by +dropDist lowers the gun body relative to camera gaze.
+        -- Apply delta dDrop = dropDist - lastDrop to prevent compounding:
+        local dDrop = dropDist - lastDrop
+        local targetPosX = (curPos.x or 0.0)
+        local targetPosY = (curPos.y or 0.0) + (dDrop * fwdZ)
+        local targetPosZ = (curPos.z or 0.0) + (dDrop * fwdXY)
+        local targetPos = Vector4.new(targetPosX, targetPosY, targetPosZ, curPos.w or 1.0)
+
         pcall(function()
-            fpp:SetLocalTransform(fpp:GetLocalPosition(), targetRot)
+            fpp:SetLocalTransform(targetPos, targetRot)
         end)
         DetachedReticle.lastWrittenRot = targetRot
         DetachedReticle.lastWrittenRPitch = rPitch
@@ -719,19 +798,7 @@ registerForEvent("onUpdate", function(delta)
             Log(line)
         end
 
-        -- 3. Resolve weapon state and active aiming posture
-        local psmBB = nil
-        pcall(function() psmBB = player:GetPlayerStateMachineBlackboard() end)
-        local crosshairState = -1
-        local upperBodyState = -1
-        if psmBB then
-            pcall(function()
-                crosshairState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.Crosshair)
-                upperBodyState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.UpperBody)
-            end)
-        end
-        local isADS = (crosshairState == 4 or upperBodyState == 6)
-
+        -- 3. Resolve weapon type and evolution
         local weaponName = "Unknown"
         local isHeavyWeapon = false
         local isLMG = false
@@ -840,6 +907,8 @@ registerForEvent("onUpdate", function(delta)
 
         local gunFwd = nil
         local scrX, scrY = 0.0, 0.0
+        local muzScrX, muzScrY = 0.0, 0.0
+        local muzRelR, muzRelF, muzRelU = 0.0, 0.0, 0.0
         local angleDeg = 0.0
         local yawLag = 0.0
         local pitchLag = 0.0
@@ -850,6 +919,17 @@ registerForEvent("onUpdate", function(delta)
                 if offset then
                     scrX = offset.x or offset.X or 0.0
                     scrY = offset.y or offset.Y or 0.0
+                end
+                local muzOffset = aimSys:GetMuzzleScreen()
+                if muzOffset then
+                    muzScrX = muzOffset.x or muzOffset.X or 0.0
+                    muzScrY = muzOffset.y or muzOffset.Y or 0.0
+                end
+                local relCam = aimSys:GetMuzzleRelCam()
+                if relCam then
+                    muzRelR = relCam.x or relCam.X or 0.0
+                    muzRelF = relCam.y or relCam.Y or 0.0
+                    muzRelU = relCam.z or relCam.Z or 0.0
                 end
                 angleDeg = aimSys:GetAngleLagDeg() or 0.0
                 yawLag = aimSys:GetYawLagDeg() or 0.0
@@ -1019,8 +1099,9 @@ registerForEvent("onUpdate", function(delta)
                 modeStr = "RECOILING(" .. stateStr .. ")"
             end
 
-            local logLine = string.format("[GUN_OFFSET_MONITOR] Weapon=%s | Mode=%s | ReticleScreen=(%.1f, %.1f)px | GunAngles=(Yaw:%.2f, Pitch:%.2f) | AimAngles=(Yaw:%.2f, Pitch:%.2f) | RecoilW=(Y:%+.2f, P:%+.2f) | Offset=(dYaw:%+.2f deg, dPitch:%+.2f deg, Total:%.2f deg)",
-                weaponName, modeStr, scrX, scrY, gunYaw, gunPitch, bodyYaw, aPitch, wYaw, wPitch, diffYaw, diffPitch, totalDiv)
+            local logLine = string.format("[GUN_OFFSET_MONITOR] Weapon=%s | Mode=%s | ReticleScreen=(%.1f, %.1f)px | MuzzleScreen=(%.1f, %.1f)px | MuzzleRelCam=(R:%+.2f, F:%.2f, U:%+.2f)m | Drop=%+.1fcm | GunAngles=(Yaw:%.2f, Pitch:%.2f) | AimAngles=(Yaw:%.2f, Pitch:%.2f) | RecoilW=(Y:%+.2f, P:%+.2f) | Offset=(dYaw:%+.2f deg, dPitch:%+.2f deg, Total:%.2f deg)",
+                weaponName, modeStr, scrX, scrY, muzScrX, muzScrY, muzRelR, muzRelF, muzRelU, (DetachedReticle.lastAppliedDrop or 0.0) * 100.0,
+                gunYaw, gunPitch, bodyYaw, aPitch, wYaw, wPitch, diffYaw, diffPitch, totalDiv)
             Log(logLine)
 
             local cYaw = 0.0
@@ -1064,9 +1145,10 @@ registerForEvent("onUpdate", function(delta)
                 pcall(function() Game.DR_SetSmoothing(Config.catchUpSpeed, GetSmoothingModeInt(), Config.maxDivergence, Config.deadzone, false) end)
             end
             if fpp then
+                local bPos = DetachedReticle.baselinePos or fpp:GetLocalPosition()
                 if DetachedReticle.baselineRot then
                     pcall(function()
-                        fpp:SetLocalTransform(fpp:GetLocalPosition(), DetachedReticle.baselineRot)
+                        fpp:SetLocalTransform(bPos, DetachedReticle.baselineRot)
                     end)
                 end
                 -- Restore heading lock and sensitivity multipliers
@@ -1081,6 +1163,8 @@ registerForEvent("onUpdate", function(delta)
                 end
             end
             DetachedReticle.baselineRot = nil
+            DetachedReticle.baselinePos = nil
+            DetachedReticle.lastAppliedDrop = 0.0
             DetachedReticle.lastWrittenRot = nil
             DetachedReticle.lastWrittenRPitch = 0.0
             DetachedReticle.origHeadingLocked = nil
@@ -1121,9 +1205,10 @@ registerForEvent("onShutdown", function()
     local player = Game.GetPlayer()
     local fpp = player and player:GetFPPCameraComponent()
     if fpp then
+        local bPos = DetachedReticle.baselinePos or fpp:GetLocalPosition()
         if DetachedReticle.baselineRot then
             pcall(function()
-                fpp:SetLocalTransform(fpp:GetLocalPosition(), DetachedReticle.baselineRot)
+                fpp:SetLocalTransform(bPos, DetachedReticle.baselineRot)
             end)
         end
         if DetachedReticle.origHeadingLocked ~= nil then
@@ -1281,6 +1366,22 @@ registerForEvent("onDraw", function()
             ImGui.SetTooltip("Power-law rubber resistance exponent p (1 - (r/Rmax)^p).\nLower (0.8-1.2) = earlier elastic resistance\nHigher (2.0-3.5) = free climb then firm wall near Max Leash\nDefault: 1.5")
         end
 
+        -- ADS Lever-Arm Sight-Line Compensation
+        ImGui.Separator()
+        ImGui.Text("ADS Lever-Arm Sight-Line Compensation:")
+
+        local newLeverComp, leverCompChanged = ImGui.Checkbox("Enable ADS Lever-Arm Drop", Config.adsLeverArmComp)
+        if leverCompChanged then DetachedReticle.SetAdsLeverArmComp(newLeverComp) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Lowers the lever-arm root (elevates camera) in proportion to upward weapon recoil pitch during ADS,\npreventing the gun body from occluding the line of sight to T3.\nDefault: On")
+        end
+
+        local newLeverArmLen, leverArmLenChanged = ImGui.SliderFloat("Lever-Arm Length", Config.adsLeverArmLength, 0.10, 1.00, "%.2f m")
+        if leverArmLenChanged then DetachedReticle.SetAdsLeverArmLength(newLeverArmLen) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch).\nDefault: 0.35 m")
+        end
+
         -- Debug Telemetry Checkbox
         local newDebug, debugChanged = ImGui.Checkbox("Verbose Debug Logging", Config.debugLogging)
         if debugChanged then
@@ -1311,6 +1412,9 @@ registerForEvent("onDraw", function()
             ImGui.Text(string.format("Camera Residual: Yaw=%.2f deg | Pitch=%.2f deg", rYaw, rPitch))
             ImGui.Text(string.format("Tier 2B Compensation: C_yaw=%+.2f deg | C_pitch=%+.2f deg", cYaw, cPitch))
             ImGui.Text(string.format("Tier 2 Recoil Offset: W_yaw=%+.2f deg | W_pitch=%+.2f deg", wYaw, wPitch))
+            if DetachedReticle.lastAppliedDrop and DetachedReticle.lastAppliedDrop > 0.0001 then
+                ImGui.Text(string.format("ADS Lever Drop: %+.1f cm", DetachedReticle.lastAppliedDrop * 100.0))
+            end
         end
 
         ImGui.End()
@@ -1328,7 +1432,8 @@ DetachedReticle.SetEnabled = function(val)
         local player = Game.GetPlayer()
         local fpp = player and player:GetFPPCameraComponent()
         if fpp and DetachedReticle.baselineRot then
-            pcall(function() fpp:SetLocalTransform(fpp:GetLocalPosition(), DetachedReticle.baselineRot) end)
+            local bPos = DetachedReticle.baselinePos or fpp:GetLocalPosition()
+            pcall(function() fpp:SetLocalTransform(bPos, DetachedReticle.baselineRot) end)
         end
     end
     Log(string.format("[OPTIONS] Enabled set to: %s", tostring(Config.enabled)))
@@ -1451,6 +1556,18 @@ DetachedReticle.SetRecoilLeashCurve = function(val)
     Log(string.format("[OPTIONS] recoilLeashCurve set to: %.2f", Config.recoilLeashCurve))
 end
 
+DetachedReticle.SetAdsLeverArmComp = function(val)
+    Config.adsLeverArmComp = val and true or false
+    SaveConfig()
+    Log(string.format("[OPTIONS] adsLeverArmComp set to: %s", tostring(Config.adsLeverArmComp)))
+end
+
+DetachedReticle.SetAdsLeverArmLength = function(val)
+    Config.adsLeverArmLength = math.max(0.05, math.min(1.50, tonumber(val) or 0.35))
+    SaveConfig()
+    Log(string.format("[OPTIONS] adsLeverArmLength set to: %.2f m", Config.adsLeverArmLength))
+end
+
 DetachedReticle.SetDebugLogging = function(val)
     Config.debugLogging = val and true or false
     SaveConfig()
@@ -1458,11 +1575,11 @@ DetachedReticle.SetDebugLogging = function(val)
 end
 
 DetachedReticle.GetOptions = function()
-    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | expPower=%.2f | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg | recoilMaxRadius=%.1f deg | recoilLeashCurve=%.2f",
+    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | expPower=%.2f | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg | recoilMaxRadius=%.1f deg | recoilLeashCurve=%.2f | adsLeverArmComp=%s | adsLeverArmLength=%.2fm",
         tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode,
         Config.expPower, Config.brakeThreshold, Config.brakeMaxSpeed,
         Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.compMinSpeed, Config.compGapThreshold,
-        Config.recoilMaxRadius, Config.recoilLeashCurve))
+        Config.recoilMaxRadius, Config.recoilLeashCurve, tostring(Config.adsLeverArmComp), Config.adsLeverArmLength))
     return Config
 end
 

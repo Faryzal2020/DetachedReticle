@@ -223,6 +223,45 @@
   1. Equip an LMG (e.g., Defender) in hip-fire at rest and verify the gun reticle aligns with the center camera reticle (`ReadyW = 1.00` in `DetachedReticle.log`).
   2. Aim down sights (hold right-click) and release back to hip-fire with the LMG, and fire bursts in both stances to verify smooth alignment and recoil recovery.
 
+# iteration 7
+- date: 2026-11-04 20:20 +0700
+- status: untested (deployed to branch `ads-lever-arm-compensation` in repo and `<GAME_ROOT>`, awaiting in-game test)
+- previous_iteration_results (Iteration 6 Playtest & User Observation):
+  1. **User Observation & Problem Statement:**
+     - In ADS firing, the physical 3D gun appears to pitch and rise upward significantly faster than the T3 gun reticle, causing the receiver and rear sight of the weapon to occlude the direct line of sight between the camera and T3.
+     - User proposed: lower the root of the lever arm in proportion to how much the 3D gun pitches up, preventing the gun body from blocking the view between the camera root and T3.
+     - User requested: verify whether verbose logging contains the 3D gun's pitch and position relative to the camera line of sight, and checkout to a new branch (`ads-lever-arm-compensation`) to proceed with implementation.
+  2. **Geometric Analysis of Near-Field Lever-Arm Parallax:**
+     - The puppet's arms pivot around the upper body / shoulders / spine located $\approx 0.15\text{–}0.25\text{ m}$ behind and below the first-person eye socket (`FPPCameraComponent`).
+     - In ADS, the weapon receiver sits on a forward lever arm $L \approx 0.35\text{–}0.50\text{ m}$ in front of the pivot. When Tier 2 recoil pitches the upper body upward by $\theta_{\text{recoil}} = +4.5^\circ$ ($0.0785\text{ rad}$), the receiver physically translates upward by $\Delta z \approx L \sin(\theta_{\text{recoil}}) \approx +3.5\text{–}5.0\text{ cm}$.
+     - Because the camera is counter-rotated at the eye socket to hold Tier 1 steady, the distant T3 target ($D \ge 20\text{ m}$) shifts by the angular barrel pitch of $+4.5^\circ$ ($139\text{ px}$ on screen).
+     - However, the near-field gun receiver ($D \approx 0.30\text{ m}$ from the camera lens) subtends an apparent angular rise of $\arctan(\Delta z / 0.30\text{ m}) \approx 9.5^\circ$ ($290\text{ px}$ on screen)—more than double the rise of T3. This causes the solid receiver to climb over and block the sight-line to T3.
+- target_goal:
+  1. Add comprehensive 3D camera-relative gun telemetry to `DetachedAimSystem` in [`DetachedReticle.reds`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/r6/scripts/DetachedReticle/DetachedReticle.reds) and [`init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - `MuzzleRelCam=(R, F, U)m`: 3D position of the gun muzzle relative to camera-local Right, Forward, and Up axes in meters.
+     - `MuzzleScreen=(mx, my)px`: 2D projected screen pixel coordinates of the physical 3D muzzle.
+  2. Implement **ADS Lever-Arm Drop Compensation** in [`init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - In ADS with upward recoil ($W_{\text{pitch}} > 0$), calculate vertical compensation $h = L_{\text{drop}} \cdot \sin(W_{\text{pitch}})$, where $L_{\text{drop}} = 0.35\text{ m}$ by default.
+     - Construct $\Delta\vec{p}_{\text{comp}} = (0.0,\; h \cdot fwdZ,\; h \cdot fwdXY)$ along world-up in the head socket's frame, applying it to `fpp:SetLocalTransform(targetPos, targetRot)` via non-compounding delta `dDrop = dropDist - lastDrop`.
+     - Elevating the camera along world-up by $h$ is mathematically identical in the camera's local coordinate frame to lowering the lever-arm root by $h$, dropping the near-field receiver below the sight-line to T3 while having sub-pixel parallax ($< 0.1^\circ$) on distant world targets and keeping the hands 100% attached to the weapon.
+  3. Provide full configuration and real-time adjustment via `Config`, CET ImGui overlay, NativeSettings, and CET console setters (`SetAdsLeverArmComp`, `SetAdsLeverArmLength`).
+- changes_made:
+  1. [`r6/scripts/DetachedReticle/DetachedReticle.reds`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/r6/scripts/DetachedReticle/DetachedReticle.reds):
+     - Added `m_cameraPos`, `m_muzzleRelCam`, and `m_muzzleScreen` to `DetachedAimSystem` with `SetMuzzleTelemetry` and getters `GetCameraPos`, `GetMuzzleRelCam`, `GetMuzzleScreen`.
+     - In `UpdateDetachedAim`, computed `toMuzzle = muzzlePos - camPos` dotted with `camRight`, `camFwd3`, `camUp`, projected `muzzlePos` to screen via `ProjectWorldToScreen`, and updated `DetachedAimSystem`.
+  2. [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - Added `adsLeverArmComp = true` and `adsLeverArmLength = 0.35` to `Config`, `LoadConfig`, CET overlay, and NativeSettings tab `/detachedReticle/leverArm`.
+     - In `fpp:SetLocalTransform`, applied non-compounding world-up offset $h = L_{\text{drop}} \sin(W_{\text{pitch}})$ during ADS recoil, smoothly restoring baseline position when recoil recovers or ADS exits.
+     - In `[GUN_OFFSET_MONITOR]`, logged `MuzzleScreen=(%.1f, %.1f)px | MuzzleRelCam=(R:%+.2f, F:%.2f, U:%+.2f)m | Drop=%+.1fcm`.
+- expected_outcome:
+  1. During sustained ADS fire with any weapon (Defender LMG, Copperhead, etc.), the body/receiver of the gun stays lower on screen, keeping a clear visual sight-line to the T3 gun reticle and target.
+  2. When releasing the trigger, camera elevation smoothly recovers to normal eye level in exact lockstep with Tier 2 recoil recovery.
+  3. `DetachedReticle.log` logs the exact 3D camera-relative gun coordinates and screen pixel positions of both the muzzle and T3.
+- test_procedure:
+  1. Equip a rifle or LMG, enter ADS (hold right-click), fire bursts and extended auto bursts.
+  2. Observe whether the gun body stays below the T3 reticle, allowing an unobstructed view of the target.
+  3. Adjust `adsLeverArmLength` (e.g. from `0.20` to `0.50`) in the CET overlay to customize the vertical sight clearance.
+
 # next iteration above this line
 
 ### Findings Writing Rules:
