@@ -734,6 +734,7 @@ registerForEvent("onUpdate", function(delta)
 
         local weaponName = "Unknown"
         local isHeavyWeapon = false
+        local isLMG = false
         local isSmartWeapon = false
         if weapon then
             pcall(function()
@@ -741,6 +742,18 @@ registerForEvent("onUpdate", function(delta)
                 local tdbid = ItemID.GetTDBID(itemID)
                 weaponName = TDBID.ToStringDEBUG(tdbid)
                 isHeavyWeapon = weapon:IsHeavyWeapon()
+                local wType = WeaponObject.GetWeaponType(itemID)
+                if not wType then
+                    wType = RPGManager.GetItemType(itemID)
+                end
+                if wType then
+                    local wTypeStr = tostring(wType)
+                    if wType.value == "Wea_LightMachineGun" or wTypeStr:find("Wea_LightMachineGun") or wType == gamedataItemType.Wea_LightMachineGun then
+                        isLMG = true
+                    elseif wType.value == "Wea_HeavyMachineGun" or wTypeStr:find("Wea_HeavyMachineGun") or wType == gamedataItemType.Wea_HeavyMachineGun then
+                        isHeavyWeapon = true
+                    end
+                end
                 local evo = RPGManager.GetWeaponEvolution(itemID)
                 if evo and (evo.value == "Smart" or tostring(evo) == "gamedataWeaponEvolution.Smart" or evo == gamedataWeaponEvolution.Smart) then
                     isSmartWeapon = true
@@ -748,6 +761,9 @@ registerForEvent("onUpdate", function(delta)
             end)
             if not isHeavyWeapon and weaponName and (weaponName:find("HMG") or weaponName:find("HeavyMachineGun")) then
                 isHeavyWeapon = true
+            end
+            if not isLMG and weaponName and (weaponName:find("Defender") or weaponName:find("MA70") or weaponName:find("LMG") or weaponName:find("LightMachineGun")) then
+                isLMG = true
             end
             if not isSmartWeapon and weaponName and (weaponName:find("Smart") or weaponName:find("smart")) then
                 isSmartWeapon = true
@@ -902,13 +918,14 @@ registerForEvent("onUpdate", function(delta)
 
             -- Ready stance gate:
             -- Regular guns: steady-state barrel offset is < 1.0 deg. Gate [2.5 deg, 4.0 deg], clamp +/- 2.0 deg.
-            -- Heavy weapons (HMG): hip-cradle offset is ~6.6 deg. Gate [8.0 deg, 12.0 deg], clamp +/- 8.0 deg.
+            -- Heavy weapons (HMG) & Light Machine Guns (LMG): hip-cradle offset is ~6.4-7.1 deg. Gate [8.5 deg, 12.0 deg], clamp +/- 8.5 deg.
             -- Smart weapons: homing targeting, bypass Tier 2B completely.
+            local useHeavyCradleGate = isHeavyWeapon or isLMG
             local maxAngle = math.max(math.abs(diffYaw), math.abs(diffPitch))
             local readyWeight = 0.0
-            local maxReady = isHeavyWeapon and 8.0 or 2.5
-            local maxBlend = isHeavyWeapon and 12.0 or 4.0
-            local maxClamp = isHeavyWeapon and 8.0 or 2.0
+            local maxReady = useHeavyCradleGate and 8.5 or 2.5
+            local maxBlend = useHeavyCradleGate and 12.0 or 4.0
+            local maxClamp = useHeavyCradleGate and 8.5 or 2.0
 
             if not isSmartWeapon and (stateStr == "HIP" or stateStr == "ADS") then
                 if maxAngle < maxReady then
@@ -922,8 +939,9 @@ registerForEvent("onUpdate", function(delta)
             local isSwinging = (rawGapYaw > 0.50) or (rawGapPitch > 0.50)
             DetachedReticle.lastReadyWeight = readyWeight
 
-            -- Reset integral trim and settled compensation only on weapon change;
-            -- on HIP <-> ADS transitions, only reset trim for non-heavy weapons (HMG toggles crosshairState 4 <-> 8 on every zoomed shot)
+            -- Reset integral trim and settled compensation on weapon change;
+            -- on HIP <-> ADS transitions, reset trim and settled target for non-heavy weapons
+            -- (HMG toggles crosshairState 4 <-> 8 on every zoomed shot without changing stance, whereas LMG/rifles transition between hip-cradle and iron-sight ADS)
             if weaponName ~= DetachedReticle.lastTrimWeapon then
                 DetachedReticle.lastTrimWeapon = weaponName
                 DetachedReticle.lastTrimADS = isADS
@@ -936,6 +954,8 @@ registerForEvent("onUpdate", function(delta)
                 if not isHeavyWeapon then
                     DetachedReticle.trimYaw = 0.0
                     DetachedReticle.trimPitch = 0.0
+                    DetachedReticle.lastSettledCompTargetYaw = nil
+                    DetachedReticle.lastSettledCompTargetPitch = nil
                 end
             end
 

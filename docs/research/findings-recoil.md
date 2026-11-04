@@ -191,6 +191,38 @@
   1. Fire extended 30–50 round bursts with HMG / LMG / Copperhead and verify the gun reticle stays bounded within `recoilMaxRadius` while remaining lively at the boundary.
   2. Adjust **Max Recoil Leash Angle** (`recoilMaxRadius`) and **Leash Resistance Curve** (`recoilLeashCurve`) in CET overlay or NativeSettings to verify real-time responsiveness.
 
+# iteration 6
+- date: 2026-11-04 09:38 +0700
+- status: untested (deployed to repo and `<GAME_ROOT>`, awaiting in-game test)
+- previous_iteration_results (Iteration 5 Playtest & Log Analysis):
+  1. **User Observation:**
+     - Confirmed the **Option A Recoil "Rubber Leash"** (`# iteration 5`) is working in-game.
+     - Reported a bug when equipping an LMG (`Items.Preset_Defender_Military`): the resting hip-position of the gun points to the top-left of screen center (`T2A -> T2B` barrel offset compensation was not moving for the LMG), whereas other regular guns worked normally.
+  2. **Root Cause Verified from [`DetachedReticle.log`](file:///E:/Cyberpunk%202077/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/DetachedReticle.log#L14049-L14614) (`09:29:39`–`09:29:45`):**
+     - When `Weapon=Items.Preset_Defender_Military` (`gamedataItemType.Wea_LightMachineGun`) is held at rest in hip-fire (`Mode=RESTING(HIP)`):
+       - `ReticleScreen = (-153.5, -167.3) px` (pointing top-left)
+       - `TargetErr = (dYaw: +6.37 deg, dPitch: +7.07 deg, Total: 9.53 deg)`
+       - `ReadyW = 0.00 | CompApplied = (C_yaw: +0.00 deg, C_pitch: +0.00 deg)`
+     - In [`init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua), `weapon:IsHeavyWeapon()` returns `true` only for turret HMGs (`Wea_HeavyMachineGun`), **not** for Light Machine Guns (`Wea_LightMachineGun`, such as the Constitutional Arms Defender and Midnight Arms MA70 HB).
+     - Because `isHeavyWeapon` was `false` for the LMG, the Tier 2B ready-stance gate used the regular rifle thresholds (`maxReady = 2.5 deg`, `maxBlend = 4.0 deg`, `maxClamp = 2.0 deg`). Since the LMG's hip-cradle barrel offset has `maxAngle = 7.07 deg > maxBlend (4.0 deg)`, `readyWeight` evaluated to `0.00`, completely disabling Tier 2B barrel compensation (`CompApplied = 0.00 deg`) and leaving the gun barrel pointing `+6.37°` left and `+7.07°` up (top-left of center).
+- target_goal:
+  1. Detect Light Machine Guns (`isLMG`, via `WeaponObject.GetWeaponType(itemID)` / `RPGManager.GetItemType(itemID)` matching `Wea_LightMachineGun` and item name fallback for `Defender` / `MA70` / `LMG`) in [`init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua).
+  2. Apply the heavy hip-cradle Tier 2B gate (`maxReady = 8.5 deg`, `maxBlend = 12.0 deg`, `maxClamp = 8.5 deg`) whenever `isHeavyWeapon or isLMG`, and widen the C++ barrel compensation clamp in [`InputHook::SetBarrelOffset`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.cpp) and [`InputHook::ProcessMouseAim`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.cpp) from `±8.0°` to `±10.0°` so the LMG's `+7.07°` pitch offset plus integral trim never saturates.
+  3. On `HIP <-> ADS` transitions (`isADS ~= DetachedReticle.lastTrimADS`) for non-HMG weapons (`not isHeavyWeapon`, which includes LMGs since LMGs have a true iron-sight ADS posture at `0°` offset vs. `+6.4°, +7.1°` in hip-fire), reset `lastSettledCompTargetYaw` and `lastSettledCompTargetPitch` alongside `trimYaw`/`trimPitch` so Tier 2B transitions cleanly between hip-cradle and iron-sight ADS even while moving the mouse.
+- changes_made:
+  1. [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - Added `isLMG` detection via `WeaponObject.GetWeaponType(itemID)` / `RPGManager.GetItemType(itemID)` (`Wea_LightMachineGun`) and `weaponName` fallback (`Defender`, `MA70`, `LMG`, `LightMachineGun`).
+     - Enabled heavy hip-cradle gate (`useHeavyCradleGate = isHeavyWeapon or isLMG`: `maxReady = 8.5`, `maxBlend = 12.0`, `maxClamp = 8.5`).
+     - Reset `lastSettledCompTargetYaw = nil` and `lastSettledCompTargetPitch = nil` on `isADS ~= DetachedReticle.lastTrimADS` when `not isHeavyWeapon`.
+  2. [`src/Hooks/InputHook.cpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.cpp):
+     - Widened `s_targetCompYaw`/`s_targetCompPitch` and `s_compYaw`/`s_compPitch` clamp bounds from `[-8.0f, 8.0f]` to `[-10.0f, 10.0f]`.
+- expected_outcome:
+  1. Equipping an LMG (`Defender` or `MA70`) in resting hip-fire (`RESTING(HIP)`) yields `ReadyW = 1.00`, `CompApplied ≈ (+6.37°, +7.07°)`, and centers the gun reticle at `(0, 0)` instead of pointing to the top-left.
+  2. Transitioning between hip-fire and ADS with an LMG smoothly aligns the reticle in both stances.
+- test_procedure:
+  1. Equip an LMG (e.g., Defender) in hip-fire at rest and verify the gun reticle aligns with the center camera reticle (`ReadyW = 1.00` in `DetachedReticle.log`).
+  2. Aim down sights (hold right-click) and release back to hip-fire with the LMG, and fire bursts in both stances to verify smooth alignment and recoil recovery.
+
 # next iteration above this line
 
 ### Findings Writing Rules:

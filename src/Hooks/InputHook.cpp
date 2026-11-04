@@ -151,8 +151,8 @@ void InputHook::ResetChase(float aInitialPitch) {
 }
 
 void InputHook::SetBarrelOffset(float aYaw, float aPitch) {
-    s_targetCompYaw = std::clamp(aYaw, -8.0f, 8.0f);
-    s_targetCompPitch = std::clamp(aPitch, -8.0f, 8.0f);
+    s_targetCompYaw = std::clamp(aYaw, -10.0f, 10.0f);
+    s_targetCompPitch = std::clamp(aPitch, -10.0f, 10.0f);
 }
 
 void InputHook::SetCompParams(float aSpeedSettled, float aSpeedMoving, float aMaxSpeed, float aGapThreshold, float aMinSpeed) {
@@ -379,8 +379,8 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
 
     s_compYaw += dCompYaw;
     s_compPitch += dCompPitch;
-    s_compYaw = std::clamp(s_compYaw, -8.0f, 8.0f);
-    s_compPitch = std::clamp(s_compPitch, -8.0f, 8.0f);
+    s_compYaw = std::clamp(s_compYaw, -10.0f, 10.0f);
+    s_compPitch = std::clamp(s_compPitch, -10.0f, 10.0f);
 
     // 8. Tier 2 Recoil Transfer (W) with Direct-to-Origin Recovery (eliminating RecoilDrift):
     // Vanilla Cyberpunk's native recoil recovery targets a random 2D point D_drift on a circle
