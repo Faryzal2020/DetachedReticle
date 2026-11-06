@@ -425,6 +425,154 @@ Post-MVP 2 research, bug diagnoses, and iteration tracking for polish and edge-c
   4. **Compile Fix:** smartGunUIParameters is an IScriptable class requiring indirection (ef<...>). Fixed FromVariant<smartGunUIParameters> to FromVariant<ref<smartGunUIParameters>>.
 - status: deployed, awaiting user diagnostic probe & bisection session (Round 9 Section 3).
 
+# iteration 38
+- date: 2026-11-06 13:30 +0700
+- status: untested
+- previous_iteration_results:
+  1. User observation: "i noticed that some weapons has idle position of the reticle (T3 compensated by T2B) not on the center. I want you to add logging every 10 seconds that detect when: the gun is not on ADS and not in resting position and the gun reticle is off center for a few seconds (normally the gun reticle should move to the center within a second)."
+  2. Root cause / background:
+     - In earlier iterations (e.g. Iteration 33-35, REC#6), regular weapons had steady-state barrel offsets < 1.0 deg, so a strict ready-stance gate [2.5 deg, 4.0 deg] with clamp [-2.0 deg, +2.0 deg] was established to prevent chasing arm-lowering/raising animations.
+     - Heavy weapons (HMG) and LMGs required a wider hip-cradle gate [8.5 deg, 12.0 deg] and clamp [-8.5 deg, +8.5 deg] because their resting barrel offsets exceed 6.0 deg.
+     - Certain other weapon archetypes (e.g. particular revolvers, shotguns, tech weapons) may exhibit steady-state barrel offsets exceeding 2.5 deg/4.0 deg, causing readyWeight to drop to 0.0 or clamping at 2.0 deg, leaving the reticle uncompensated or partially compensated at rest in hipfire.
+- target_goal:
+  1. Add a dedicated, continuous watchdog in init.lua that checks every frame whether:
+     - The gun is armed and not ADS (not isADS and stateStr != "ADS").
+     - The gun is not in resting/safe position (stateStr != "SAFE", crosshairState != 1, rightWeaponState != 6, stateStr != "SPRINT", stateStr != "RELOAD", diffPitch >= -14.0 deg).
+     - The player is idle/settled (rawGapYaw < 0.50 deg, rawGapPitch < 0.50 deg, not isRecoiling).
+     - The gun reticle is off center on screen (scrDist > 30.0 px).
+  2. When this condition persists for a few seconds (>= 2.5s), log a warning line [WARN][IDLE_RETICLE_OFF_CENTER] every 10 seconds with full diagnostic telemetry (weapon name, screen offset, target error, applied compensation, gate thresholds, ready weight, trim, stance and state machine flags).
+- changes_made:
+  1. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Added offCenterTimer = 0.0 and offCenterLogCooldown = 0.0 state fields to DetachedReticle.
+     - Read rightWeaponState from blackboard PlayerStateMachine.RightWeapon alongside crosshairState and upperBodyState.
+     - Hoisted readyWeight, maxReady, maxBlend, and maxClamp to outer scope so gate parameters are accessible to diagnostic telemetry.
+     - Reset offCenterTimer and offCenterLogCooldown on weapon swap or deactivation.
+     - Added watchdog section running outside Config.debugLogging that accumulates dt when off-center idle condition holds, logging [WARN][IDLE_RETICLE_OFF_CENTER] every 10.0 seconds once offCenterTimer >= 2.5s.
+- expected_outcome:
+  1. When standing idle in hipfire with any weapon whose idle reticle does not converge to screen center within 2.5 seconds, DetachedReticle.log and the CET console log a [WARN][IDLE_RETICLE_OFF_CENTER] line every 10 seconds.
+  2. The log line exposes TargetErr, CompApplied, ReadyW, Gate, Trim, and state machine values to pinpoint why compensation failed.
+  3. No logs are produced when aiming down sights (ADS), sprinting, reloading, or when the gun is lowered into the low-ready/safe resting position.
+- test_procedure:
+  1. Equip various weapon types (pistols, revolvers, shotguns, rifles, snipers) in hipfire.
+  2. Hold the weapon at rest without aiming down sights or shooting for 3+ seconds.
+  3. Inspect DetachedReticle.log for [WARN][IDLE_RETICLE_OFF_CENTER] warnings.
+
+# iteration 39
+- date: 2026-11-06 13:55 +0700
+- status: tested-pass (verified in-game)
+- previous_iteration_results:
+  1. The watchdog deployed in Iteration 38 immediately captured the exact off-center defect during in-game testing with Testera (`Items.Preset_Testera_Military`):
+     `[WARN][IDLE_RETICLE_OFF_CENTER] Weapon=Items.Preset_Testera_Military | Duration=2.5s | ReticleScreen=(-92.2, -44.2)px (Dist:102.2px) | TargetErr=(dYaw:+6.10, dPitch:+3.67)deg | CompApplied=(C_yaw:+2.00, C_pitch:+1.43)deg | ReadyW=0.00 (Gate:[2.5, 4.0] Clamp:2.0) | Trim=(Y:+0.02, P:+0.02) | Stance=HIP (Xhair:8, Upper:0, RWea:5)`
+  2. Root cause analysis:
+     - Double-barrel shotguns (`Wea_ShotgunDual`: Testera, Igla, Palica, Satara) use a distinct hip-carry skeletal pose with an intrinsic horizontal offset $d\text{Yaw} = +6.10^\circ$ and $d\text{Pitch} = +3.67^\circ$.
+     - Because previous iterations only opened the wide hip-cradle gate `[8.5 deg, 12.0 deg]` for `isHeavyWeapon` (HMG) and `isLMG` (Defender/MA70), all other weapons fell back to the tight rifle gate `[2.5 deg, 4.0 deg]` with clamp `+/- 2.0 deg`.
+     - With `maxAngle = 6.10 deg > 4.0 deg`, `readyWeight` dropped to `0.00`, completely locking Testera out of Tier 2B compensation and leaving the reticle stuck 102.2 px off-center.
+     - Meanwhile, weapons like Carnage ($d\text{Yaw}=+0.88^\circ, d\text{Pitch}=+3.17^\circ, \text{maxAngle}=3.17^\circ < 4.0^\circ$) and revolvers ($d\text{Yaw} \approx \pm 0.5^\circ, d\text{Pitch} < 2.0^\circ$) stayed within the narrow gate and centered successfully.
+- target_goal:
+  1. Implement **Solution B (Universal Ready Stance Gate via State Machine)**:
+     - Replace hardcoded weapon classification checks (`isHeavyWeapon`, `isLMG`) with a universal ready posture gate driven by the player state machine:
+       When a weapon is armed and in ready hipfire or ADS (`stateStr == "HIP" or stateStr == "ADS"`, `rightWeaponState ~= 6`, `stateStr ~= "SAFE"`, and `diffPitch >= -14.0 deg`), apply the wide gate (`maxReady = 8.5 deg`, `maxBlend = 12.0 deg`, `maxClamp = 8.5 deg`).
+     - Allow double-barrel shotguns ($d\text{Yaw} = +6.10^\circ$) and heavy/LMG weapons ($d\text{Pitch} = +6.6^\circ\text{ to }+7.1^\circ$) to achieve full, instantaneous Tier 2B center-screen alignment.
+     - When the weapon lowers into safe carry, holsters, sprints, or reloads (`rightWeaponState == 6` / `stateStr == "SAFE"` / `diffPitch < -14.0 deg`), `readyWeight` smoothly drops to 0.0, cleanly relaxing compensation without twitching.
+- changes_made:
+  1. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Added `rightWeaponState == 6` check to `stateStr` mapping to reliably classify PSM Safe state as `stateStr = "SAFE"`.
+     - Replaced archetype-specific `useHeavyCradleGate` with universal `isReadyPosture`:
+       `local isReadyPosture = (not isSmartWeapon) and (stateStr == "HIP" or stateStr == "ADS") and (rightWeaponState ~= 6) and (diffPitch >= -14.0)`
+     - Set universal ready gate thresholds: `maxReady = 8.5 deg`, `maxBlend = 12.0 deg`, `maxClamp = 8.5 deg`.
+     - Confirmed native C++ (`src/Hooks/InputHook.cpp`) is already bounded to `[-10.0f, 10.0f]`, eliminating the need for DLL rebuild.
+     - Constrained fine integral screen trim to `trimClamp = 3.0 deg` per `docs/design/convergence.md`.
+  2. Deployed updated `init.lua` directly to `<GAME_ROOT>\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
+- expected_outcome:
+  1. Testera (and other double-barrel shotguns) in hipfire ready stance have `maxAngle = 6.10 deg < maxReady = 8.5 deg`, obtaining `readyWeight = 1.0`.
+  2. Applied compensation reaches `C_yaw = +6.10 deg` and `C_pitch = +3.67 deg`, drawing T3 gun reticle to the screen center diamond in < 0.8s.
+  3. The off-center watchdog (`scrDist > 30px` for >= 2.5s) ceases to trigger on Testera or any other high-offset weapon.
+  4. Handguns, rifles, Carnage, revolvers, LMGs, and HMG retain smooth, rock-solid centering without regression.
+  5. Safe zones, holstering, sprinting, and reloading drop compensation gracefully to 0 without jerks.
+- test_procedure:
+  1. Launch Cyberpunk 2077 on branch `universal-ready-gate`.
+  2. Equip Testera (or any double-barrel shotgun) in hipfire and observe the gun reticle settling to center diamond.
+  3. Confirm that no `[WARN][IDLE_RETICLE_OFF_CENTER]` lines appear in `DetachedReticle.log` during idle hipfire.
+  4. Test weapon swap to revolver, rifle, Carnage, and LMG/HMG to verify all weapon classes center smoothly.
+  5. Test sprinting, reloading, and holstering to confirm smooth transition with zero twitching.
+- test_results:
+  1. In-game verification confirmed the universal ready posture gate works well according to design intent.
+  2. Double-barrel shotguns (Testera) with high intrinsic hipfire offset ($d\text{Yaw} = +6.10^\circ$) smoothly settle to the center screen diamond within < 0.8s.
+  3. The idle watchdog (`[WARN][IDLE_RETICLE_OFF_CENTER]`) ceases to fire during hipfire rest.
+  4. Handguns, rifles, revolvers, Carnage, and heavy weapons retain smooth, stable centering.
+  5. Any further issues or feedback regarding weapon posture gates will be tracked under the "universal ready gate" term.
+
+# iteration 40
+- date: 2026-11-06 15:10 +0700
+- status: tested-pass (deployed and verified; tuning required for dynamic range)
+- previous_iteration_results:
+  1. Iteration 39 resolved Testera and double-barrel shotgun hipfire centering via the universal ready posture gate (isReadyPosture).
+  2. User requested introducing an "ergonomics" handling model similar to Helldivers 2, where gun weight affects how fast and responsively the gun turns to chase the camera.
+  3. Baseline agreement:
+     - The current config (catchUpSpeed = 22.0, expPower = 0.60) is tuned perfectly for Assault Rifles (W_ref = 6.2 kg).
+     - Use Method A (Effective Perceived Mass): weapon weight (W) scaled by player Body/Strength (s in [0.0, 1.0]) up to a 20% mass reduction at Body 20: W_eff = W * (1 - 0.20 * s).
+     - Responsiveness gain scales dynamically around the 6.2 kg baseline: k_eff = k_cfg * clamp(1.0 - 0.045 * (W_eff - 6.2), 0.45, 1.35).
+     - Curve exponent scales between 0.55 and 0.62: p_eff = clamp(p_cfg - 0.006 * (W_eff - 6.2), 0.55, 0.62).
+- target_goal:
+  1. Implement weapon weight and player strength dynamic ergonomics scaling in init.lua and config.json.
+  2. Light weapons (handguns, SMGs) track snappier (k ~ 24..25.5, p ~ 0.61..0.62).
+  3. Assault rifles maintain exact baseline (k = 22.0, p = 0.60 at Body 3).
+  4. Heavy weapons (shotguns, snipers, LMGs, HMG) exhibit tangible rotational drag and flick inertia (k ~ 10..18, p ~ 0.55..0.58).
+  5. Investing in Body/Strength gives a satisfying feeling of wielding heavy weapons more easily.
+- changes_made:
+  1. in/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/config.json:
+     - Added "weightHandlingScaling": true.
+  2. in/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua:
+     - Added Config.weightHandlingScaling = true, serialization in LoadConfig() and SaveConfig().
+     - Added DetachedReticle.SetWeightHandlingScaling(val).
+     - Added UpdateWeaponErgonomics(weapon) calculating W_eff, k_eff, and p_eff.
+     - Hooked UpdateWeaponErgonomics into active weapon flow and strength updates, calling SyncSmoothing() when effective parameters change.
+     - Updated CET ImGui Overlay and NativeSettings UI to display live ergonomics telemetry (Gun Weight, Eff Weight, k_eff, p_eff) and allow toggling.
+- expected_outcome:
+  1. When drawing a handgun (Lexington/Unity), k_eff ~ 25 and p_eff ~ 0.62, giving agile tracking.
+  2. When drawing an assault rifle (Copperhead/Ajax), k_eff = 22.0 and p_eff = 0.60, exactly matching current baseline.
+  3. When drawing a sniper (Grad) or LMG (Defender), k_eff ~ 17..19 and p_eff ~ 0.57..0.58, exhibiting clear physical barrel weight.
+  4. When wielding an HMG, k_eff ~ 10..14 and p_eff = 0.55, creating committed, heavy turret-like traversing.
+  5. Disabling weightHandlingScaling returns handling immediately to static k_cfg and p_cfg.
+- test_procedure:
+  1. Equip Lexington handgun, verify CET overlay shows Gun=3.3 kg and k ~ 25, p ~ 0.62.
+  2. Equip Copperhead assault rifle, verify CET overlay shows Gun=6.2 kg and k = 22.0, p = 0.60.
+  3. Equip Defender LMG and Militech HMG, verify CET overlay shows heavier weight and lower k, p.
+  4. Perform mouse sweeps and flicks with each weapon to feel the progressive difference in rotational inertia.
+
+# iteration 41
+- date: 2026-11-06 15:22 +0700
+- status: untested
+- previous_iteration_results:
+  1. In-game playtesting of Iteration 40 confirmed the ergonomics mechanics function smoothly with zero lag or hitching.
+  2. Playtest feedback (owner, 2026-11-06):
+     - "the 'snappiness' feels fine on SMG but the speed could be faster."
+     - "While on the slower end; the HMG doesn't feel 'heavy' enough."
+  3. Root cause:
+     - The symmetric linear slope (alpha = 0.045) was too gentle on both ends:
+       - For SMG (4.5 kg, deltaW = -1.7 kg), k only increased to 23.7 (+7.6%), which is barely perceptible.
+       - For HMG (18.0 kg, deltaW = +11.8 kg), k = 10.3 and p = 0.55 allowed the weapon to track with only ~3.3 deg of steady lag at 20 deg/s, failing to communicate the physical mass of a 20 kg turret.
+- target_goal:
+  1. Implement an asymmetric split-slope ergonomics model pivoted around Assault Rifle (6.2 kg):
+     - Light weapons (deltaW < 0): Increase speed slope to alpha_light = 0.13, boosting SMG speed to k ~ 27..29 (+22..33%) while preserving crisp snappiness (p ~ 0.61..0.62).
+     - Heavy weapons (deltaW > 0): Increase drag slope to alpha_heavy = 0.065 and lower exponent bound to p in [0.48, 0.60], bringing HMG down to k ~ 5.3 (over 4x heavier than AR) and p = 0.48 for genuine heavy rotational inertia.
+- changes_made:
+  1. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - In `UpdateWeaponErgonomics(weapon)`:
+       Split deltaW into lighter (deltaW < 0) and heavier (deltaW >= 0) branches.
+       Light: `ergMult = math.min(1.50, 1.0 - 0.13 * deltaW)`, `effPower = math.min(0.62, Config.expPower - 0.007 * deltaW)`.
+       Heavy: `ergMult = math.max(0.24, 1.0 - 0.065 * deltaW)`, `effPower = math.max(0.48, Config.expPower - 0.010 * deltaW)`.
+- expected_outcome:
+  1. SMG (4.5 kg) speed increases to k ~ 26.9 (Body 3) up to k ~ 29.4 (Body 20), feeling noticeably faster and agile.
+  2. Handgun (3.3 kg) achieves k ~ 30.3 (Body 3) up to k ~ 32.2 (Body 20).
+  3. Assault Rifle (6.2 kg) remains at exact baseline k = 22.0, p = 0.60.
+  4. HMG (18.0 kg) drops to k ~ 5.3 and p = 0.48 at Body 3, creating deep, heavy barrel lag (~25 deg on fast sweeps) with strong flick resistance.
+  5. High Strength (Body 20) improves HMG significantly to k ~ 10.3 and p = 0.52.
+- test_procedure:
+  1. Equip SMG (Saratoga) and confirm speed is visibly faster than assault rifle.
+  2. Equip HMG and perform rapid sweeps to verify genuine heavy barrel lag and committed swing.
+  3. Confirm Assault Rifle (Copperhead) remains unchanged at k = 22.0, p = 0.60.
+
 # next iteration above this line
 
 ### Findings Writing Rules:

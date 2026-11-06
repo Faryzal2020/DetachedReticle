@@ -305,6 +305,118 @@
   1. Fire automatic bursts and compare horizontal reticle behavior across different Body/Strength stat levels (or toggle `Scale with Body/Strength Stat` and adjust `Low-Strength Horizontal Scatter` / `High-Strength Horizontal Damping` in the CET overlay).
   2. Verify in `DetachedReticle.log` that recoil recovery still returns cleanly to `(0, 0)` after bursts.
 
+# iteration 9
+- date: 2026-11-05 20:55 +0700
+- status: untested (deployed to branch `testing` in repo and `<GAME_ROOT>`, awaiting in-game test)
+- previous_iteration_results (Iteration 8 & LMG Pitch Diagnostic Findings):
+  1. **User Observation & Problem Statement:**
+     - When continuously firing the Defender LMG (Constitutional Arms Defender / MA70), the 3D gun visibly pitches up to **above 20 degrees** on screen.
+     - However, in `DetachedReticle.log`, no telemetry showed the gun pointing up that much (latest logs during 51-shot and 57-shot bursts showed `RecoilW` maxing out at $\approx +5.40^\circ$ and `Divergence` at $\approx 6.78^\circ$).
+  2. **Root Cause Analysis & Logging Deficiencies:**
+     - In previous builds, non-verbose logging only printed `[BALLISTICS RECORD]` containing `RecoilW`, `Divergence`, and raw Cartesian `BulletDir` vectors without angle conversion or camera-relative pitch.
+     - Crucially, `RecoilW` (`s_recoilPitch`) is clamped by the mod's rubber leash (`s_recoilMaxRadius = 7.0f`), whereas the game's native viewmodel & skeletal arm IK (`AnimFeature_WeaponHandlingStats` / `'RightShoot'`) can rise unhindered to `RecoilMaxLength = 30.0f`.
+     - Because `[GUN_OFFSET_MONITOR]` was gated behind `debugLogging = true`, no per-shot physical angles or candidate transforms were logged in standard play.
+- target_goal:
+  1. Add comprehensive, non-verbose per-shot telemetry logging Camera, MuzzleSlot, WeaponRoot, HandSlot, and RecoilState transforms on **every shot**.
+  2. Log all candidate 3D orientations side-by-side both in world space and relative to the camera gaze axis (`Rad2Deg(AtanF(upProj, fwdProj))`) to empirically measure the actual 3D physical gun pitch without speculative perspective theories.
+- changes_made:
+  1. [`r6/scripts/DetachedReticle/DetachedReticle.reds`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/r6/scripts/DetachedReticle/DetachedReticle.reds):
+     - Added detailed per-shot telemetry fields and getters to `DetachedAimSystem` (`CamPitch`, `CamYaw`, `MuzWorldPitch`, `MuzRelCamPitch`, `MuzTotalDiv`, `WeapWorldPitch`, `WeapRelCamPitch`, `WeapTotalDiv`, `HandWorldPitch`, `HandRelCamPitch`, `Stance`, `WeaponName`).
+     - In `ShootEvents.OnEnter`, computed camera-relative pitch/yaw/divergence for `weapon.GetMuzzleSlotWorldTransform()`, `weapon.GetWorldForward()`, and `player.GetSlotComponent().GetSlotTransform(n"RightHand")`.
+     - Passed all candidate transforms into `aimSys.RecordDetailedShot(...)`.
+  2. [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - In `onUpdate` shot detection (`shotCount > lastShotCount`), retrieved detailed telemetry and logged a concise 2-line diagnostic entry per shot via `Log(...)` (active even when `debugLogging = false`).
+- expected_outcome:
+  1. During any burst with the Defender LMG, every shot immediately prints 2 clean diagnostic lines:
+     - Line 1: `[SHOT #N] [Weapon] [Stance] Cam=(P, Y) | RecoilW=(Y, P) | dRecP | T2B_Pitch`
+     - Line 2: `MuzRelCam=(P, Y, Div) | MuzWorld=(P) | WeapRelCam=(P, Div) | WeapWorld=(P) | HandRelCam=(P)`
+  2. If the physical muzzle or skeleton pitches above 20 degrees, `MuzRelCam.P` and/or `HandRelCam.P` will directly show `+20.xx deg`, conclusively identifying which transform drives the visual gun rise.
+- test_procedure:
+  1. Equip the Defender LMG (Constitutional Arms Defender / MA70) or Copperhead rifle.
+  2. Fire a sustained automatic burst (at least 20–30 rounds).
+  3. Inspect `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/DetachedReticle.log`.
+  4. Verify that `[SHOT #...]` entries show the exact empirical angles of `MuzRelCam`, `WeapRelCam`, `HandRelCam`, and `RecoilW`.
+
+# iteration 10
+- date: 2026-11-05 21:25 +0700
+- status: tested-pass (conclusive control experiment)
+- previous_iteration_results (Iteration 9 Burst Telemetry Findings):
+  1. **Empirical Measurements from LMG Continuous ADS Burst (#70–#80):**
+     - `RecoilW` peaked at `+5.17°`
+     - `T2B_Pitch` peaked at `+2.79°`
+     - `MuzRelCam.P` peaked at `+5.88°`
+     - `WeapRelCam.P` peaked at `+5.88°`
+     - None of the candidate transforms ever exceeded $+6.0^\circ$!
+  2. **User Observation & Diagnostic Test Proposal:**
+     - The user confirmed that in the logs, no transforms reached $+20^\circ$.
+     - The user proposed an empirical control experiment: deliberately add $+20^\circ$ to the weapon pitch heading when unholstered and not firing:
+       - If the 3D gun visibly pitches up when unholstered and not firing, it proves the look integrator / $T2B$ heading directly controls the physical 3D pitch of the weapon.
+       - If the 3D gun does not visibly pitch up (and only T3 pitches up), it proves the physical 3D weapon orientation in first person is decoupled from the look integrator.
+- target_goal:
+  1. Implement a controllable diagnostic test pitch offset (`s_testPitchOffset` in C++, adjustable $\pm 30^\circ$) feeding directly into the Tier 2B heading and engine look integrator at RVA `0x51D462` with camera residual counter-rotation.
+  2. Expose `DR_SetTestPitchOffset` and `DR_GetTestPitchOffset` via RTTI and CET UI with quick-test buttons (`+20° Test`, `-20° Test`, `Reset 0°`) and live angle monitors.
+- changes_made:
+  1. [`src/Hooks/InputHook.hpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.hpp) & [`src/Hooks/InputHook.cpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.cpp):
+     - Added `s_testPitchOffset`, `s_currentTestPitch`, `SetTestPitchOffset`, `GetTestPitchOffset`.
+     - In `ProcessMouseAim`, smoothly approached `s_testPitchOffset` and added `dTestPitch` to `outPitch` (look integrator), `s_displayT2BPitch`, and subtracted from `s_residualPitch` (camera counter-rotation).
+  2. [`src/Main.cpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Main.cpp):
+     - Registered `DR_SetTestPitchOffset` and `DR_GetTestPitchOffset` with RTTI.
+  3. [`red4ext/plugins/DetachedReticle/DetachedReticle.dll`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/red4ext/plugins/DetachedReticle/DetachedReticle.dll):
+     - Built Release DLL using MSVC toolchain.
+  4. [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - Added CET overlay slider (`Test Pitch Offset: [-30°..+30°]`), `[+20° Test (Gun Up)]`, `[-20° Test (Gun Down)]`, `[Reset 0°]` buttons, and live `T2B Pitch` and `Muzzle Rel Cam Pitch` readouts.
+     - In `onUpdate`, logged periodic `[PITCH TEST MONITOR]` lines while test offset is active.
+- expected_outcome:
+  1. Clicking `[+20° Test (Gun Up)]` while unholstered and resting:
+     - If the weapon 3D mesh tilts steeply upward relative to the camera gaze, $T2B$ proves to be the true driver of the weapon's physical mesh pitch.
+     - If the weapon 3D mesh remains flat while T3 jumps upward, it proves the first-person mesh is not pitched by the look integrator.
+- test_procedure:
+  1. Equip any weapon (Defender LMG, rifle, pistol).
+  2. Stand still unholstered (do not fire).
+  3. Open CET overlay and click `[+20° Test (Gun Up)]`.
+  4. Observe whether the physical 3D gun mesh angles upward, or if only T3 moves.
+  5. Click `[Reset 0°]` to restore baseline.
+
+
+# iteration 11
+- date: 2026-11-05 22:20 +0700
+- status: tested-fail (game crash on startup / state machine conflict)
+- failure_analysis:
+  1. Root Cause 1: `SyncRecoilAnimScale()` called `Game.GetScriptableSystemsContainer():Get(...)` during CET's early `onInit` hook. At the main menu, `ScriptableSystemsContainer` is null; invoking a method on it triggered an uncatchable native access violation (`0xC0000005`) that crashed the game before reaching gameplay.
+  2. Root Cause 2: Wrapping `ReadyEvents.OnTick` to push `AnimFeature_WeaponHandlingStats` on every frame conflicted with REDengine's viewmodel animation tree during unholstering/state transitions.
+  3. Resolution: Reverted the `ReadyEvents` wrap and CET script hooks completely. Replaced with declarative TweakXL stat modifier.
+
+# iteration 12
+- date: 2026-11-05 22:50 +0700
+- status: tested-fail (refuted in-game; viewmodel shoot animation kick unaffected by TweakDB stat)
+- previous_iteration_results (Iteration 11 Reversion & Diagnostic Cleanup):
+  1. Crash eliminated immediately upon reverting `ReadyEvents` and `onInit` hooks; game boots stably.
+  2. All temporary diagnostic instruments from Iterations 9–10 (+20° pitch test slider, overlay monitor, native RTTI test functions, detailed candidate angle calculations in `ShootEvents.OnEnter`) were cleaned from the codebase.
+- target_goal:
+  1. Clean up and remove all legacy diagnostic testing code across `src/`, `init.lua`, and `DetachedReticle.reds`.
+  2. Eliminate the visual divergence between the 3D gun mesh and T3 reticle during sustained firing (Defender LMG) using a crash-proof, declarative TweakXL stat modification (`BaseStats.RecoilAnimation`).
+- changes_made:
+  1. [`src/Hooks/InputHook.hpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.hpp), [`src/Hooks/InputHook.cpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Hooks/InputHook.cpp), [`src/Main.cpp`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/src/Main.cpp):
+     - Restored clean baseline C++ source; removed `s_testPitchOffset`, `s_currentTestPitch`, `SetTestPitchOffset`, `GetTestPitchOffset`, and RTTI bindings.
+     - Built fresh Release DLL and deployed to `red4ext/plugins/DetachedReticle/DetachedReticle.dll` and `<GAME_ROOT>`.
+  2. [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - Removed `testPitchOffset`, `SetTestPitchOffset`, the `[PITCH TEST MONITOR]` diagnostic log block, and the test slider/buttons from the CET overlay.
+  3. [`r6/scripts/DetachedReticle/DetachedReticle.reds`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/r6/scripts/DetachedReticle/DetachedReticle.reds):
+     - Reverted detailed per-shot candidate angle logging; restored standard `aimSys.RecordShot(...)` in `ShootEvents.OnEnter`.
+  4. [`r6/tweaks/DetachedReticle/recoil_anim.yaml`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/r6/tweaks/DetachedReticle/recoil_anim.yaml):
+     - Created new TweakXL configuration appending a `Multiplier = 0.0` modifier for `BaseStats.RecoilAnimation` to `Items.Base_Lightmachinegun_Sway_Stats` and `Items.Base_Defender_Recoil_Stats`.
+     - Zeroes out `animFeature.weaponRecoil` declaratively at the engine stat level.
+  5. Deployed all files to `E:\Cyberpunk 2077`.
+- test_results:
+  1. User tested in-game with Defender LMG in ADS: "It doesn't have any effect (not any different with the previous tests)".
+  2. Modifying `BaseStats.RecoilAnimation` to 0.0 via TweakDB stat modifier had no observable effect on the visual viewmodel shoot kick. In REDengine, the first-person shoot kick animation (`PushAnimationEvent('RightShoot')`) is baked into the weapon mesh animset/graph clips rather than purely governed by the `RecoilAnimation` stat.
+  3. Attempting to suppress it by wrapping high-frequency script methods (`ReadyEvents.OnTick`) previously crashed the game (`0xC0000005`) or broke weapon unholster state initialization.
+- resolution:
+  1. Completely reverted and deleted `r6/tweaks/DetachedReticle/recoil_anim.yaml` from the repo and game directory.
+  2. Ceased all attempts to eliminate procedural viewmodel shoot animation kick. The mod's decoupled aim model relies on the look integrator ($T2B$) and the T3 reticle tracks physical muzzle ballistics. The viewmodel mesh upward kick is accepted as an inherent engine visual characteristic.
+  3. ADS receiver sightline occlusion is effectively addressed by vertical eye-level lever-arm drop (`adsLeverArmLength = 0.70m`), maintaining clear sightlines above the gun during sustained recoil.
+  4. Saved the current tuned configuration (`adsLeverArmLength = 0.70`, radial rubber leash `7.0°`, Strength-scaling horizontal dynamics) as the official default configuration in `config.json` and `init.lua`.
+
 # next iteration above this line
 
 ### Findings Writing Rules:

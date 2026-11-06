@@ -192,7 +192,7 @@ The patches check the bytes before writing and refuse to patch on any other buil
 | Max divergence / deadzone | 65° (advances A, never T) / 0° | Camera is never pulled | MVP#10–#11 |
 | Tier 2B target | Body-relative `C = O` (`gunYaw − bodyYaw`, `gunPitch − t2bPitch`) | A camera-relative target converges to O/2 (half-gain bug) | POL#32, R5 §2 |
 | Tier 2B rates | settled 12 s⁻¹, moving 4 s⁻¹, max 240 °/s, min 6 °/s, gap threshold 3° | Snappy settling without eating the swing | `init.lua` Config |
-| Ready-stance gate | Smoothstep. Regular guns: full below 2.5°, zero by 4.0°, target clamp ±2°. HMG and LMG: 8.5° / 12° / ±8.5°. Native clamp ±10°. | A hard 15° cutoff jolted the camera; a wide gate chased the arm-lowering animation | POL#33, #35, #36, REC#6 |
+| Universal ready gate | State machine driven (`isReadyPosture`: HIP/ADS, not SAFE/SPRINT/RELOAD, `rightWeaponState != 6`, `diffPitch >= -14°`). Smoothstep: full below 8.5°, zero by 12°, target clamp ±8.5°. Native clamp ±10°. Applies uniformly to all ready weapons (double-barrel shotguns with +6.1° yaw, LMG/HMG with +6.6-7.1° pitch, handguns/rifles). Safe/lowered postures drop `readyWeight` to 0. | Prevents high-offset hipfire poses (Testera) from locking out of compensation, while cleanly dropping on lower/safe animations | POL#33, #35, #36, #39 |
 | Parallax | Converge on the hit point with a slow integral trim: ki 0.005 °/(px·s), clamp ±3°, frozen while `rawGap ≥ 0.10°`, negative feedback on both axes | Centers at any range once settled | [design/convergence.md](design/convergence.md), POL#33 |
 | Trim and stored targets reset | Reset on weapon change and on HIP↔ADS. The HMG keeps them across 4↔8 crosshair flips. | Trim leaking between stances; zoomed HMG stall | POL#33, REC#4, REC#6 |
 | Tier 2B freeze | Hold the last settled target while recoiling or swinging (gap > 0.5°) | Stops swing and recoil from corrupting C | REC#1, REC#4 |
@@ -246,8 +246,9 @@ The complete list is [research/noted-issues.md](research/noted-issues.md); the a
 - **Recoil:**
   - Swapped stack slots sent the mouse into W.
   - Trusting native recovery leaves a random 0.6–0.9° rest point plus a ~1 s bleed.
+  - Viewmodel shoot kick divergence: First-person sustained automatic fire kicks the visible 3D gun mesh upward via `PushAnimationEvent('RightShoot')` on top of the physical body orientation. Multiplying `BaseStats.RecoilAnimation` by 0.0 in TweakXL had zero effect on viewmodel kick (animations are baked into weapon animsets/graphs). Wrapping `ReadyEvents.OnTick` to force `animFeature.weaponRecoil = 0.0` crashed the engine (`0xC0000005`) or broke unholster states. Refuted: live with viewmodel procedural kick; ADS sightline occlusion is solved via vertical eye-level lever-arm drop (`adsLeverArmLength = 0.70m`).
 
-  (REC#2–#3)
+  (REC#2–#3, REC#11–#12)
 - **Process:** iteration 31 deleted the `local weapon`/`local fpp` lines and made the whole mod inert while it still looked installed. Re-check the activation log after every big edit. (POL#32, R5 §1)
 
 ---
