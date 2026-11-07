@@ -417,6 +417,37 @@
   3. ADS receiver sightline occlusion is effectively addressed by vertical eye-level lever-arm drop (`adsLeverArmLength = 0.70m`), maintaining clear sightlines above the gun during sustained recoil.
   4. Saved the current tuned configuration (`adsLeverArmLength = 0.70`, radial rubber leash `7.0°`, Strength-scaling horizontal dynamics) as the official default configuration in `config.json` and `init.lua`.
 
+
+# iteration 13
+- date: 2026-11-07 19:15 +0700
+- status: untested (deployed to branch `config-cleanup` in repo and `<GAME_ROOT>`, awaiting in-game test)
+- previous_iteration_results (Iteration 12 Default Tuning & User Cleanup Request):
+  1. The user requested simplifying the configuration and tuning:
+     - Remove the catch-up algorithm selection UI, making Option A continuous power-law exponential smoothing permanent while retaining the alternative algorithms in the code for future reference.
+     - Reduce default `adsLeverArmLength` to `0.20m` for standard weapons, while applying a dynamic `3.5x` multiplier for LMGs (`armLen = armLen * 3.5`, giving $0.20\text{m} \times 3.5 = 0.70\text{m}$ by default) so heavy weapons clear sight occlusion while regular weapons do not suffer exaggerated camera displacement.
+- target_goal:
+  1. Set Option A Power-Law as permanent smoothing mode; remove the algorithm selector and Model A Braking sliders from NativeSettings and CET ImGui overlay.
+  2. Lower default `adsLeverArmLength` to `0.20m` in `Config` and `config.json`.
+  3. Reorder `onUpdate` execution so weapon type classification (`weaponName`, `isHeavyWeapon`, `isLMG`, `isSmartWeapon`) resolves prior to the ADS lever-arm drop computation.
+  4. Apply a `3.5x` scale factor to `adsLeverArmLength` whenever `isLMG` is true.
+- changes_made:
+  1. [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - In `Config`: set default `adsLeverArmLength = 0.20`.
+     - In `SetupNativeSettings`: removed the `Catch-up Algorithm` selector and Model A Braking sliders (`Braking Threshold Angle`, `Max Cruise Speed`), displaying `Curve Exponent (Power-Law)` directly. Updated `Lever-Arm Drop Length` default to `0.20m` (noting `3.5x` for LMG).
+     - In `onDraw`: removed the `Catch-Up Algorithm:` radio button group and the Model A braking settings branch. Directly exposed `Curve Exponent (p)` under Aiming. Updated `Lever-Arm Length` slider default and tooltip.
+     - In `onUpdate`: moved weapon identification and type resolution ahead of Section 2 camera transform calculations; applied `armLen = armLen * 3.5` if `isLMG` during ADS recoil.
+     - In `DetachedReticle.SetAdsLeverArmLength`: updated default fallback to `0.20`.
+  2. [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/config.json`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/config.json):
+     - Updated default `"adsLeverArmLength": 0.2`.
+- expected_outcome:
+  1. Catch-up algorithm runs permanently on Option A Power-Law without confusing multi-algorithm UI toggles.
+  2. Regular rifles, handguns, and shotguns in ADS experience a subtle $0.20\text{m}$ eye-level lever-arm drop during recoil.
+  3. LMGs (Defender, MA70) automatically receive $3.5\times$ of the configured lever-arm length ($0.70\text{m}$ default), preventing the heavy receiver from occluding the line of sight to T3.
+- test_procedure:
+  1. Equip a regular rifle or handgun (e.g. Copperhead, Lexington), aim down sights, and fire bursts: verify camera drop during recoil is subtle ($0.20\text{m}$) and sightline stays natural.
+  2. Equip the Defender LMG, aim down sights, and fire a sustained burst: verify the camera drops higher ($0.70\text{m}$), keeping the receiver below T3.
+  3. Check CET overlay and NativeSettings: verify catch-up algorithm radio buttons are gone and Curve Exponent is directly editable.
+
 # next iteration above this line
 
 ### Findings Writing Rules:

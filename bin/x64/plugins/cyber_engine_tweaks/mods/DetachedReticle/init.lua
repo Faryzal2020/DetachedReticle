@@ -10,7 +10,7 @@ local Config = {
     catchUpSpeed = 22.0,          -- Responsiveness gain factor k (default: 22.0, yields ~0.7 deg lag at 20 deg/s)
     deadzone = 0.0,               -- Degrees: zero deadzone by default (turns immediately)
     maxDivergence = 65.0,         -- Degrees: maximum angular separation before pulling body
-    smoothingMode = "exponential",-- "exponential" (Option A Power-Law), "braking" (Model A), "linear", "spring", or "power"
+    smoothingMode = "exponential",-- Option A Power-Law curve (permanent; other modes kept in code for reference)
     expPower = 0.60,              -- Option A: Continuous Power-Law Exponent (1.0 = linear, 0.60 = tight sub-linear chase, default: 0.60)
     brakeThreshold = 2.0,         -- Model A: Degrees from target where deceleration begins (default: 2.0)
     brakeMaxSpeed = 360.0,        -- Model A: Max cruising speed in deg/s (default: 360.0)
@@ -29,7 +29,7 @@ local Config = {
     recoilHoriDamping = 0.70,     -- High-Strength native horizontal recoil neutralization factor (default: 0.70)
     -- ADS Lever-Arm Drop Compensation
     adsLeverArmComp = true,       -- Dynamically lower lever-arm root during ADS recoil to prevent sight occlusion
-    adsLeverArmLength = 0.70,     -- Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.70)
+    adsLeverArmLength = 0.20,     -- Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.20; LMG applies x3.5 = 0.70m)
     weightHandlingScaling = true, -- Scale catch-up speed & curve exponent dynamically based on weapon weight & player Strength
     debugLogging = false          -- Verbose telemetry logging to DetachedReticle.log
 }
@@ -460,45 +460,6 @@ local function SetupNativeSettings()
                 end
             )
 
-            local algoOptions = { "Braking", "Exponential", "Linear", "Spring", "Power" }
-            local currentIdx = 2
-            for i, name in ipairs(algoOptions) do
-                if name:lower() == Config.smoothingMode:lower() then
-                    currentIdx = i
-                    break
-                end
-            end
-
-            ns.addSelectorString(
-                "/detachedReticle/aiming",
-                "Catch-up Algorithm",
-                "Algorithm used to calculate the catch-up curve towards the camera reticle (Exponential = default Power-Law, Braking = Model A)",
-                algoOptions, currentIdx, 2,
-                function(idx)
-                    local selected = algoOptions[idx] or "Exponential"
-                    DetachedReticle.SetSmoothingMode(selected:lower())
-                end
-            )
-
-            ns.addRangeFloat(
-                "/detachedReticle/aiming",
-                "Braking Threshold Angle",
-                "Model A: Distance in degrees from camera gaze where deceleration begins (default: 2.0 deg)",
-                0.5, 10.0, 0.1, "%.1f deg", Config.brakeThreshold, 2.0,
-                function(val)
-                    DetachedReticle.SetBrakeThreshold(val)
-                end
-            )
-
-            ns.addRangeFloat(
-                "/detachedReticle/aiming",
-                "Max Cruise Speed",
-                "Model A: Maximum cruising angular speed in degrees per second before entering braking zone (default: 360 deg/s)",
-                60.0, 1200.0, 10.0, "%.0f deg/s", Config.brakeMaxSpeed, 360.0,
-                function(val)
-                    DetachedReticle.SetBrakeMaxSpeed(val)
-                end
-            )
 
             ns.addRangeFloat(
                 "/detachedReticle/aiming",
@@ -631,8 +592,8 @@ local function SetupNativeSettings()
             ns.addRangeFloat(
                 "/detachedReticle/leverArm",
                 "Lever-Arm Drop Length",
-                "Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.35m)",
-                0.10, 1.00, 0.05, "%.2f m", Config.adsLeverArmLength, 0.35,
+                "Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.20m; LMG applies x3.5 = 0.70m)",
+                0.05, 1.00, 0.05, "%.2f m", Config.adsLeverArmLength, 0.20,
                 function(val)
                     DetachedReticle.SetAdsLeverArmLength(val)
                 end
@@ -870,6 +831,45 @@ registerForEvent("onUpdate", function(delta)
         end
         local isADS = (crosshairState == 4 or upperBodyState == 6)
 
+        -- Resolve weapon type and evolution
+        local weaponName = "Unknown"
+        local isHeavyWeapon = false
+        local isLMG = false
+        local isSmartWeapon = false
+        if weapon then
+            pcall(function()
+                local itemID = weapon:GetItemID()
+                local tdbid = ItemID.GetTDBID(itemID)
+                weaponName = TDBID.ToStringDEBUG(tdbid)
+                isHeavyWeapon = weapon:IsHeavyWeapon()
+                local wType = WeaponObject.GetWeaponType(itemID)
+                if not wType then
+                    wType = RPGManager.GetItemType(itemID)
+                end
+                if wType then
+                    local wTypeStr = tostring(wType)
+                    if wType.value == "Wea_LightMachineGun" or wTypeStr:find("Wea_LightMachineGun") or wType == gamedataItemType.Wea_LightMachineGun then
+                        isLMG = true
+                    elseif wType.value == "Wea_HeavyMachineGun" or wTypeStr:find("Wea_HeavyMachineGun") or wType == gamedataItemType.Wea_HeavyMachineGun then
+                        isHeavyWeapon = true
+                    end
+                end
+                local evo = RPGManager.GetWeaponEvolution(itemID)
+                if evo and (evo.value == "Smart" or tostring(evo) == "gamedataWeaponEvolution.Smart" or evo == gamedataWeaponEvolution.Smart) then
+                    isSmartWeapon = true
+                end
+            end)
+            if not isHeavyWeapon and weaponName and (weaponName:find("HMG") or weaponName:find("HeavyMachineGun")) then
+                isHeavyWeapon = true
+            end
+            if not isLMG and weaponName and (weaponName:find("Defender") or weaponName:find("MA70") or weaponName:find("LMG") or weaponName:find("LightMachineGun")) then
+                isLMG = true
+            end
+            if not isSmartWeapon and weaponName and (weaponName:find("Smart") or weaponName:find("smart")) then
+                isSmartWeapon = true
+            end
+        end
+
         -- Physical socket pitch angle in parent coordinate frame:
         -- Derived directly from rendered camera pitch minus the previous frame's written local pitch residual,
         -- guaranteeing the horizontal yaw axis is always aligned with true world-up even if the engine alters pitch externally.
@@ -906,9 +906,13 @@ registerForEvent("onUpdate", function(delta)
         -- around the shoulder pivot causes the gun body/receiver to rise up faster than the distant T3 sight line.
         -- We lower the root of the lever arm (elevate camera along world-up) by h = L_drop * sin(wPitch),
         -- keeping the gun receiver from occluding the line of sight between the camera and T3.
+        -- Default lever-arm length is 0.20m, but LMGs receive 3.5x of the setting (default 0.20 * 3.5 = 0.70m).
         local dropDist = 0.0
         if Config.adsLeverArmComp and isADS and (wPitch > 0.001) then
-            local armLen = (type(Config.adsLeverArmLength) == "number") and Config.adsLeverArmLength or 0.35
+            local armLen = (type(Config.adsLeverArmLength) == "number") and Config.adsLeverArmLength or 0.20
+            if isLMG then
+                armLen = armLen * 3.5
+            end
             dropDist = armLen * math.sin(math.rad(wPitch))
         end
 
@@ -978,44 +982,6 @@ registerForEvent("onUpdate", function(delta)
             Log(line)
         end
 
-        -- 3. Resolve weapon type and evolution
-        local weaponName = "Unknown"
-        local isHeavyWeapon = false
-        local isLMG = false
-        local isSmartWeapon = false
-        if weapon then
-            pcall(function()
-                local itemID = weapon:GetItemID()
-                local tdbid = ItemID.GetTDBID(itemID)
-                weaponName = TDBID.ToStringDEBUG(tdbid)
-                isHeavyWeapon = weapon:IsHeavyWeapon()
-                local wType = WeaponObject.GetWeaponType(itemID)
-                if not wType then
-                    wType = RPGManager.GetItemType(itemID)
-                end
-                if wType then
-                    local wTypeStr = tostring(wType)
-                    if wType.value == "Wea_LightMachineGun" or wTypeStr:find("Wea_LightMachineGun") or wType == gamedataItemType.Wea_LightMachineGun then
-                        isLMG = true
-                    elseif wType.value == "Wea_HeavyMachineGun" or wTypeStr:find("Wea_HeavyMachineGun") or wType == gamedataItemType.Wea_HeavyMachineGun then
-                        isHeavyWeapon = true
-                    end
-                end
-                local evo = RPGManager.GetWeaponEvolution(itemID)
-                if evo and (evo.value == "Smart" or tostring(evo) == "gamedataWeaponEvolution.Smart" or evo == gamedataWeaponEvolution.Smart) then
-                    isSmartWeapon = true
-                end
-            end)
-            if not isHeavyWeapon and weaponName and (weaponName:find("HMG") or weaponName:find("HeavyMachineGun")) then
-                isHeavyWeapon = true
-            end
-            if not isLMG and weaponName and (weaponName:find("Defender") or weaponName:find("MA70") or weaponName:find("LMG") or weaponName:find("LightMachineGun")) then
-                isLMG = true
-            end
-            if not isSmartWeapon and weaponName and (weaponName:find("Smart") or weaponName:find("smart")) then
-                isSmartWeapon = true
-            end
-        end
 
         -- [PROBE SMART] Log smart weapon targeting parameters and UI state every 30 frames
         if isSmartWeapon then
@@ -1531,38 +1497,12 @@ registerForEvent("onDraw", function()
             ImGui.SetTooltip("Maximum angle the camera can look away from the body before dragging the body along immediately.")
         end
 
-        -- Algorithm Selector
+        -- Curve Exponent Slider (Option A Power-Law, permanent catch-up model)
         ImGui.Separator()
-        ImGui.Text("Catch-Up Algorithm:")
-        local algoList = { "braking", "exponential", "linear", "spring", "power" }
-        for _, algoName in ipairs(algoList) do
-            local isSelected = (Config.smoothingMode:lower() == algoName)
-            local label = (algoName == "braking") and "Braking (Model A)" or algoName:gsub("^%l", string.upper)
-            if ImGui.RadioButton(label, isSelected) then
-                DetachedReticle.SetSmoothingMode(algoName)
-            end
-            ImGui.SameLine()
-        end
-        ImGui.NewLine()
-
-        if Config.smoothingMode:lower() == "braking" then
-            local newBrakeThresh, threshChanged = ImGui.SliderFloat("Braking Zone", Config.brakeThreshold, 0.5, 10.0, "%.1f deg")
-            if threshChanged then DetachedReticle.SetBrakeThreshold(newBrakeThresh) end
-            if ImGui.IsItemHovered() then
-                ImGui.SetTooltip("Distance in degrees from camera gaze where deceleration begins.\nDefault: 2.0 deg")
-            end
-
-            local newBrakeMax, maxSpdChanged = ImGui.SliderFloat("Max Cruise Speed", Config.brakeMaxSpeed, 60.0, 1200.0, "%.0f deg/s")
-            if maxSpdChanged then DetachedReticle.SetBrakeMaxSpeed(newBrakeMax) end
-            if ImGui.IsItemHovered() then
-                ImGui.SetTooltip("Maximum cruising angular speed before entering braking zone.\nDefault: 360 deg/s")
-            end
-        elseif Config.smoothingMode:lower() == "exponential" then
-            local newExpPower, powerChanged = ImGui.SliderFloat("Curve Exponent (p)", Config.expPower, 0.30, 1.20, "%.2f")
-            if powerChanged then DetachedReticle.SetExpPower(newExpPower) end
-            if ImGui.IsItemHovered() then
-                ImGui.SetTooltip("Option A: Continuous Power-Law Exponent (v = k * gap^p).\n1.0 = linear exponential, 0.60 = tight sub-linear chase (reaches 20% distance at normal speed).\nNaturally settles to rest in 4 frames with ZERO artificial thresholds.\nDefault: 0.60")
-            end
+        local newExpPower, powerChanged = ImGui.SliderFloat("Curve Exponent (p)", Config.expPower, 0.30, 1.20, "%.2f")
+        if powerChanged then DetachedReticle.SetExpPower(newExpPower) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Option A: Continuous Power-Law Exponent (v = k * gap^p).\n1.0 = linear exponential, 0.60 = tight sub-linear chase (reaches 20% distance at normal speed).\nNaturally settles to rest in 4 frames with ZERO artificial thresholds.\nDefault: 0.60")
         end
 
         -- Tier 2B Gun Alignment (T2B-to-T2A) Snappiness Sliders
@@ -1647,10 +1587,10 @@ registerForEvent("onDraw", function()
             ImGui.SetTooltip("Lowers the lever-arm root (elevates camera) in proportion to upward weapon recoil pitch during ADS,\npreventing the gun body from occluding the line of sight to T3.\nDefault: On")
         end
 
-        local newLeverArmLen, leverArmLenChanged = ImGui.SliderFloat("Lever-Arm Length", Config.adsLeverArmLength, 0.10, 1.00, "%.2f m")
+        local newLeverArmLen, leverArmLenChanged = ImGui.SliderFloat("Lever-Arm Length", Config.adsLeverArmLength, 0.05, 1.00, "%.2f m")
         if leverArmLenChanged then DetachedReticle.SetAdsLeverArmLength(newLeverArmLen) end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip("Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch).\nDefault: 0.70 m")
+            ImGui.SetTooltip("Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch).\nDefault: 0.20 m (LMG automatically applies 3.5x multiplier = 0.70 m).")
         end
 
         -- Debug Telemetry Checkbox
@@ -1883,7 +1823,7 @@ DetachedReticle.SetAdsLeverArmComp = function(val)
 end
 
 DetachedReticle.SetAdsLeverArmLength = function(val)
-    Config.adsLeverArmLength = math.max(0.05, math.min(1.50, tonumber(val) or 0.70))
+    Config.adsLeverArmLength = math.max(0.05, math.min(1.50, tonumber(val) or 0.20))
     SaveConfig()
     Log(string.format("[OPTIONS] adsLeverArmLength set to: %.2f m", Config.adsLeverArmLength))
 end

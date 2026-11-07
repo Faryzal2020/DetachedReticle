@@ -20,6 +20,6 @@
   "recoilHoriScatter": 1.0,
   "recoilHoriDamping": 0.7,
   "adsLeverArmComp": true,
-  "adsLeverArmLength": 0.7,
+  "adsLeverArmLength": 0.2,
   "debugLogging": false
 }
