@@ -448,6 +448,49 @@
   2. Equip the Defender LMG, aim down sights, and fire a sustained burst: verify the camera drops higher ($0.70\text{m}$), keeping the receiver below T3.
   3. Check CET overlay and NativeSettings: verify catch-up algorithm radio buttons are gone and Curve Exponent is directly editable.
 
+# iteration 14
+- date: 2026-11-08 00:10 +0700
+- status: untested (deployed to branch `testing` in repo and `<GAME_ROOT>`, awaiting in-game test)
+- previous_iteration_results (Iteration 13 Cleanup & Merge):
+  1. Branch `config-cleanup` merged into `testing`.
+  2. Option A Power-Law made permanent default; lever-arm drop set to `0.20m` base with `3.5x` dynamic multiplier for LMGs.
+- target_goal:
+  1. Investigate and identify the engine variables and architecture governing the physical travel direction of the player when pressing `W` (locomotion input).
+  2. Determine whether player locomotion follows the rendered camera gaze ($T_1$) or the physical puppet body heading ($T_{2B}$), especially when unholstered where Tier 2B barrel offset compensation ($C$) and recoil ($W$) deflect the puppet body relative to the camera gaze ($T_{2B} = T_{2A} - C + W$, where $rYaw = T_1 - T_{2B}$).
+  3. Add a dedicated locomotion monitor (`MonitorLocomotion`), periodic log output (`[LOCOMOTION_MONITOR]`), per-frame `[LOCO]` debug log tags, and live movement telemetry in the CET ImGui overlay for in-game inspection.
+- verified binary & architectural basis:
+  1. **REDengine PSM Locomotion Architecture (`locomotionTransitions.script:3938`, `locomotionTransitionsLowGravity.script:662`, `defaultTransition.script:780`, `psmImports.script:147`):**
+     - Movement world vector is calculated as:
+       $$\vec{d} = \text{RotByAngleXY}(\text{GetOwnerForward}(), -\text{GetInputHeading}())$$
+     - In vanilla first-person mode, `GetOwnerForward()` (`player:GetWorldForward()`) is identical to the camera gaze forward because the camera component is locked at local yaw `0.0`.
+     - In DetachedReticle, the native look integrator steers the puppet body ($T_{2B}$), deflecting it by $-C_{\text{yaw}} + W_{\text{yaw}}$ while the camera is kept at $T_1$ via local component residual $rYaw$.
+     - When unholstered, $C_{\text{yaw}}$ deflects the body (e.g. Defender LMG $+6.37^\circ$, HMG $+3.50^\circ$, Igla $+5.64^\circ$, Lexington $-1.05^\circ$).
+     - If the locomotion physics controller evaluates movement relative to `GetOwnerForward()`, pressing `W` will push the character along $T_{2B}$ rather than $T_1$, resulting in an angular drift equal to $-C_{\text{yaw}}$ (or $-rYaw$).
+  2. **Mathematical Divergence Metrics:**
+     - World velocity: $\vec{v} = (v_x, v_y, 0) \implies \text{moveHeading} = \text{atan2}(-v_x, v_y)$.
+     - Camera gaze: $\text{camYaw} = \text{atan2}(-c_x, c_y)$ from `CameraSystem.GetActiveCameraForward()`.
+     - Body forward: $\text{bodyYaw} = \text{player:GetWorldYaw()}$.
+     - Angular deviations:
+       $$\Delta_{\text{cam}} = \text{normalize}(\text{moveHeading} - \text{camYaw})$$
+       $$\Delta_{\text{body}} = \text{normalize}(\text{moveHeading} - \text{bodyYaw})$$
+- changes_made:
+  1. [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - Added `MonitorLocomotion` watchdog function (lines 624–742): samples `player:GetVelocity()`, computes `moveHeading`, `camYaw`, and `bodyYaw`, and logs `[LOCOMOTION_MONITOR]` on locomotion start, holster/unholster transition, and periodically every `0.5s` during movement.
+     - Hooked `MonitorLocomotion` in `onUpdate` to run on both holstered and armed states.
+     - Appended `[LOCO] spd=%.2f mH=%.2f dCam=%+.2f dBody=%+.2f` to the per-frame `[F=...]` debug log line when movement speed exceeds `0.15 m/s`.
+     - Added live movement direction, speed, and divergence readouts (`vs Cam`, `vs Body`) to the CET ImGui overlay.
+  2. Deployed `init.lua` to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
+- expected_outcome:
+  1. When standing still, `Movement: Idle / Stopped` is displayed.
+  2. When moving (pressing W), `[LOCOMOTION_MONITOR]` logs the exact angles and deltas to `DetachedReticle.log`.
+  3. If locomotion is camera-relative in native physics, $\Delta_{\text{cam}} \approx 0.0^\circ$ and $\Delta_{\text{body}} \approx rYaw$.
+  4. If locomotion is body-relative, $\Delta_{\text{body}} \approx 0.0^\circ$ and $\Delta_{\text{cam}} \approx -rYaw$ (revealing why movement drifts when unholstered).
+- test_procedure:
+  1. Launch game, open CET console / Detached Reticle window.
+  2. **Holstered Test:** Stand still, look at a recognizable distant landmark, press and hold `W` to walk straight ahead for 3–5 seconds. Inspect ImGui overlay and log lines for `dMove_Cam` and `dMove_Body`.
+  3. **Unholstered Test:** Draw the Defender LMG (large compensation $C_{\text{yaw}} \approx +6.37^\circ$). Look at the same landmark, press and hold `W` straight ahead for 3–5 seconds without moving the mouse. Inspect `dMove_Cam` and `dMove_Body`.
+  4. Compare the two tests: check whether `dMove_Cam` shifts by approximately $-6.37^\circ$ when armed with the LMG.
+
 # next iteration above this line
 
 ### Findings Writing Rules:

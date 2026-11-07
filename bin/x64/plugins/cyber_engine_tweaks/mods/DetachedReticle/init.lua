@@ -618,6 +618,124 @@ registerForEvent("onInit", function()
     SetupNativeSettings()
 end)
 
+-- Locomotion Movement Direction Watchdog & Telemetry:
+-- Investigates what reference frame (Camera Gaze T1 vs Puppet Body T2B) governs physical movement
+-- when pressing WASD, and measures any angular divergence between movement heading, camera, and body.
+local function MonitorLocomotion(player, fpp, isArmed, weapon, dt, rYaw, cYaw, wYaw)
+    local vel = nil
+    local okVel, pv = pcall(function() return player:GetVelocity() end)
+    if okVel and pv then vel = pv end
+
+    local vx = (vel and (vel.x or vel.X)) or 0.0
+    local vy = (vel and (vel.y or vel.Y)) or 0.0
+    local vz = (vel and (vel.z or vel.Z)) or 0.0
+    local speed2D = math.sqrt(vx * vx + vy * vy)
+    local isMoving = (speed2D > 0.15)
+
+    DetachedReticle.lastSpeed2D = speed2D
+    DetachedReticle.lastMoveSpeed = speed2D
+
+    if not isMoving then
+        if DetachedReticle.wasMovingLoco then
+            DetachedReticle.wasMovingLoco = false
+            DetachedReticle.locoLogTimer = 0.0
+        end
+        return
+    end
+
+    -- Movement heading in engine coordinates (+Y fwd, +X right, positive yaw ccw/left)
+    local moveHeading = math.deg(math.atan2(-vx, vy))
+
+    -- Camera Gaze Heading (T1)
+    local camYaw = 0.0
+    local hasCam = false
+    pcall(function()
+        local cf = Game.GetCameraSystem():GetActiveCameraForward()
+        if cf then
+            local cx = cf.x or cf.X or 0.0
+            local cy = cf.y or cf.Y or 0.0
+            if math.abs(cx) > 1e-4 or math.abs(cy) > 1e-4 then
+                camYaw = math.deg(math.atan2(-cx, cy))
+                hasCam = true
+            end
+        end
+    end)
+    if not hasCam and fpp then
+        pcall(function()
+            local cf = fpp:GetWorldForward()
+            if cf then
+                camYaw = math.deg(math.atan2(-(cf.x or cf.X or 0.0), (cf.y or cf.Y or 0.0)))
+            end
+        end)
+    end
+
+    -- Puppet Body Heading (T2B)
+    local bodyYaw = 0.0
+    local okBYaw, by = pcall(function() return player:GetWorldYaw() end)
+    if okBYaw and by then
+        bodyYaw = by
+    else
+        pcall(function()
+            local pf = player:GetWorldForward()
+            if pf then
+                bodyYaw = math.deg(math.atan2(-(pf.x or pf.X or 0.0), (pf.y or pf.Y or 0.0)))
+            end
+        end)
+    end
+
+    -- Angular deltas:
+    -- dMove_Cam: angular divergence between actual movement heading and rendered camera gaze (T1)
+    -- dMove_Body: angular divergence between actual movement heading and puppet body forward (T2B)
+    -- dCam_Body: angular difference between camera gaze and body (rYaw residual)
+    local dMoveCam = normalizeDeg(moveHeading - camYaw)
+    local dMoveBody = normalizeDeg(moveHeading - bodyYaw)
+    local dCamBody = normalizeDeg(camYaw - bodyYaw)
+
+    DetachedReticle.lastMoveHeading = moveHeading
+    DetachedReticle.lastDMoveCam = dMoveCam
+    DetachedReticle.lastDMoveBody = dMoveBody
+
+    local wasMoving = DetachedReticle.wasMovingLoco or false
+    local startedMoving = isMoving and not wasMoving
+    DetachedReticle.wasMovingLoco = isMoving
+
+    DetachedReticle.locoLogTimer = (DetachedReticle.locoLogTimer or 0.0) + (dt or 0.016)
+    local periodicLog = (DetachedReticle.locoLogTimer >= 0.50)
+    local armedChanged = (isArmed ~= DetachedReticle.lastLocoArmed)
+    DetachedReticle.lastLocoArmed = isArmed
+
+    if startedMoving or periodicLog or armedChanged then
+        DetachedReticle.locoLogTimer = 0.0
+
+        local locoState = -1
+        local locoDetailed = -1
+        pcall(function()
+            local psmBB = player:GetPlayerStateMachineBlackboard()
+            if psmBB then
+                locoState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.Locomotion)
+                locoDetailed = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.LocomotionDetailed)
+            end
+        end)
+
+        local wName = "Holstered"
+        if weapon then
+            pcall(function()
+                local itemID = weapon:GetItemID()
+                local tdbid = ItemID.GetTDBID(itemID)
+                wName = TDBID.ToStringDEBUG(tdbid)
+            end)
+        end
+
+        local statusStr = isArmed and "ARMED" or "HOLSTERED"
+        local locoLine = string.format("[LOCOMOTION_MONITOR] State=%s | Weapon=%s | Speed=%.2fm/s (Loco:%d, Det:%d) | MoveHeading=%.2f deg | CamHeading=%.2f deg | BodyHeading=%.2f deg | dMove_Cam=%+.2f deg | dMove_Body=%+.2f deg | dCam_Body(rYaw)=%+.2f deg | CompYaw=%+.2f deg | RecoilYaw=%+.2f deg",
+            statusStr, wName, speed2D, locoState, locoDetailed,
+            moveHeading, camYaw, bodyYaw,
+            dMoveCam, dMoveBody, dCamBody,
+            cYaw or 0.0, wYaw or 0.0)
+        Log(locoLine)
+    end
+end
+
 registerForEvent("onUpdate", function(delta)
     local player = Game.GetPlayer()
     if not player then
@@ -691,6 +809,9 @@ registerForEvent("onUpdate", function(delta)
     DetachedReticle.lastSettleCPitch = cPitch
     DetachedReticle.lastSettleWYaw = wYaw
     DetachedReticle.lastSettleWPitch = wPitch
+
+    -- Locomotion heading monitor: inspect whether movement follows camera (T1) or puppet body (T2B)
+    MonitorLocomotion(player, fpp, isArmed, weapon, delta, rYaw, cYaw, wYaw)
 
     local shouldBeActive = Config.enabled and fpp and (isArmed or settling)
 
@@ -979,6 +1100,13 @@ registerForEvent("onUpdate", function(delta)
                 DetachedReticle.frameCounter, bodyYaw, rYaw, rPitch, tPitch, aPitch, fwdZ, fwdXY,
                 camYaw, camPitch, dCamYaw, dBody, predBody, cYawNow, fppOverwriteDeg, seedErr,
                 wYaw, wPitch, dRecYaw, dRecPitch, splitErrYaw, splitErrPitch)
+            if (DetachedReticle.lastMoveSpeed or 0.0) > 0.15 then
+                line = line .. string.format(" | [LOCO] spd=%.2f mH=%.2f dCam=%+.2f dBody=%+.2f",
+                    DetachedReticle.lastMoveSpeed or 0.0,
+                    DetachedReticle.lastMoveHeading or 0.0,
+                    DetachedReticle.lastDMoveCam or 0.0,
+                    DetachedReticle.lastDMoveBody or 0.0)
+            end
             Log(line)
         end
 
@@ -1634,6 +1762,12 @@ registerForEvent("onDraw", function()
             end
             if DetachedReticle.lastAppliedDrop and DetachedReticle.lastAppliedDrop > 0.0001 then
                 ImGui.Text(string.format("ADS Lever Drop: %+.1f cm", DetachedReticle.lastAppliedDrop * 100.0))
+            end
+            if (DetachedReticle.lastMoveSpeed or 0.0) > 0.15 then
+                ImGui.Text(string.format("Movement (W/Loco): Spd=%.2f m/s | Head=%.1f deg", DetachedReticle.lastMoveSpeed or 0.0, DetachedReticle.lastMoveHeading or 0.0))
+                ImGui.Text(string.format("  vs Cam: %+.2f deg | vs Body: %+.2f deg", DetachedReticle.lastDMoveCam or 0.0, DetachedReticle.lastDMoveBody or 0.0))
+            else
+                ImGui.Text("Movement: Idle / Stopped")
             end
         end
 
