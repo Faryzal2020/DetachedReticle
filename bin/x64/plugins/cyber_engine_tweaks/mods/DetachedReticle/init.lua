@@ -10,7 +10,7 @@ local Config = {
     catchUpSpeed = 22.0,          -- Responsiveness gain factor k (default: 22.0, yields ~0.7 deg lag at 20 deg/s)
     deadzone = 0.0,               -- Degrees: zero deadzone by default (turns immediately)
     maxDivergence = 65.0,         -- Degrees: maximum angular separation before pulling body
-    smoothingMode = "exponential",-- "exponential" (Option A Power-Law), "braking" (Model A), "linear", "spring", or "power"
+    smoothingMode = "exponential",-- Option A Power-Law curve (permanent; other modes kept in code for reference)
     expPower = 0.60,              -- Option A: Continuous Power-Law Exponent (1.0 = linear, 0.60 = tight sub-linear chase, default: 0.60)
     brakeThreshold = 2.0,         -- Model A: Degrees from target where deceleration begins (default: 2.0)
     brakeMaxSpeed = 360.0,        -- Model A: Max cruising speed in deg/s (default: 360.0)
@@ -29,7 +29,14 @@ local Config = {
     recoilHoriDamping = 0.70,     -- High-Strength native horizontal recoil neutralization factor (default: 0.70)
     -- ADS Lever-Arm Drop Compensation
     adsLeverArmComp = true,       -- Dynamically lower lever-arm root during ADS recoil to prevent sight occlusion
-    adsLeverArmLength = 0.35,     -- Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.35)
+    adsLeverArmLength = 0.20,     -- Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.20; LMG applies x3.5 = 0.70m)
+    weightHandlingScaling = true, -- Scale catch-up speed & curve exponent dynamically based on weapon weight & player Strength
+    dualStabilizeMax = 0.65,      -- Dual-wielding: fraction of anatomical spread stabilized towards camera gaze T1 when resting (default: 0.65)
+    -- Experimental T1-to-T2 Chase Rubber Leash
+    chaseLeashEnabled = true,     -- Experimental rubber leash pulling T2 when separation from T1 exceeds threshold
+    chaseLeashStart = 20.0,       -- Degrees: separation where rubber leash tension begins pulling T2 (default: 20.0)
+    chaseLeashMax = 60.0,         -- Degrees: maximum separation where leash is fully taut (default: 60.0)
+    chaseLeashStiffness = 0.6,    -- Tension ramp exponent (default: 0.6)
     debugLogging = false          -- Verbose telemetry logging to DetachedReticle.log
 }
 
@@ -43,6 +50,13 @@ local DetachedReticle = {
     lastAppliedDrop = 0.0,
     playerBodyStat = 3.0,
     playerStrengthFactor = 0.0,
+    currentWeapon = nil,
+    currentWeaponWeight = 6.2,
+    effectiveWeaponWeight = 6.2,
+    effectiveCatchUpSpeed = 22.0,
+    effectiveExpPower = 0.60,
+    lastAppliedSpeed = nil,
+    lastAppliedPower = nil,
     origHeadingLocked = nil,
     origSensX = nil,
     origSensY = nil,
@@ -53,6 +67,8 @@ local DetachedReticle = {
     lastLoggedWeapon = nil,
     lastLoggedADS = nil,
     restingFrames = 0,
+    offCenterTimer = 0.0,
+    offCenterLogCooldown = 0.0,
     isOverlayOpen = false,
     nativeSettingsInitAttempted = false
 }
@@ -142,6 +158,9 @@ local function LoadConfig()
     if not f then
         f = io.open("bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/config.json", "r")
     end
+    if not f then
+        f = io.open("config.json", "r")
+    end
     if f then
         local content = f:read("*a")
         f:close()
@@ -169,6 +188,12 @@ local function LoadConfig()
                 if data.recoilHoriDamping ~= nil then Config.recoilHoriDamping = tonumber(data.recoilHoriDamping) or Config.recoilHoriDamping end
                 if data.adsLeverArmComp ~= nil then Config.adsLeverArmComp = (data.adsLeverArmComp == true) end
                 if data.adsLeverArmLength ~= nil then Config.adsLeverArmLength = tonumber(data.adsLeverArmLength) or Config.adsLeverArmLength end
+                if data.weightHandlingScaling ~= nil then Config.weightHandlingScaling = (data.weightHandlingScaling == true) end
+                if data.dualStabilizeMax ~= nil then Config.dualStabilizeMax = tonumber(data.dualStabilizeMax) or Config.dualStabilizeMax end
+                if data.chaseLeashEnabled ~= nil then Config.chaseLeashEnabled = (data.chaseLeashEnabled == true) end
+                if data.chaseLeashStart ~= nil then Config.chaseLeashStart = tonumber(data.chaseLeashStart) or Config.chaseLeashStart end
+                if data.chaseLeashMax ~= nil then Config.chaseLeashMax = tonumber(data.chaseLeashMax) or Config.chaseLeashMax end
+                if data.chaseLeashStiffness ~= nil then Config.chaseLeashStiffness = tonumber(data.chaseLeashStiffness) or Config.chaseLeashStiffness end
                 if data.debugLogging ~= nil then Config.debugLogging = (data.debugLogging == true) end
             end
         end
@@ -194,6 +219,97 @@ local function SyncRecoilHorizontalParams()
     end)
 end
 
+local function UpdateWeaponErgonomics(weapon, isDual, leftWeapon)
+    local rawWeight = 6.2
+    local rightWeight = 0.0
+    local statsSys = nil
+    pcall(function() statsSys = Game.GetStatsSystem() end)
+    if weapon and statsSys then
+        pcall(function()
+            local wVal = statsSys:GetStatValue(weapon:GetEntityID(), gamedataStatType.Weight)
+            if wVal and type(wVal) == "number" and wVal > 0.05 then
+                rightWeight = wVal
+            end
+        end)
+    end
+    local leftWeight = 0.0
+    if isDual and leftWeapon and statsSys then
+        pcall(function()
+            local wVal = statsSys:GetStatValue(leftWeapon:GetEntityID(), gamedataStatType.Weight)
+            if wVal and type(wVal) == "number" and wVal > 0.05 then
+                leftWeight = wVal
+            end
+        end)
+    end
+    if isDual and (rightWeight > 0.0 or leftWeight > 0.0) then
+        local wL = (leftWeight > 0.0) and leftWeight or rightWeight
+        local wR = (rightWeight > 0.0) and rightWeight or leftWeight
+        rawWeight = ((wR + wL) / 2.0) * 1.10
+    elseif rightWeight > 0.0 then
+        rawWeight = rightWeight
+    end
+    DetachedReticle.currentWeaponWeight = rawWeight
+
+    if Config.weightHandlingScaling then
+        local s = DetachedReticle.playerStrengthFactor or 0.0
+        local wEff = rawWeight * (1.0 - 0.20 * s)
+        DetachedReticle.effectiveWeaponWeight = wEff
+
+        local deltaW = wEff - 6.2
+        local ergMult = 1.0
+        local effPower = Config.expPower
+
+        if deltaW < 0.0 then
+            -- Lighter than Assault Rifle (Handguns, SMGs): faster speed boost, crisp snappiness [0.60 .. 0.62]
+            ergMult = math.min(1.50, 1.0 - 0.13 * deltaW)
+            effPower = math.min(0.62, Config.expPower - 0.007 * deltaW)
+        else
+            -- Heavier than Assault Rifle (Shotguns, LMGs, Snipers, HMGs): strong rotational inertia, heavy flick resistance [0.48 .. 0.60]
+            ergMult = math.max(0.24, 1.0 - 0.065 * deltaW)
+            effPower = math.max(0.48, Config.expPower - 0.010 * deltaW)
+        end
+
+        local effSpeed = Config.catchUpSpeed * ergMult
+
+        DetachedReticle.effectiveCatchUpSpeed = effSpeed
+        DetachedReticle.effectiveExpPower = effPower
+    else
+        DetachedReticle.effectiveWeaponWeight = rawWeight
+        DetachedReticle.effectiveCatchUpSpeed = Config.catchUpSpeed
+        DetachedReticle.effectiveExpPower = Config.expPower
+    end
+end
+
+local function SyncSmoothing()
+    local modeInt = GetSmoothingModeInt()
+    local speed = Config.catchUpSpeed
+    local power = Config.expPower
+    if Config.weightHandlingScaling and DetachedReticle.effectiveCatchUpSpeed and DetachedReticle.effectiveExpPower then
+        speed = DetachedReticle.effectiveCatchUpSpeed
+        power = DetachedReticle.effectiveExpPower
+    end
+    DetachedReticle.lastAppliedSpeed = speed
+    DetachedReticle.lastAppliedPower = power
+    pcall(function()
+        Game.DR_SetSmoothing(speed, modeInt, Config.maxDivergence, Config.deadzone, DetachedReticle.chaseActive or false)
+        Game.DR_SetBrakeParams(Config.brakeThreshold, Config.brakeMaxSpeed)
+        Game.DR_SetExpParams(power)
+        Game.DR_SetRecoilLeashParams(Config.recoilMaxRadius, Config.recoilLeashCurve)
+        Game.DR_SetChaseLeashParams(
+            Config.chaseLeashEnabled and true or false,
+            Config.chaseLeashStart,
+            Config.chaseLeashMax,
+            Config.chaseLeashStiffness
+        )
+        Game.DR_SetRecoilHorizontalParams(
+            Config.recoilHoriStatScaling and true or false,
+            Config.recoilHoriScatter,
+            Config.recoilHoriDamping,
+            DetachedReticle.playerStrengthFactor or 0.0
+        )
+    end)
+end
+
 local function UpdatePlayerStrengthStat(player)
     if not player then return end
     local ok, val = pcall(function()
@@ -207,23 +323,15 @@ local function UpdatePlayerStrengthStat(player)
         DetachedReticle.playerBodyStat = val
         DetachedReticle.playerStrengthFactor = math.max(0.0, math.min(1.0, (val - 3.0) / 17.0))
         SyncRecoilHorizontalParams()
+        local curWea = DetachedReticle.currentWeapon
+        if curWea then
+            UpdateWeaponErgonomics(curWea, DetachedReticle.isDualWielding, DetachedReticle.leftWeapon)
+            if (DetachedReticle.lastAppliedSpeed ~= DetachedReticle.effectiveCatchUpSpeed) or
+               (DetachedReticle.lastAppliedPower ~= DetachedReticle.effectiveExpPower) then
+                SyncSmoothing()
+            end
+        end
     end
-end
-
-local function SyncSmoothing()
-    local modeInt = GetSmoothingModeInt()
-    pcall(function()
-        Game.DR_SetSmoothing(Config.catchUpSpeed, modeInt, Config.maxDivergence, Config.deadzone, DetachedReticle.chaseActive or false)
-        Game.DR_SetBrakeParams(Config.brakeThreshold, Config.brakeMaxSpeed)
-        Game.DR_SetExpParams(Config.expPower)
-        Game.DR_SetRecoilLeashParams(Config.recoilMaxRadius, Config.recoilLeashCurve)
-        Game.DR_SetRecoilHorizontalParams(
-            Config.recoilHoriStatScaling and true or false,
-            Config.recoilHoriScatter,
-            Config.recoilHoriDamping,
-            DetachedReticle.playerStrengthFactor or 0.0
-        )
-    end)
 end
 
 local function SyncCompParams()
@@ -244,12 +352,29 @@ local function SyncRecoilLeashParams()
     end)
 end
 
+local function SyncChaseLeashParams()
+    pcall(function()
+        Game.DR_SetChaseLeashParams(
+            Config.chaseLeashEnabled and true or false,
+            Config.chaseLeashStart,
+            Config.chaseLeashMax,
+            Config.chaseLeashStiffness
+        )
+    end)
+end
+
 local function SaveConfig()
-    local ok, content = pcall(json.encode, Config)
+    local ok, content = pcall(function() return json.encode(Config) end)
+    if not ok or not content then
+        ok, content = pcall(json.encode, Config)
+    end
     if ok and content then
         local f = io.open("plugins/cyber_engine_tweaks/mods/DetachedReticle/config.json", "w")
         if not f then
             f = io.open("bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/config.json", "w")
+        end
+        if not f then
+            f = io.open("config.json", "w")
         end
         if f then
             f:write(content)
@@ -339,6 +464,16 @@ local function SetupNativeSettings()
                 end
             )
 
+            ns.addSwitch(
+                "/detachedReticle/aiming",
+                "Weight & Strength Ergonomics",
+                "Dynamically scales catch-up speed and curve exponent based on weapon weight (anchored to 6.2 kg AR) and player Body/Strength",
+                Config.weightHandlingScaling, true,
+                function(val)
+                    DetachedReticle.SetWeightHandlingScaling(val)
+                end
+            )
+
             ns.addRangeFloat(
                 "/detachedReticle/aiming",
                 "Catch-up Speed",
@@ -369,45 +504,6 @@ local function SetupNativeSettings()
                 end
             )
 
-            local algoOptions = { "Braking", "Exponential", "Linear", "Spring", "Power" }
-            local currentIdx = 2
-            for i, name in ipairs(algoOptions) do
-                if name:lower() == Config.smoothingMode:lower() then
-                    currentIdx = i
-                    break
-                end
-            end
-
-            ns.addSelectorString(
-                "/detachedReticle/aiming",
-                "Catch-up Algorithm",
-                "Algorithm used to calculate the catch-up curve towards the camera reticle (Exponential = default Power-Law, Braking = Model A)",
-                algoOptions, currentIdx, 2,
-                function(idx)
-                    local selected = algoOptions[idx] or "Exponential"
-                    DetachedReticle.SetSmoothingMode(selected:lower())
-                end
-            )
-
-            ns.addRangeFloat(
-                "/detachedReticle/aiming",
-                "Braking Threshold Angle",
-                "Model A: Distance in degrees from camera gaze where deceleration begins (default: 2.0 deg)",
-                0.5, 10.0, 0.1, "%.1f deg", Config.brakeThreshold, 2.0,
-                function(val)
-                    DetachedReticle.SetBrakeThreshold(val)
-                end
-            )
-
-            ns.addRangeFloat(
-                "/detachedReticle/aiming",
-                "Max Cruise Speed",
-                "Model A: Maximum cruising angular speed in degrees per second before entering braking zone (default: 360 deg/s)",
-                60.0, 1200.0, 10.0, "%.0f deg/s", Config.brakeMaxSpeed, 360.0,
-                function(val)
-                    DetachedReticle.SetBrakeMaxSpeed(val)
-                end
-            )
 
             ns.addRangeFloat(
                 "/detachedReticle/aiming",
@@ -525,6 +621,48 @@ local function SetupNativeSettings()
                 end
             )
 
+            ns.addSubcategory("/detachedReticle/chaseLeash", "Experimental T1-to-T2 Chase Rubber Leash")
+
+            ns.addSwitch(
+                "/detachedReticle/chaseLeash",
+                "Enable Chase Rubber Leash",
+                "Progressively pulls T2 toward T1 when separation exceeds threshold, preventing heavy weapons from lagging excessively behind during fast mouse sweeps (default: On)",
+                Config.chaseLeashEnabled, true,
+                function(val)
+                    DetachedReticle.SetChaseLeashEnabled(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/chaseLeash",
+                "Leash Tension Start",
+                "Angular separation distance where leash tension begins pulling T2 (default: 20.0 deg)",
+                5.0, 45.0, 1.0, "%.1f deg", Config.chaseLeashStart, 20.0,
+                function(val)
+                    DetachedReticle.SetChaseLeashStart(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/chaseLeash",
+                "Leash Max Separation",
+                "Maximum separation distance where leash is fully taut and caps lag (default: 60.0 deg)",
+                15.0, 90.0, 1.0, "%.1f deg", Config.chaseLeashMax, 60.0,
+                function(val)
+                    DetachedReticle.SetChaseLeashMax(val)
+                end
+            )
+
+            ns.addRangeFloat(
+                "/detachedReticle/chaseLeash",
+                "Leash Stiffness",
+                "Tension ramp exponent curve (default: 0.6)",
+                0.2, 3.5, 0.1, "%.1f", Config.chaseLeashStiffness, 0.6,
+                function(val)
+                    DetachedReticle.SetChaseLeashStiffness(val)
+                end
+            )
+
             ns.addSubcategory("/detachedReticle/leverArm", "ADS Lever-Arm Sight-Line Compensation")
 
             ns.addSwitch(
@@ -540,8 +678,8 @@ local function SetupNativeSettings()
             ns.addRangeFloat(
                 "/detachedReticle/leverArm",
                 "Lever-Arm Drop Length",
-                "Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.35m)",
-                0.10, 1.00, 0.05, "%.2f m", Config.adsLeverArmLength, 0.35,
+                "Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.20m; LMG applies x3.5 = 0.70m)",
+                0.05, 1.00, 0.05, "%.2f m", Config.adsLeverArmLength, 0.20,
                 function(val)
                     DetachedReticle.SetAdsLeverArmLength(val)
                 end
@@ -559,12 +697,131 @@ registerForEvent("onInit", function()
     LoadConfig()
     SyncCompParams()
     SyncRecoilLeashParams()
+    SyncChaseLeashParams()
     SyncRecoilHorizontalParams()
     Log(string.format("Initializing Decoupled Aiming System v%s | Enabled=%s | Speed=%.1f | Deadzone=%.1f deg | MaxDiv=%.1f deg | CompSettled=%.1f | CompMoving=%.1f | CompMax=%.0f deg/s | RecoilLeash=%.1f deg (p=%.1f) | HoriScale=%s (Scatter=%.2f, Damping=%.2f)",
         DetachedReticle.version, tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.recoilMaxRadius, Config.recoilLeashCurve, tostring(Config.recoilHoriStatScaling), Config.recoilHoriScatter, Config.recoilHoriDamping))
 
     SetupNativeSettings()
 end)
+
+-- Locomotion Movement Direction Watchdog & Telemetry:
+-- Investigates what reference frame (Camera Gaze T1 vs Puppet Body T2B) governs physical movement
+-- when pressing WASD, and measures any angular divergence between movement heading, camera, and body.
+local function MonitorLocomotion(player, fpp, isArmed, weapon, dt, rYaw, cYaw, wYaw)
+    local vel = nil
+    local okVel, pv = pcall(function() return player:GetVelocity() end)
+    if okVel and pv then vel = pv end
+
+    local vx = (vel and (vel.x or vel.X)) or 0.0
+    local vy = (vel and (vel.y or vel.Y)) or 0.0
+    local vz = (vel and (vel.z or vel.Z)) or 0.0
+    local speed2D = math.sqrt(vx * vx + vy * vy)
+    local isMoving = (speed2D > 0.15)
+
+    DetachedReticle.lastSpeed2D = speed2D
+    DetachedReticle.lastMoveSpeed = speed2D
+
+    if not isMoving then
+        if DetachedReticle.wasMovingLoco then
+            DetachedReticle.wasMovingLoco = false
+            DetachedReticle.locoLogTimer = 0.0
+        end
+        return
+    end
+
+    -- Movement heading in engine coordinates (+Y fwd, +X right, positive yaw ccw/left)
+    local moveHeading = math.deg(math.atan2(-vx, vy))
+
+    -- Camera Gaze Heading (T1)
+    local camYaw = 0.0
+    local hasCam = false
+    pcall(function()
+        local cf = Game.GetCameraSystem():GetActiveCameraForward()
+        if cf then
+            local cx = cf.x or cf.X or 0.0
+            local cy = cf.y or cf.Y or 0.0
+            if math.abs(cx) > 1e-4 or math.abs(cy) > 1e-4 then
+                camYaw = math.deg(math.atan2(-cx, cy))
+                hasCam = true
+            end
+        end
+    end)
+    if not hasCam and fpp then
+        pcall(function()
+            local cf = fpp:GetWorldForward()
+            if cf then
+                camYaw = math.deg(math.atan2(-(cf.x or cf.X or 0.0), (cf.y or cf.Y or 0.0)))
+            end
+        end)
+    end
+
+    -- Puppet Body Heading (T2B)
+    local bodyYaw = 0.0
+    local okBYaw, by = pcall(function() return player:GetWorldYaw() end)
+    if okBYaw and by then
+        bodyYaw = by
+    else
+        pcall(function()
+            local pf = player:GetWorldForward()
+            if pf then
+                bodyYaw = math.deg(math.atan2(-(pf.x or pf.X or 0.0), (pf.y or pf.Y or 0.0)))
+            end
+        end)
+    end
+
+    -- Angular deltas:
+    -- dMove_Cam: angular divergence between actual movement heading and rendered camera gaze (T1)
+    -- dMove_Body: angular divergence between actual movement heading and puppet body forward (T2B)
+    -- dCam_Body: angular difference between camera gaze and body (rYaw residual)
+    local dMoveCam = normalizeDeg(moveHeading - camYaw)
+    local dMoveBody = normalizeDeg(moveHeading - bodyYaw)
+    local dCamBody = normalizeDeg(camYaw - bodyYaw)
+
+    DetachedReticle.lastMoveHeading = moveHeading
+    DetachedReticle.lastDMoveCam = dMoveCam
+    DetachedReticle.lastDMoveBody = dMoveBody
+
+    local wasMoving = DetachedReticle.wasMovingLoco or false
+    local startedMoving = isMoving and not wasMoving
+    DetachedReticle.wasMovingLoco = isMoving
+
+    DetachedReticle.locoLogTimer = (DetachedReticle.locoLogTimer or 0.0) + (dt or 0.016)
+    local periodicLog = (DetachedReticle.locoLogTimer >= 0.50)
+    local armedChanged = (isArmed ~= DetachedReticle.lastLocoArmed)
+    DetachedReticle.lastLocoArmed = isArmed
+
+    if startedMoving or periodicLog or armedChanged then
+        DetachedReticle.locoLogTimer = 0.0
+
+        local locoState = -1
+        local locoDetailed = -1
+        pcall(function()
+            local psmBB = player:GetPlayerStateMachineBlackboard()
+            if psmBB then
+                locoState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.Locomotion)
+                locoDetailed = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.LocomotionDetailed)
+            end
+        end)
+
+        local wName = "Holstered"
+        if weapon then
+            pcall(function()
+                local itemID = weapon:GetItemID()
+                local tdbid = ItemID.GetTDBID(itemID)
+                wName = TDBID.ToStringDEBUG(tdbid)
+            end)
+        end
+
+        local statusStr = isArmed and (DetachedReticle.isDualWielding and "DUAL_ARMED" or "ARMED") or "HOLSTERED"
+        local locoLine = string.format("[LOCOMOTION_MONITOR] State=%s | Weapon=%s | Speed=%.2fm/s (Loco:%d, Det:%d) | MoveHeading=%.2f deg | CamHeading=%.2f deg | BodyHeading=%.2f deg | dMove_Cam=%+.2f deg | dMove_Body=%+.2f deg | dCam_Body(rYaw)=%+.2f deg | CompYaw=%+.2f deg | RecoilYaw=%+.2f deg",
+            statusStr, wName, speed2D, locoState, locoDetailed,
+            moveHeading, camYaw, bodyYaw,
+            dMoveCam, dMoveBody, dCamBody,
+            cYaw or 0.0, wYaw or 0.0)
+        Log(locoLine)
+    end
+end
 
 registerForEvent("onUpdate", function(delta)
     local player = Game.GetPlayer()
@@ -587,7 +844,23 @@ registerForEvent("onUpdate", function(delta)
     pcall(function()
         isDual = GameObject.IsDualWielding(player)
     end)
-    local isArmed = weapon and not weapon:IsMelee() and not isDual
+    local leftWeapon = nil
+    if isDual then
+        pcall(function()
+            leftWeapon = GameObject.GetLeftActiveWeapon(player)
+        end)
+    end
+    local isArmed = (weapon and not weapon:IsMelee()) or (isDual and ((weapon and not weapon:IsMelee()) or (leftWeapon and not leftWeapon:IsMelee())))
+    DetachedReticle.isDualWielding = isDual
+    DetachedReticle.leftWeapon = leftWeapon
+    DetachedReticle.currentWeapon = weapon
+    if isArmed then
+        UpdateWeaponErgonomics(weapon, isDual, leftWeapon)
+        if (DetachedReticle.lastAppliedSpeed ~= DetachedReticle.effectiveCatchUpSpeed) or
+           (DetachedReticle.lastAppliedPower ~= DetachedReticle.effectiveExpPower) then
+            SyncSmoothing()
+        end
+    end
 
     -- Residual, compensation, and recoil settling state:
     -- Keeps decoupled camera active until compensation, recoil, and residual smoothly reach 0.0,
@@ -631,6 +904,9 @@ registerForEvent("onUpdate", function(delta)
     DetachedReticle.lastSettleCPitch = cPitch
     DetachedReticle.lastSettleWYaw = wYaw
     DetachedReticle.lastSettleWPitch = wPitch
+
+    -- Locomotion heading monitor: inspect whether movement follows camera (T1) or puppet body (T2B)
+    MonitorLocomotion(player, fpp, isArmed, weapon, delta, rYaw, cYaw, wYaw)
 
     local shouldBeActive = Config.enabled and fpp and (isArmed or settling)
 
@@ -761,13 +1037,54 @@ registerForEvent("onUpdate", function(delta)
         pcall(function() psmBB = player:GetPlayerStateMachineBlackboard() end)
         local crosshairState = -1
         local upperBodyState = -1
+        local rightWeaponState = -1
         if psmBB then
             pcall(function()
                 crosshairState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.Crosshair)
                 upperBodyState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.UpperBody)
+                rightWeaponState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.RightWeapon)
             end)
         end
         local isADS = (crosshairState == 4 or upperBodyState == 6)
+
+        -- Resolve weapon type and evolution
+        local weaponName = "Unknown"
+        local isHeavyWeapon = false
+        local isLMG = false
+        local isSmartWeapon = false
+        if weapon then
+            pcall(function()
+                local itemID = weapon:GetItemID()
+                local tdbid = ItemID.GetTDBID(itemID)
+                weaponName = TDBID.ToStringDEBUG(tdbid)
+                isHeavyWeapon = weapon:IsHeavyWeapon()
+                local wType = WeaponObject.GetWeaponType(itemID)
+                if not wType then
+                    wType = RPGManager.GetItemType(itemID)
+                end
+                if wType then
+                    local wTypeStr = tostring(wType)
+                    if wType.value == "Wea_LightMachineGun" or wTypeStr:find("Wea_LightMachineGun") or wType == gamedataItemType.Wea_LightMachineGun then
+                        isLMG = true
+                    elseif wType.value == "Wea_HeavyMachineGun" or wTypeStr:find("Wea_HeavyMachineGun") or wType == gamedataItemType.Wea_HeavyMachineGun then
+                        isHeavyWeapon = true
+                    end
+                end
+                local evo = RPGManager.GetWeaponEvolution(itemID)
+                if evo and (evo.value == "Smart" or tostring(evo) == "gamedataWeaponEvolution.Smart" or evo == gamedataWeaponEvolution.Smart) then
+                    isSmartWeapon = true
+                end
+            end)
+            if not isHeavyWeapon and weaponName and (weaponName:find("HMG") or weaponName:find("HeavyMachineGun")) then
+                isHeavyWeapon = true
+            end
+            if not isLMG and weaponName and (weaponName:find("Defender") or weaponName:find("MA70") or weaponName:find("LMG") or weaponName:find("LightMachineGun")) then
+                isLMG = true
+            end
+            if not isSmartWeapon and weaponName and (weaponName:find("Smart") or weaponName:find("smart")) then
+                isSmartWeapon = true
+            end
+        end
 
         -- Physical socket pitch angle in parent coordinate frame:
         -- Derived directly from rendered camera pitch minus the previous frame's written local pitch residual,
@@ -805,9 +1122,13 @@ registerForEvent("onUpdate", function(delta)
         -- around the shoulder pivot causes the gun body/receiver to rise up faster than the distant T3 sight line.
         -- We lower the root of the lever arm (elevate camera along world-up) by h = L_drop * sin(wPitch),
         -- keeping the gun receiver from occluding the line of sight between the camera and T3.
+        -- Default lever-arm length is 0.20m, but LMGs receive 3.5x of the setting (default 0.20 * 3.5 = 0.70m).
         local dropDist = 0.0
         if Config.adsLeverArmComp and isADS and (wPitch > 0.001) then
-            local armLen = (type(Config.adsLeverArmLength) == "number") and Config.adsLeverArmLength or 0.35
+            local armLen = (type(Config.adsLeverArmLength) == "number") and Config.adsLeverArmLength or 0.20
+            if isLMG then
+                armLen = armLen * 3.5
+            end
             dropDist = armLen * math.sin(math.rad(wPitch))
         end
 
@@ -874,47 +1195,16 @@ registerForEvent("onUpdate", function(delta)
                 DetachedReticle.frameCounter, bodyYaw, rYaw, rPitch, tPitch, aPitch, fwdZ, fwdXY,
                 camYaw, camPitch, dCamYaw, dBody, predBody, cYawNow, fppOverwriteDeg, seedErr,
                 wYaw, wPitch, dRecYaw, dRecPitch, splitErrYaw, splitErrPitch)
+            if (DetachedReticle.lastMoveSpeed or 0.0) > 0.15 then
+                line = line .. string.format(" | [LOCO] spd=%.2f mH=%.2f dCam=%+.2f dBody=%+.2f",
+                    DetachedReticle.lastMoveSpeed or 0.0,
+                    DetachedReticle.lastMoveHeading or 0.0,
+                    DetachedReticle.lastDMoveCam or 0.0,
+                    DetachedReticle.lastDMoveBody or 0.0)
+            end
             Log(line)
         end
 
-        -- 3. Resolve weapon type and evolution
-        local weaponName = "Unknown"
-        local isHeavyWeapon = false
-        local isLMG = false
-        local isSmartWeapon = false
-        if weapon then
-            pcall(function()
-                local itemID = weapon:GetItemID()
-                local tdbid = ItemID.GetTDBID(itemID)
-                weaponName = TDBID.ToStringDEBUG(tdbid)
-                isHeavyWeapon = weapon:IsHeavyWeapon()
-                local wType = WeaponObject.GetWeaponType(itemID)
-                if not wType then
-                    wType = RPGManager.GetItemType(itemID)
-                end
-                if wType then
-                    local wTypeStr = tostring(wType)
-                    if wType.value == "Wea_LightMachineGun" or wTypeStr:find("Wea_LightMachineGun") or wType == gamedataItemType.Wea_LightMachineGun then
-                        isLMG = true
-                    elseif wType.value == "Wea_HeavyMachineGun" or wTypeStr:find("Wea_HeavyMachineGun") or wType == gamedataItemType.Wea_HeavyMachineGun then
-                        isHeavyWeapon = true
-                    end
-                end
-                local evo = RPGManager.GetWeaponEvolution(itemID)
-                if evo and (evo.value == "Smart" or tostring(evo) == "gamedataWeaponEvolution.Smart" or evo == gamedataWeaponEvolution.Smart) then
-                    isSmartWeapon = true
-                end
-            end)
-            if not isHeavyWeapon and weaponName and (weaponName:find("HMG") or weaponName:find("HeavyMachineGun")) then
-                isHeavyWeapon = true
-            end
-            if not isLMG and weaponName and (weaponName:find("Defender") or weaponName:find("MA70") or weaponName:find("LMG") or weaponName:find("LightMachineGun")) then
-                isLMG = true
-            end
-            if not isSmartWeapon and weaponName and (weaponName:find("Smart") or weaponName:find("smart")) then
-                isSmartWeapon = true
-            end
-        end
 
         -- [PROBE SMART] Log smart weapon targeting parameters and UI state every 30 frames
         if isSmartWeapon then
@@ -1023,7 +1313,7 @@ registerForEvent("onUpdate", function(delta)
             stateStr = "RELOAD"
         elseif crosshairState == 7 then
             stateStr = "SPRINT"
-        elseif crosshairState == 1 or upperBodyState == 1 then
+        elseif crosshairState == 1 or upperBodyState == 1 or rightWeaponState == 6 then
             stateStr = "SAFE"
         end
 
@@ -1053,6 +1343,10 @@ registerForEvent("onUpdate", function(delta)
         local gunYaw = 0.0
         local gunPitch = 0.0
         local t2bPitch = 0.0
+        local readyWeight = 0.0
+        local maxReady = 8.5
+        local maxBlend = 12.0
+        local maxClamp = 8.5
         local fx, fy, fz = 0.0, 0.0, 0.0
         if gunFwd then
             fx = gunFwd.x or gunFwd.X or 0.0
@@ -1076,17 +1370,23 @@ registerForEvent("onUpdate", function(delta)
             diffPitch = gunPitch - t2bPitch
 
             -- Ready stance gate:
-            -- Regular guns: steady-state barrel offset is < 1.0 deg. Gate [2.5 deg, 4.0 deg], clamp +/- 2.0 deg.
-            -- Heavy weapons (HMG) & Light Machine Guns (LMG): hip-cradle offset is ~6.4-7.1 deg. Gate [8.5 deg, 12.0 deg], clamp +/- 8.5 deg.
+            -- Universal Ready Stance Gate (Solution B):
+            -- In Cyberpunk, weapons in ready hipfire (or ADS) have steady-state barrel offsets:
+            --   - Regular handguns/rifles: steady-state offset ~0.5-2.0 deg.
+            --   - Double-barrel shotguns (Testera, Igla, Palica, Satara): steady-state offset ~5.6-6.1 deg yaw.
+            --   - Heavy weapons (HMG) & LMGs: steady-state offset ~6.4-7.1 deg pitch.
             -- Smart weapons: homing targeting, bypass Tier 2B completely.
-            local useHeavyCradleGate = isHeavyWeapon or isLMG
+            -- When weapon is in ready hipfire or ADS (not SAFE, SPRINT, RELOAD, rightWeaponState != 6, and diffPitch >= -14.0 deg),
+            -- use wide gate [8.5 deg, 12.0 deg] with clamp +/- 8.5 deg so all weapon archetypes center accurately.
+            -- When safe, resting, sprint, reload, or holstered, readyWeight falls to 0.0, smoothly relaxing compensation.
+            local isReadyPosture = (not isSmartWeapon) and (stateStr == "HIP" or stateStr == "ADS") and (rightWeaponState ~= 6) and (diffPitch >= -14.0)
             local maxAngle = math.max(math.abs(diffYaw), math.abs(diffPitch))
-            local readyWeight = 0.0
-            local maxReady = useHeavyCradleGate and 8.5 or 2.5
-            local maxBlend = useHeavyCradleGate and 12.0 or 4.0
-            local maxClamp = useHeavyCradleGate and 8.5 or 2.0
+            readyWeight = 0.0
+            maxReady = 8.5
+            maxBlend = 12.0
+            maxClamp = 8.5
 
-            if not isSmartWeapon and (stateStr == "HIP" or stateStr == "ADS") then
+            if isReadyPosture then
                 if maxAngle < maxReady then
                     readyWeight = 1.0
                 elseif maxAngle < maxBlend then
@@ -1122,8 +1422,9 @@ registerForEvent("onUpdate", function(delta)
             -- Sign convention: scrX > 0 means reticle is right -> subtract trimYaw to steer gun left towards center (negative feedback)
             if isResting and isReadyStance and isArmed then
                 local dt = (type(delta) == "number" and delta > 0.0001 and delta < 0.1) and delta or 0.016
-                DetachedReticle.trimYaw = math.max(-maxClamp, math.min(maxClamp, (DetachedReticle.trimYaw or 0.0) - scrX * 0.005 * dt))
-                DetachedReticle.trimPitch = math.max(-maxClamp, math.min(maxClamp, (DetachedReticle.trimPitch or 0.0) - scrY * 0.005 * dt))
+                local trimClamp = 3.0
+                DetachedReticle.trimYaw = math.max(-trimClamp, math.min(trimClamp, (DetachedReticle.trimYaw or 0.0) - scrX * 0.005 * dt))
+                DetachedReticle.trimPitch = math.max(-trimClamp, math.min(trimClamp, (DetachedReticle.trimPitch or 0.0) - scrY * 0.005 * dt))
             end
 
             local rawTargetYaw = (diffYaw + (DetachedReticle.trimYaw or 0.0)) * readyWeight
@@ -1146,7 +1447,20 @@ registerForEvent("onUpdate", function(delta)
                 DetachedReticle.lastSettledCompTargetPitch = targetPitch
             end
 
-            if Config.activeAimOffset and isArmed and isCombatStance and (isReadyStance or isRecoiling or isSwinging or hasSettledComp) then
+            if isDual then
+                -- Dual-wielding: NO Tier 2B body compensation. Body follows T2A smoothed chase.
+                pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
+                DetachedReticle.trimYaw = 0.0
+                DetachedReticle.trimPitch = 0.0
+                DetachedReticle.lastSettledCompTargetYaw = nil
+                DetachedReticle.lastSettledCompTargetPitch = nil
+
+                -- Feed dynamic stabilization factor (readyWeight) to DetachedAimSystem for artificial T3 stabilization
+                local stabFactor = (readyWeight or 1.0) * (Config.dualStabilizeMax or 0.65)
+                if aimSys then
+                    pcall(function() aimSys:SetDualStabilizeWeight(stabFactor) end)
+                end
+            elseif Config.activeAimOffset and isArmed and isCombatStance and (isReadyStance or isRecoiling or isSwinging or hasSettledComp) then
                 pcall(function() Game.DR_SetBarrelOffset(targetYaw, targetPitch) end)
             else
                 -- While holstering, drawing, or unready: decay C smoothly to 0 via native filter
@@ -1160,6 +1474,11 @@ registerForEvent("onUpdate", function(delta)
         local weaponChanged = (weaponName ~= DetachedReticle.lastLoggedWeapon)
         local adsChanged = (isADS ~= DetachedReticle.lastLoggedADS)
         local shouldLogMonitor = weaponChanged or adsChanged or (DetachedReticle.frameCounter % 10 == 0)
+
+        if weaponChanged then
+            DetachedReticle.offCenterTimer = 0.0
+            DetachedReticle.offCenterLogCooldown = 0.0
+        end
 
         if Config.debugLogging and shouldLogMonitor and gunFwd then
             DetachedReticle.lastLoggedWeapon = weaponName
@@ -1214,11 +1533,55 @@ registerForEvent("onUpdate", function(delta)
                     scrX, scrY, diffYaw, diffPitch, cYaw, cPitch))
             end
         end
+
+        -- 6. Idle Reticle Off-Center Watchdog (Monitors & logs every 10 seconds)
+        -- Detects when:
+        -- - The gun is not on ADS (hipfire ready stance)
+        -- - The gun is not in resting position (not lowered into SAFE, SPRINT, RELOAD, or low-ready rest pose)
+        -- - The gun reticle is off center (> 30px) for a few seconds (>= 2.5s) while idle/settled (normally centers within 1s)
+        local dt = (type(delta) == "number" and delta > 0.0001 and delta < 0.2) and delta or 0.016
+        local scrDist = math.sqrt(scrX * scrX + scrY * scrY)
+        local isOffCenter = (scrDist > 30.0)
+        local isNotADS = (not isADS) and (stateStr ~= "ADS")
+        local isNotRestingPos = isArmed and (not isSmartWeapon) and (stateStr ~= "SAFE") and (crosshairState ~= 1) and (rightWeaponState ~= 6) and (stateStr ~= "SPRINT") and (stateStr ~= "RELOAD") and (diffPitch >= -14.0)
+        local isNotSwinging = (rawGapYaw < 0.50) and (rawGapPitch < 0.50) and (not isRecoiling)
+        local isOffCenterIdle = isNotADS and isNotRestingPos and isNotSwinging and isOffCenter and (gunFwd ~= nil)
+
+        if isOffCenterIdle then
+            DetachedReticle.offCenterTimer = (DetachedReticle.offCenterTimer or 0.0) + dt
+            DetachedReticle.offCenterLogCooldown = (DetachedReticle.offCenterLogCooldown or 0.0) - dt
+
+            if DetachedReticle.offCenterTimer >= 2.5 and (DetachedReticle.offCenterLogCooldown <= 0.0) then
+                DetachedReticle.offCenterLogCooldown = 10.0
+
+                local cYawNow = 0.0
+                local cPitchNow = 0.0
+                pcall(function() cYawNow = Game.DR_GetCompYaw() end)
+                pcall(function() cPitchNow = Game.DR_GetCompPitch() end)
+
+                local warnMsg = string.format("[WARN][IDLE_RETICLE_OFF_CENTER] Weapon=%s | Duration=%.1fs | ReticleScreen=(%.1f, %.1f)px (Dist:%.1fpx) | TargetErr=(dYaw:%+.2f, dPitch:%+.2f)deg | CompApplied=(C_yaw:%+.2f, C_pitch:%+.2f)deg | ReadyW=%.2f (Gate:[%.1f, %.1f] Clamp:%.1f) | Trim=(Y:%+.2f, P:%+.2f) | Stance=%s (Xhair:%d, Upper:%d, RWea:%d)",
+                    weaponName,
+                    DetachedReticle.offCenterTimer,
+                    scrX, scrY, scrDist,
+                    diffYaw, diffPitch,
+                    cYawNow, cPitchNow,
+                    DetachedReticle.lastReadyWeight or readyWeight or 0.0,
+                    maxReady or 2.5, maxBlend or 4.0, maxClamp or 2.0,
+                    DetachedReticle.trimYaw or 0.0, DetachedReticle.trimPitch or 0.0,
+                    stateStr, crosshairState, upperBodyState, rightWeaponState)
+                Log(warnMsg)
+            end
+        else
+            DetachedReticle.offCenterTimer = 0.0
+            DetachedReticle.offCenterLogCooldown = 0.0
+        end
     else
         if DetachedReticle.isActive then
             DetachedReticle.isActive = false
             pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
             DetachedReticle.restingFrames = 0
+            DetachedReticle.offCenterTimer = 0.0
+            DetachedReticle.offCenterLogCooldown = 0.0
             if DetachedReticle.chaseActive then
                 DetachedReticle.chaseActive = false
                 pcall(function() Game.DR_SetSmoothing(Config.catchUpSpeed, GetSmoothingModeInt(), Config.maxDivergence, Config.deadzone, false) end)
@@ -1334,6 +1697,15 @@ registerForEvent("onDraw", function()
             ImGui.SetTooltip("Actively offsets the character body and arms to center the gun reticle at rest.")
         end
 
+        -- Weight & Strength Ergonomics Checkbox
+        local newWeightScaling, weightScalingChanged = ImGui.Checkbox("Weight & Strength Ergonomics", Config.weightHandlingScaling)
+        if weightScalingChanged then
+            DetachedReticle.SetWeightHandlingScaling(newWeightScaling)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Dynamically scales catch-up speed and curve exponent based on weapon weight (anchored to 6.2 kg AR) and player Body/Strength.")
+        end
+
         -- Catch-Up Speed Slider
         local newSpeed, speedChanged = ImGui.SliderFloat("Catch-up Speed", Config.catchUpSpeed, 0.0, 30.0, "%.1f")
         if speedChanged then
@@ -1361,38 +1733,12 @@ registerForEvent("onDraw", function()
             ImGui.SetTooltip("Maximum angle the camera can look away from the body before dragging the body along immediately.")
         end
 
-        -- Algorithm Selector
+        -- Curve Exponent Slider (Option A Power-Law, permanent catch-up model)
         ImGui.Separator()
-        ImGui.Text("Catch-Up Algorithm:")
-        local algoList = { "braking", "exponential", "linear", "spring", "power" }
-        for _, algoName in ipairs(algoList) do
-            local isSelected = (Config.smoothingMode:lower() == algoName)
-            local label = (algoName == "braking") and "Braking (Model A)" or algoName:gsub("^%l", string.upper)
-            if ImGui.RadioButton(label, isSelected) then
-                DetachedReticle.SetSmoothingMode(algoName)
-            end
-            ImGui.SameLine()
-        end
-        ImGui.NewLine()
-
-        if Config.smoothingMode:lower() == "braking" then
-            local newBrakeThresh, threshChanged = ImGui.SliderFloat("Braking Zone", Config.brakeThreshold, 0.5, 10.0, "%.1f deg")
-            if threshChanged then DetachedReticle.SetBrakeThreshold(newBrakeThresh) end
-            if ImGui.IsItemHovered() then
-                ImGui.SetTooltip("Distance in degrees from camera gaze where deceleration begins.\nDefault: 2.0 deg")
-            end
-
-            local newBrakeMax, maxSpdChanged = ImGui.SliderFloat("Max Cruise Speed", Config.brakeMaxSpeed, 60.0, 1200.0, "%.0f deg/s")
-            if maxSpdChanged then DetachedReticle.SetBrakeMaxSpeed(newBrakeMax) end
-            if ImGui.IsItemHovered() then
-                ImGui.SetTooltip("Maximum cruising angular speed before entering braking zone.\nDefault: 360 deg/s")
-            end
-        elseif Config.smoothingMode:lower() == "exponential" then
-            local newExpPower, powerChanged = ImGui.SliderFloat("Curve Exponent (p)", Config.expPower, 0.30, 1.20, "%.2f")
-            if powerChanged then DetachedReticle.SetExpPower(newExpPower) end
-            if ImGui.IsItemHovered() then
-                ImGui.SetTooltip("Option A: Continuous Power-Law Exponent (v = k * gap^p).\n1.0 = linear exponential, 0.60 = tight sub-linear chase (reaches 20% distance at normal speed).\nNaturally settles to rest in 4 frames with ZERO artificial thresholds.\nDefault: 0.60")
-            end
+        local newExpPower, powerChanged = ImGui.SliderFloat("Curve Exponent (p)", Config.expPower, 0.30, 1.20, "%.2f")
+        if powerChanged then DetachedReticle.SetExpPower(newExpPower) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Option A: Continuous Power-Law Exponent (v = k * gap^p).\n1.0 = linear exponential, 0.60 = tight sub-linear chase (reaches 20% distance at normal speed).\nNaturally settles to rest in 4 frames with ZERO artificial thresholds.\nDefault: 0.60")
         end
 
         -- Tier 2B Gun Alignment (T2B-to-T2A) Snappiness Sliders
@@ -1467,6 +1813,34 @@ registerForEvent("onDraw", function()
             ImGui.SetTooltip("Fraction of native horizontal recoil counteracted in the opposite direction at high Body/Strength.\nDefault: 0.70")
         end
 
+        -- Experimental T1-to-T2 Chase Rubber Leash
+        ImGui.Separator()
+        ImGui.Text("Experimental T1-to-T2 Chase Rubber Leash:")
+
+        local newChaseLeash, chaseLeashChanged = ImGui.Checkbox("Enable Chase Rubber Leash", Config.chaseLeashEnabled)
+        if chaseLeashChanged then DetachedReticle.SetChaseLeashEnabled(newChaseLeash) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Applies progressive spring tension to pull T2 toward T1 when separation exceeds threshold, preventing heavy weapons from lagging excessively far behind during fast mouse sweeps.")
+        end
+
+        local newChaseStart, chaseStartChanged = ImGui.SliderFloat("Leash Tension Start", Config.chaseLeashStart, 5.0, 45.0, "%.1f deg")
+        if chaseStartChanged then DetachedReticle.SetChaseLeashStart(newChaseStart) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Angular separation distance between Camera (T1) and Gun (T2) where leash tension begins.\nDefault: 20.0 deg")
+        end
+
+        local newChaseMax, chaseMaxChanged = ImGui.SliderFloat("Leash Max Separation", Config.chaseLeashMax, 15.0, 90.0, "%.1f deg")
+        if chaseMaxChanged then DetachedReticle.SetChaseLeashMax(newChaseMax) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Maximum separation distance where the leash becomes fully taut and clamps maximum lag.\nDefault: 60.0 deg")
+        end
+
+        local newChaseStiff, chaseStiffChanged = ImGui.SliderFloat("Leash Stiffness", Config.chaseLeashStiffness, 0.2, 3.5, "%.1f")
+        if chaseStiffChanged then DetachedReticle.SetChaseLeashStiffness(newChaseStiff) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Tension ramp exponent curve.\nDefault: 0.6")
+        end
+
         -- ADS Lever-Arm Sight-Line Compensation
         ImGui.Separator()
         ImGui.Text("ADS Lever-Arm Sight-Line Compensation:")
@@ -1477,10 +1851,10 @@ registerForEvent("onDraw", function()
             ImGui.SetTooltip("Lowers the lever-arm root (elevates camera) in proportion to upward weapon recoil pitch during ADS,\npreventing the gun body from occluding the line of sight to T3.\nDefault: On")
         end
 
-        local newLeverArmLen, leverArmLenChanged = ImGui.SliderFloat("Lever-Arm Length", Config.adsLeverArmLength, 0.10, 1.00, "%.2f m")
+        local newLeverArmLen, leverArmLenChanged = ImGui.SliderFloat("Lever-Arm Length", Config.adsLeverArmLength, 0.05, 1.00, "%.2f m")
         if leverArmLenChanged then DetachedReticle.SetAdsLeverArmLength(newLeverArmLen) end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip("Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch).\nDefault: 0.35 m")
+            ImGui.SetTooltip("Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch).\nDefault: 0.20 m (LMG automatically applies 3.5x multiplier = 0.70 m).")
         end
 
         -- Debug Telemetry Checkbox
@@ -1514,8 +1888,22 @@ registerForEvent("onDraw", function()
             ImGui.Text(string.format("Tier 2B Compensation: C_yaw=%+.2f deg | C_pitch=%+.2f deg", cYaw, cPitch))
             ImGui.Text(string.format("Tier 2 Recoil Offset: W_yaw=%+.2f deg | W_pitch=%+.2f deg", wYaw, wPitch))
             ImGui.Text(string.format("Player Body/Strength: %.0f (Factor s=%.2f)", DetachedReticle.playerBodyStat or 3.0, DetachedReticle.playerStrengthFactor or 0.0))
+            if Config.weightHandlingScaling then
+                ImGui.Text(string.format("Weight Ergonomics: Gun=%.1f kg | Eff=%.1f kg | k=%.1f | p=%.2f",
+                    DetachedReticle.currentWeaponWeight or 6.2,
+                    DetachedReticle.effectiveWeaponWeight or 6.2,
+                    DetachedReticle.effectiveCatchUpSpeed or Config.catchUpSpeed,
+                    DetachedReticle.effectiveExpPower or Config.expPower
+                ))
+            end
             if DetachedReticle.lastAppliedDrop and DetachedReticle.lastAppliedDrop > 0.0001 then
                 ImGui.Text(string.format("ADS Lever Drop: %+.1f cm", DetachedReticle.lastAppliedDrop * 100.0))
+            end
+            if (DetachedReticle.lastMoveSpeed or 0.0) > 0.15 then
+                ImGui.Text(string.format("Movement (W/Loco): Spd=%.2f m/s | Head=%.1f deg", DetachedReticle.lastMoveSpeed or 0.0, DetachedReticle.lastMoveHeading or 0.0))
+                ImGui.Text(string.format("  vs Cam: %+.2f deg | vs Body: %+.2f deg", DetachedReticle.lastDMoveCam or 0.0, DetachedReticle.lastDMoveBody or 0.0))
+            else
+                ImGui.Text("Movement: Idle / Stopped")
             end
         end
 
@@ -1553,8 +1941,23 @@ end
 DetachedReticle.SetCatchUpSpeed = function(val)
     Config.catchUpSpeed = math.max(0.0, tonumber(val) or 22.0)
     SaveConfig()
+    local curWea = DetachedReticle.currentWeapon
+    if curWea then
+        UpdateWeaponErgonomics(curWea)
+    end
     SyncSmoothing()
     Log(string.format("[OPTIONS] catchUpSpeed set to: %.2f", Config.catchUpSpeed))
+end
+
+DetachedReticle.SetWeightHandlingScaling = function(val)
+    Config.weightHandlingScaling = val and true or false
+    SaveConfig()
+    local curWea = DetachedReticle.currentWeapon
+    if curWea then
+        UpdateWeaponErgonomics(curWea)
+    end
+    SyncSmoothing()
+    Log(string.format("[OPTIONS] weightHandlingScaling set to: %s", tostring(Config.weightHandlingScaling)))
 end
 
 DetachedReticle.SetDeadzone = function(val)
@@ -1600,6 +2003,10 @@ end
 DetachedReticle.SetExpPower = function(val)
     Config.expPower = math.max(0.1, math.min(1.5, tonumber(val) or 0.60))
     SaveConfig()
+    local curWea = DetachedReticle.currentWeapon
+    if curWea then
+        UpdateWeaponErgonomics(curWea)
+    end
     SyncSmoothing()
     Log(string.format("[OPTIONS] expPower set to: %.2f", Config.expPower))
 end
@@ -1652,7 +2059,7 @@ DetachedReticle.SetRecoilMaxRadius = function(val)
 end
 
 DetachedReticle.SetRecoilLeashCurve = function(val)
-    Config.recoilLeashCurve = math.max(0.2, math.min(6.0, tonumber(val) or 1.5))
+    Config.recoilLeashCurve = math.max(0.2, math.min(6.0, tonumber(val) or 0.6))
     SaveConfig()
     SyncRecoilLeashParams()
     Log(string.format("[OPTIONS] recoilLeashCurve set to: %.2f", Config.recoilLeashCurve))
@@ -1679,6 +2086,37 @@ DetachedReticle.SetRecoilHoriDamping = function(val)
     Log(string.format("[OPTIONS] recoilHoriDamping set to: %.2f", Config.recoilHoriDamping))
 end
 
+DetachedReticle.SetChaseLeashEnabled = function(val)
+    Config.chaseLeashEnabled = (val == true)
+    SaveConfig()
+    SyncChaseLeashParams()
+    Log(string.format("[OPTIONS] chaseLeashEnabled set to: %s", tostring(Config.chaseLeashEnabled)))
+end
+
+DetachedReticle.SetChaseLeashStart = function(val)
+    Config.chaseLeashStart = math.max(1.0, math.min(60.0, tonumber(val) or 20.0))
+    if Config.chaseLeashMax <= Config.chaseLeashStart then
+        Config.chaseLeashMax = Config.chaseLeashStart + 5.0
+    end
+    SaveConfig()
+    SyncChaseLeashParams()
+    Log(string.format("[OPTIONS] chaseLeashStart set to: %.1f deg", Config.chaseLeashStart))
+end
+
+DetachedReticle.SetChaseLeashMax = function(val)
+    Config.chaseLeashMax = math.max(Config.chaseLeashStart + 0.5, math.min(90.0, tonumber(val) or 60.0))
+    SaveConfig()
+    SyncChaseLeashParams()
+    Log(string.format("[OPTIONS] chaseLeashMax set to: %.1f deg", Config.chaseLeashMax))
+end
+
+DetachedReticle.SetChaseLeashStiffness = function(val)
+    Config.chaseLeashStiffness = math.max(0.2, math.min(5.0, tonumber(val) or 0.6))
+    SaveConfig()
+    SyncChaseLeashParams()
+    Log(string.format("[OPTIONS] chaseLeashStiffness set to: %.2f", Config.chaseLeashStiffness))
+end
+
 DetachedReticle.SetAdsLeverArmComp = function(val)
     Config.adsLeverArmComp = val and true or false
     SaveConfig()
@@ -1686,7 +2124,7 @@ DetachedReticle.SetAdsLeverArmComp = function(val)
 end
 
 DetachedReticle.SetAdsLeverArmLength = function(val)
-    Config.adsLeverArmLength = math.max(0.05, math.min(1.50, tonumber(val) or 0.35))
+    Config.adsLeverArmLength = math.max(0.05, math.min(1.50, tonumber(val) or 0.20))
     SaveConfig()
     Log(string.format("[OPTIONS] adsLeverArmLength set to: %.2f m", Config.adsLeverArmLength))
 end
@@ -1698,9 +2136,9 @@ DetachedReticle.SetDebugLogging = function(val)
 end
 
 DetachedReticle.GetOptions = function()
-    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | expPower=%.2f | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg | recoilMaxRadius=%.1f deg | recoilLeashCurve=%.2f | adsLeverArmComp=%s | adsLeverArmLength=%.2fm",
+    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | expPower=%.2f | weightHandlingScaling=%s | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg | recoilMaxRadius=%.1f deg | recoilLeashCurve=%.2f | adsLeverArmComp=%s | adsLeverArmLength=%.2fm",
         tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode,
-        Config.expPower, Config.brakeThreshold, Config.brakeMaxSpeed,
+        Config.expPower, tostring(Config.weightHandlingScaling), Config.brakeThreshold, Config.brakeMaxSpeed,
         Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.compMinSpeed, Config.compGapThreshold,
         Config.recoilMaxRadius, Config.recoilLeashCurve, tostring(Config.adsLeverArmComp), Config.adsLeverArmLength))
     return Config

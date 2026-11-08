@@ -5,6 +5,8 @@
   "deadzone": 0.0,
   "maxDivergence": 65.0,
   "smoothingMode": "exponential",
+  "expPower": 0.6,
+  "weightHandlingScaling": true,
   "brakeThreshold": 2.0,
   "brakeMaxSpeed": 360.0,
   "compSpeedSettled": 12.0,
@@ -12,6 +14,17 @@
   "compMaxSpeed": 240.0,
   "compMinSpeed": 6.0,
   "compGapThreshold": 3.0,
-  "debugLogging": false,
-  "expPower": 0.6
+  "recoilMaxRadius": 7.0,
+  "recoilLeashCurve": 1.5,
+  "recoilHoriStatScaling": true,
+  "recoilHoriScatter": 1.0,
+  "recoilHoriDamping": 0.7,
+  "adsLeverArmComp": true,
+  "adsLeverArmLength": 0.2,
+  "dualStabilizeMax": 0.65,
+  "chaseLeashEnabled": true,
+  "chaseLeashStart": 20.0,
+  "chaseLeashMax": 60.0,
+  "chaseLeashStiffness": 0.6,
+  "debugLogging": false
 }

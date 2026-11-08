@@ -26,6 +26,28 @@ public class DetachedAimSystem extends ScriptableSystem {
     private let m_currentCycleIndex: Int32; // Tracks current step in 1..6 cycle
     private let m_lastShotTestMode: Int32;
     private let m_lastShotTestModeName: String;
+    private let m_dualStabilizeWeight: Float;
+    private let m_leftGunForward: Vector4;
+    private let m_leftMuzzlePos: Vector4;
+    private let m_leftScreenOffset: Vector2;
+
+    public func SetDualStabilizeWeight(w: Float) -> Void {
+        this.m_dualStabilizeWeight = w;
+    }
+
+    public func GetDualStabilizeWeight() -> Float {
+        return this.m_dualStabilizeWeight;
+    }
+
+    public func SetDualAimState(leftFwd: Vector4, leftMuzPos: Vector4, leftScreenOffset: Vector2) -> Void {
+        this.m_leftGunForward = leftFwd;
+        this.m_leftMuzzlePos = leftMuzPos;
+        this.m_leftScreenOffset = leftScreenOffset;
+    }
+
+    public func GetLeftGunForward() -> Vector4 { return this.m_leftGunForward; }
+    public func GetLeftMuzzlePos() -> Vector4 { return this.m_leftMuzzlePos; }
+    public func GetLeftScreenOffset() -> Vector2 { return this.m_leftScreenOffset; }
 
     public static func GetInstance(game: GameInstance) -> ref<DetachedAimSystem> {
         return GameInstance.GetScriptableSystemsContainer(game).Get(n"DetachedReticle.DetachedAimSystem") as DetachedAimSystem;
@@ -149,6 +171,9 @@ public class DetachedAimSystem extends ScriptableSystem {
 private let m_cameraCrosshair: ref<inkCanvas>;
 
 @addField(gameuiCrosshairContainerController)
+private let m_leftCrosshair: ref<inkCanvas>;
+
+@addField(gameuiCrosshairContainerController)
 private let m_detachedTickProxy: ref<inkAnimProxy>;
 
 @addField(gameuiCrosshairContainerController)
@@ -259,8 +284,66 @@ private func InitCameraCrosshair() -> Void {
 
     this.m_rootWidget.AddChildWidget(container);
     this.m_cameraCrosshair = container;
+    this.InitLeftCrosshair();
 
     this.StartDetachedReticleTick();
+}
+
+@addMethod(gameuiCrosshairContainerController)
+private func InitLeftCrosshair() -> Void {
+    if IsDefined(this.m_leftCrosshair) || !IsDefined(this.m_rootWidget) {
+        return;
+    }
+
+    let container: ref<inkCanvas> = new inkCanvas();
+    container.SetName(n"LeftGunReticleDualWield");
+    container.SetAnchor(inkEAnchor.Centered);
+    container.SetAnchorPoint(new Vector2(0.5, 0.5));
+    container.SetSize(new Vector2(32.0, 32.0));
+    container.SetTranslation(new Vector2(0.0, 0.0));
+    container.SetVisible(false);
+
+    // 1. Dark outer diamond border (14x14, 45 deg)
+    let shadow: ref<inkRectangle> = new inkRectangle();
+    shadow.SetName(n"LeftReticleShadow");
+    shadow.SetAnchor(inkEAnchor.Centered);
+    shadow.SetAnchorPoint(new Vector2(0.5, 0.5));
+    shadow.SetSize(new Vector2(14.0, 14.0));
+    shadow.SetRotation(45.0);
+    shadow.SetTintColor(new HDRColor(0.0, 0.0, 0.0, 0.70));
+    container.AddChildWidget(shadow);
+
+    // 2. Amber/gold diamond pip (8x8, 45 deg)
+    let amberPip: ref<inkRectangle> = new inkRectangle();
+    amberPip.SetName(n"LeftReticleAmber");
+    amberPip.SetAnchor(inkEAnchor.Centered);
+    amberPip.SetAnchorPoint(new Vector2(0.5, 0.5));
+    amberPip.SetSize(new Vector2(8.0, 8.0));
+    amberPip.SetRotation(45.0);
+    amberPip.SetTintColor(new HDRColor(1.0, 0.80, 0.20, 0.90));
+    container.AddChildWidget(amberPip);
+
+    // 3. Crisp white center dot (2x2)
+    let core: ref<inkRectangle> = new inkRectangle();
+    core.SetName(n"LeftReticleCore");
+    core.SetAnchor(inkEAnchor.Centered);
+    core.SetAnchorPoint(new Vector2(0.5, 0.5));
+    core.SetSize(new Vector2(2.0, 2.0));
+    core.SetTintColor(new HDRColor(1.0, 1.0, 1.0, 1.0));
+    container.AddChildWidget(core);
+
+    // 4. Subtle left bracket marker to visually distinguish left hand
+    let leftBracket: ref<inkRectangle> = new inkRectangle();
+    leftBracket.SetName(n"LeftReticleBracket");
+    leftBracket.SetAnchor(inkEAnchor.Centered);
+    leftBracket.SetAnchorPoint(new Vector2(0.5, 0.5));
+    leftBracket.SetSize(new Vector2(2.0, 12.0));
+    leftBracket.SetTranslation(new Vector2(-10.0, 0.0));
+    leftBracket.SetTintColor(new HDRColor(1.0, 0.80, 0.20, 0.75));
+    container.AddChildWidget(leftBracket);
+
+    this.m_rootWidget.AddChildWidget(container);
+    this.m_leftCrosshair = container;
 }
 
 @addMethod(gameuiCrosshairContainerController)
@@ -304,6 +387,10 @@ private func UninitDetachedReticle() -> Void {
         this.m_rootWidget.RemoveChild(this.m_cameraCrosshair);
         this.m_cameraCrosshair = null;
     }
+    if IsDefined(this.m_leftCrosshair) && IsDefined(this.m_rootWidget) {
+        this.m_rootWidget.RemoveChild(this.m_leftCrosshair);
+        this.m_leftCrosshair = null;
+    }
 
     let activeWidget: ref<inkWidget> = this.GetActiveCrosshairWidget();
     if IsDefined(activeWidget) {
@@ -331,14 +418,13 @@ private func UpdateDetachedAim() -> Void {
     let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(player.GetGame());
     let activeWidget: ref<inkWidget> = this.GetActiveCrosshairWidget();
 
-    // Guard against dual-wielding: fall back cleanly to vanilla behavior
     if GameObject.IsDualWielding(player) {
-        if IsDefined(this.m_cameraCrosshair) { this.m_cameraCrosshair.SetVisible(false); }
-        if IsDefined(activeWidget) { activeWidget.SetTranslation(new Vector2(0.0, 0.0)); }
-        if IsDefined(aimSys) {
-            aimSys.SetAimState(new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector2(0.0, 0.0), 0.0, 0.0, 0.0, false);
-        }
+        this.UpdateDualWieldAim(player, aimSys, activeWidget);
         return;
+    } else {
+        if IsDefined(this.m_leftCrosshair) {
+            this.m_leftCrosshair.SetVisible(false);
+        }
     }
 
     let weapon: ref<WeaponObject> = GameObject.GetRightActiveWeapon(player);
@@ -563,6 +649,169 @@ private func UpdateDetachedAim() -> Void {
     }
 }
 
+@addMethod(gameuiCrosshairContainerController)
+private func UpdateDualWieldAim(player: ref<PlayerPuppet>, aimSys: ref<DetachedAimSystem>, activeWidget: ref<inkWidget>) -> Void {
+    let rightWeapon: ref<WeaponObject> = GameObject.GetRightActiveWeapon(player);
+    let leftWeapon: ref<WeaponObject> = GameObject.GetLeftActiveWeapon(player);
+
+    if !IsDefined(rightWeapon) && !IsDefined(leftWeapon) {
+        if IsDefined(this.m_cameraCrosshair) { this.m_cameraCrosshair.SetVisible(false); }
+        if IsDefined(this.m_leftCrosshair) { this.m_leftCrosshair.SetVisible(false); }
+        if IsDefined(activeWidget) { activeWidget.SetTranslation(new Vector2(0.0, 0.0)); }
+        return;
+    }
+
+    // Camera world look transform
+    let camTransform: Transform;
+    let camSys: ref<CameraSystem> = GameInstance.GetCameraSystem(player.GetGame());
+    if !IsDefined(camSys) || !camSys.GetActiveCameraWorldTransform(camTransform) {
+        return;
+    }
+
+    let camPos: Vector4 = Transform.GetPosition(camTransform);
+    let camFwd: Vector4 = Transform.GetForward(camTransform);
+    let camFwd3: Vector4 = Vector4.Normalize(camFwd);
+    if Vector4.IsZero(camFwd3) {
+        return;
+    }
+
+    // Camera diamond T1 is always fixed at screen center (0, 0)
+    if IsDefined(this.m_cameraCrosshair) {
+        this.m_cameraCrosshair.SetVisible(true);
+        this.m_cameraCrosshair.SetTranslation(new Vector2(0.0, 0.0));
+    }
+
+    // Initialize left crosshair if not created yet
+    if !IsDefined(this.m_leftCrosshair) {
+        this.InitLeftCrosshair();
+    }
+
+    let rootCanvas: ref<inkCanvas> = this.m_rootWidget;
+    if !IsDefined(rootCanvas) {
+        rootCanvas = this.GetRootWidget() as inkCanvas;
+    }
+    let rootSize: Vector2 = IsDefined(rootCanvas) ? rootCanvas.GetSize() : new Vector2(3840.0, 2160.0);
+    if rootSize.X <= 0.0 || rootSize.Y <= 0.0 {
+        rootSize = new Vector2(3840.0, 2160.0);
+    }
+
+    let sqs: ref<SpatialQueriesSystem> = GameInstance.GetSpatialQueriesSystem(player.GetGame());
+    let maxRange: Float = 100.0;
+
+    // Camera target point in 3D world (T1)
+    let camTarget: Vector4 = camPos + (camFwd3 * maxRange);
+    if IsDefined(sqs) {
+        let camTrace: TraceResult;
+        if sqs.SyncRaycastByCollisionPreset(camPos, camTarget, n"World Static", camTrace) && TraceResult.IsValid(camTrace) {
+            camTarget = new Vector4(camTrace.position.X, camTrace.position.Y, camTrace.position.Z, 1.0);
+        }
+    }
+
+    // Dynamic stabilization weight towards T1 (set by CET readyWeight * dualStabilizeMax)
+    let stabWeight: Float = 0.65;
+    if IsDefined(aimSys) {
+        stabWeight = aimSys.GetDualStabilizeWeight();
+        if stabWeight < 0.0 { stabWeight = 0.0; }
+        if stabWeight > 1.0 { stabWeight = 1.0; }
+    }
+
+    // --- Right Gun (Right T3 -> activeWidget) ---
+    let rightAimFwd: Vector4 = camFwd3;
+    let rightMuzzlePos: Vector4 = camPos;
+    let rightScreenOffset: Vector2 = new Vector2(0.0, 0.0);
+    if IsDefined(rightWeapon) {
+        let rMuzTransform: Transform = rightWeapon.GetMuzzleSlotWorldTransform();
+        let rMuzPos: Vector4 = Transform.GetPosition(rMuzTransform);
+        let rMuzFwd: Vector4 = Transform.GetForward(rMuzTransform);
+        if Vector4.IsZero(rMuzFwd) { rMuzFwd = rightWeapon.GetWorldForward(); }
+        if Vector4.IsZero(rMuzPos) { rMuzPos = rightWeapon.GetWorldPosition(); }
+        rightMuzzlePos = rMuzPos;
+        let normRMuzFwd: Vector4 = Vector4.Normalize(rMuzFwd);
+
+        // Raw physical trace target
+        let rRawTarget: Vector4 = rMuzPos + (normRMuzFwd * maxRange);
+        if IsDefined(sqs) {
+            let rTrace: TraceResult;
+            if sqs.SyncRaycastByCollisionPreset(rMuzPos, rRawTarget, n"World Static", rTrace) && TraceResult.IsValid(rTrace) {
+                rRawTarget = new Vector4(rTrace.position.X, rTrace.position.Y, rTrace.position.Z, 1.0);
+            }
+        }
+
+        // Screen projection of raw physical hit point
+        let toRTarget: Vector4 = rRawTarget - camPos;
+        let toRDir: Vector4 = Vector4.Normalize(toRTarget);
+        if Vector4.Dot(toRDir, camFwd3) > 0.05 {
+            let rProj: Vector2 = this.ProjectWorldToScreen(rRawTarget);
+            rightScreenOffset = new Vector2(rootSize.X * 0.5 * rProj.X, -rootSize.Y * 0.5 * rProj.Y);
+        }
+
+        // Artificially stabilize T3 towards T1 (camera center)
+        let stabOffsetR: Vector2 = new Vector2(rightScreenOffset.X * (1.0 - stabWeight), rightScreenOffset.Y * (1.0 - stabWeight));
+        if IsDefined(activeWidget) {
+            activeWidget.SetVisible(true);
+            activeWidget.SetTranslation(stabOffsetR);
+        }
+
+        // Converged aim direction for ballistics
+        let rConvDir: Vector4 = Vector4.Normalize(camTarget - rMuzPos);
+        rightAimFwd = Vector4.Normalize(normRMuzFwd * (1.0 - stabWeight) + rConvDir * stabWeight);
+    } else if IsDefined(activeWidget) {
+        activeWidget.SetVisible(false);
+    }
+
+    // --- Left Gun (Left T3 -> m_leftCrosshair) ---
+    let leftAimFwd: Vector4 = camFwd3;
+    let leftMuzzlePos: Vector4 = camPos;
+    let leftScreenOffset: Vector2 = new Vector2(0.0, 0.0);
+    if IsDefined(leftWeapon) {
+        let lMuzTransform: Transform = leftWeapon.GetMuzzleSlotWorldTransform();
+        let lMuzPos: Vector4 = Transform.GetPosition(lMuzTransform);
+        let lMuzFwd: Vector4 = Transform.GetForward(lMuzTransform);
+        if Vector4.IsZero(lMuzFwd) { lMuzFwd = leftWeapon.GetWorldForward(); }
+        if Vector4.IsZero(lMuzPos) { lMuzPos = leftWeapon.GetWorldPosition(); }
+        leftMuzzlePos = lMuzPos;
+        let normLMuzFwd: Vector4 = Vector4.Normalize(lMuzFwd);
+
+        // Raw physical trace target
+        let lRawTarget: Vector4 = lMuzPos + (normLMuzFwd * maxRange);
+        if IsDefined(sqs) {
+            let lTrace: TraceResult;
+            if sqs.SyncRaycastByCollisionPreset(lMuzPos, lRawTarget, n"World Static", lTrace) && TraceResult.IsValid(lTrace) {
+                lRawTarget = new Vector4(lTrace.position.X, lTrace.position.Y, lTrace.position.Z, 1.0);
+            }
+        }
+
+        // Screen projection of raw physical hit point
+        let toLTarget: Vector4 = lRawTarget - camPos;
+        let toLDir: Vector4 = Vector4.Normalize(toLTarget);
+        if Vector4.Dot(toLDir, camFwd3) > 0.05 {
+            let lProj: Vector2 = this.ProjectWorldToScreen(lRawTarget);
+            leftScreenOffset = new Vector2(rootSize.X * 0.5 * lProj.X, -rootSize.Y * 0.5 * lProj.Y);
+        }
+
+        // Artificially stabilize T3 towards T1 (camera center)
+        let stabOffsetL: Vector2 = new Vector2(leftScreenOffset.X * (1.0 - stabWeight), leftScreenOffset.Y * (1.0 - stabWeight));
+        if IsDefined(this.m_leftCrosshair) {
+            this.m_leftCrosshair.SetVisible(true);
+            this.m_leftCrosshair.SetTranslation(stabOffsetL);
+        }
+
+        // Converged aim direction for ballistics
+        let lConvDir: Vector4 = Vector4.Normalize(camTarget - lMuzPos);
+        leftAimFwd = Vector4.Normalize(normLMuzFwd * (1.0 - stabWeight) + lConvDir * stabWeight);
+    } else if IsDefined(this.m_leftCrosshair) {
+        this.m_leftCrosshair.SetVisible(false);
+    }
+
+    if IsDefined(aimSys) {
+        aimSys.SetAimState(rightAimFwd, camTarget, rightMuzzlePos, camFwd3, rightScreenOffset, 0.0, 0.0, 0.0, true);
+        aimSys.SetDualAimState(leftAimFwd, leftMuzzlePos, leftScreenOffset);
+    }
+
+    // Default shooting hook standby state set to right weapon (overridden per shot in ShootEvents.OnEnter)
+    SetMuzzleAimState(rightMuzzlePos, rightAimFwd, camFwd3, true);
+}
+
 // In ShootEvents.OnEnter, SetMuzzleAimState prepares the physical muzzle trajectory
 // before the vanilla shooting pipeline runs. PhysicalRay callsites are intercepted natively.
 @wrapMethod(ShootEvents)
@@ -570,7 +819,7 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
     let weapon: ref<WeaponObject> = this.GetWeaponObject(scriptInterface);
     let player: ref<PlayerPuppet> = scriptInterface.executionOwner as PlayerPuppet;
     let isSmartWeapon: Bool = IsDefined(weapon) && Equals(RPGManager.GetWeaponEvolution(weapon.GetItemID()), gamedataWeaponEvolution.Smart);
-    let isDecoupledActive: Bool = IsDefined(player) && !GameObject.IsDualWielding(player) && IsDefined(weapon) && !weapon.IsMelee() && !isSmartWeapon;
+    let isDecoupledActive: Bool = IsDefined(player) && IsDefined(weapon) && !weapon.IsMelee() && !isSmartWeapon;
 
     if isDecoupledActive {
         let muzzleTransform: Transform = weapon.GetMuzzleSlotWorldTransform();
@@ -591,8 +840,31 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
             camFwd = Vector4.Normalize(Transform.GetForward(camTransform));
         }
 
+        let aimFwd: Vector4 = normMuzzleFwd;
+        let isDual: Bool = GameObject.IsDualWielding(player);
+        if isDual {
+            let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(scriptInterface.GetGame());
+            let stabWeight: Float = IsDefined(aimSys) ? aimSys.GetDualStabilizeWeight() : 0.65;
+            if stabWeight > 0.001 {
+                let sqs: ref<SpatialQueriesSystem> = GameInstance.GetSpatialQueriesSystem(scriptInterface.GetGame());
+                let camPos: Vector4 = new Vector4(0.0, 0.0, 0.0, 1.0);
+                if IsDefined(camSys) && camSys.GetActiveCameraWorldTransform(camTransform) {
+                    camPos = Transform.GetPosition(camTransform);
+                }
+                let camTarget: Vector4 = camPos + (camFwd * 100.0);
+                if IsDefined(sqs) {
+                    let camTrace: TraceResult;
+                    if sqs.SyncRaycastByCollisionPreset(camPos, camTarget, n"World Static", camTrace) && TraceResult.IsValid(camTrace) {
+                        camTarget = new Vector4(camTrace.position.X, camTrace.position.Y, camTrace.position.Z, 1.0);
+                    }
+                }
+                let convDir: Vector4 = Vector4.Normalize(camTarget - muzzlePos);
+                aimFwd = Vector4.Normalize(normMuzzleFwd * (1.0 - stabWeight) + convDir * stabWeight);
+            }
+        }
+
         // Feed exact physical aim state to native C++ ShootingHook
-        SetMuzzleAimState(muzzlePos, normMuzzleFwd, camFwd, true);
+        SetMuzzleAimState(muzzlePos, aimFwd, camFwd, true);
 
         let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(scriptInterface.GetGame());
         if IsDefined(aimSys) {
