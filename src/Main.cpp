@@ -313,6 +313,53 @@ void DR_GetRecoilLeashCurve(RED4ext::IScriptable* aContext, RED4ext::CStackFrame
     if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetRecoilLeashCurve();
 }
 
+void DR_SetChaseLeashParams(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(aOut);
+    RED4EXT_UNUSED_PARAMETER(a4);
+
+    bool enabled = true;
+    float startDist = 20.0f;
+    float maxDist = 60.0f;
+    float stiffness = 0.6f;
+
+    RED4ext::GetParameter(aFrame, &enabled);
+    RED4ext::GetParameter(aFrame, &startDist);
+    RED4ext::GetParameter(aFrame, &maxDist);
+    RED4ext::GetParameter(aFrame, &stiffness);
+    aFrame->code++;
+
+    DetachedReticle::InputHook::SetChaseLeashParams(enabled, startDist, maxDist, stiffness);
+}
+
+void DR_GetChaseLeashEnabled(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<bool*>(aOut) = DetachedReticle::InputHook::GetChaseLeashEnabled();
+}
+
+void DR_GetChaseLeashStart(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetChaseLeashStart();
+}
+
+void DR_GetChaseLeashMax(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetChaseLeashMax();
+}
+
+void DR_GetChaseLeashStiffness(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetChaseLeashStiffness();
+}
+
 void DR_SetRecoilHorizontalParams(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
     RED4EXT_UNUSED_PARAMETER(aContext);
     RED4EXT_UNUSED_PARAMETER(aOut);
@@ -562,6 +609,23 @@ void PostRegisterTypes() {
 
     regGetter("DR_GetRecoilMaxRadius", &DR_GetRecoilMaxRadius);
     regGetter("DR_GetRecoilLeashCurve", &DR_GetRecoilLeashCurve);
+
+    auto funcSetChaseLeashParams = RED4ext::CGlobalFunction::Create("DR_SetChaseLeashParams", "DR_SetChaseLeashParams", &DR_SetChaseLeashParams);
+    funcSetChaseLeashParams->flags = flags;
+    funcSetChaseLeashParams->AddParam("Bool", "enabled");
+    funcSetChaseLeashParams->AddParam("Float", "startDist");
+    funcSetChaseLeashParams->AddParam("Float", "maxDist");
+    funcSetChaseLeashParams->AddParam("Float", "stiffness");
+    rtti->RegisterFunction(funcSetChaseLeashParams);
+
+    auto funcGetChaseLeashEnabled = RED4ext::CGlobalFunction::Create("DR_GetChaseLeashEnabled", "DR_GetChaseLeashEnabled", &DR_GetChaseLeashEnabled);
+    funcGetChaseLeashEnabled->flags = flags;
+    funcGetChaseLeashEnabled->SetReturnType("Bool");
+    rtti->RegisterFunction(funcGetChaseLeashEnabled);
+
+    regGetter("DR_GetChaseLeashStart", &DR_GetChaseLeashStart);
+    regGetter("DR_GetChaseLeashMax", &DR_GetChaseLeashMax);
+    regGetter("DR_GetChaseLeashStiffness", &DR_GetChaseLeashStiffness);
 
     auto funcSetRecoilHoriParams = RED4ext::CGlobalFunction::Create("DR_SetRecoilHorizontalParams", "DR_SetRecoilHorizontalParams", &DR_SetRecoilHorizontalParams);
     funcSetRecoilHoriParams->flags = flags;

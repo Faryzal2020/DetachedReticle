@@ -58,6 +58,13 @@ public:
     static float GetRecoilMaxRadius();
     static float GetRecoilLeashCurve();
 
+    // Experimental T1-to-T2 Chase Rubber Leash Parameters
+    static void SetChaseLeashParams(bool aEnabled, float aStartDist, float aMaxDist, float aStiffness);
+    static bool GetChaseLeashEnabled();
+    static float GetChaseLeashStart();
+    static float GetChaseLeashMax();
+    static float GetChaseLeashStiffness();
+
     // Tier 2 Strength-Scaled Horizontal Recoil Dynamics Parameters
     static void SetRecoilHorizontalParams(bool aStatScaling, float aScatter, float aDamping, float aStrengthFactor);
     static bool GetRecoilHoriStatScaling();
@@ -123,6 +130,12 @@ public:
     // Tier 2 Recoil Rubber Leash Parameters
     static inline float s_recoilMaxRadius{ 7.0f };   // Degrees: max recoil distance from center reticle (0 = unlimited)
     static inline float s_recoilLeashCurve{ 1.5f };  // Power-law resistance exponent as recoil approaches s_recoilMaxRadius
+
+    // Experimental T1-to-T2 Chase Rubber Leash State & Parameters
+    static inline bool s_chaseLeashEnabled{ true };
+    static inline float s_chaseLeashStart{ 20.0f };   // Degrees: distance where rubber leash tension begins pulling T2
+    static inline float s_chaseLeashMax{ 60.0f };     // Degrees: maximum separation distance where leash is fully taut
+    static inline float s_chaseLeashStiffness{ 0.6f };// Tension ramp exponent (default: 0.6)
 
     // Tier 2 Strength-Scaled Horizontal Recoil Dynamics State & Parameters
     static inline bool s_recoilHoriStatScaling{ true }; // Scale scatter/damping with player Body/Strength stat [3..20]

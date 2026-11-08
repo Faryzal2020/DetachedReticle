@@ -422,7 +422,8 @@ Post-MVP 2 research, bug diagnoses, and iteration tracking for polish and edge-c
      - Wrapped `CrosshairGameController_Smart_Rifl.OnSmartGunParams(argParams: Variant) -> Bool` and `CrosshairGameController_Smart_Rifl.OnPreIntro() -> Bool` to track native event publishing, target lock state, and cyberware link status.
      - In `DetachedReticle.reds:UpdateDetachedAim()`, recorded active controller class, widget name, and expected item TDBID crosshair record.
      - In `init.lua`, added periodic `[SMART]` telemetry logger running every 30 frames whenever a smart weapon is equipped.
-  4. **Compile Fix:** smartGunUIParameters is an IScriptable class requiring indirection (ef<...>). Fixed FromVariant<smartGunUIParameters> to FromVariant<ref<smartGunUIParameters>>.
+  4. **Compile Fix:** smartGunUIParameters is an IScriptable class requiring indirection (
+ef<...>). Fixed FromVariant<smartGunUIParameters> to FromVariant<ref<smartGunUIParameters>>.
 - status: deployed, awaiting user diagnostic probe & bisection session (Round 9 Section 3).
 
 # iteration 38
@@ -572,6 +573,85 @@ Post-MVP 2 research, bug diagnoses, and iteration tracking for polish and edge-c
   1. Equip SMG (Saratoga) and confirm speed is visibly faster than assault rifle.
   2. Equip HMG and perform rapid sweeps to verify genuine heavy barrel lag and committed swing.
   3. Confirm Assault Rifle (Copperhead) remains unchanged at k = 22.0, p = 0.60.
+
+
+# iteration 38
+- date: 2026-11-08 14:35 +0700
+- status: passed (user confirmed dual-wielding works overall; requested weight formula update & chase rubber leash)
+- previous_iteration_results:
+  1. Equipping two shotguns (`Items.Preset_Carnage_Pimp`) under Gorilla Akimbo at 14:10:30 logged `State=HOLSTERED` in `DetachedReticle.log`, with `dCam_Body(rYaw)=+0.00`, `CompYaw=+0.00`, and `RecoilYaw=+0.00`.
+  2. Cause: `GameObject.IsDualWielding(player)` was treated as an exclusion gate in `init.lua:760` and `DetachedReticle.reds:335, 573`, cleanly disabling all decoupled aim behavior and reverting to 1:1 vanilla passthrough.
+- target_goal / hypothesis:
+  1. For dual-wielding (vanilla dual pistols + Gorilla Akimbo shotguns/SMGs), body-level Tier 2B compensation cannot rotate the body to compensate for two separate arm vectors without throwing the other arm further off-axis.
+  2. By bypassing Tier 2B (`Game.DR_SetBarrelOffset(0.0, 0.0)`), the body follows purely the smoothed T2A mouse chase.
+  3. Each gun receives its own independent T3 reticle: Right T3 drives the active HUD crosshair, and Left T3 drives a dedicated HUD reticle (`m_leftCrosshair`).
+  4. Both T3 reticles and their respective muzzle trajectories artificially stabilize (yaw/pitch) towards T1 (camera center) based on dynamic settling (`readyWeight * dualStabilizeMax`), eliminating resting anatomical splay while preserving dynamic swing lag during fast mouse sweeps.
+  5. Shooting from either hand via `ShootEvents.OnEnter` routes the native physical ray through that specific weapon's muzzle along its stabilized trajectory.
+- changes_made:
+  1. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Added `dualStabilizeMax = 0.65` to `Config`.
+     - In `UpdateWeaponErgonomics(weapon, isDual, leftWeapon)`: combined weights of right and left weapons when dual-wielding (e.g. dual Carnage shotguns = ~20.0 kg), scaled by player Strength / Gorilla Arms factor.
+     - In `onUpdate`: allowed `isArmed = true` when `isDual` is true, recording `isDualWielding` and `leftWeapon`.
+     - In Tier 2B block: when `isDual`, forced `Game.DR_SetBarrelOffset(0.0, 0.0)`, reset trim/settled state, and passed dynamic stabilization factor (`readyWeight * dualStabilizeMax`) to `aimSys:SetDualStabilizeWeight(stabFactor)`.
+  2. `r6/scripts/DetachedReticle/DetachedReticle.reds`:
+     - In `DetachedAimSystem`: added dual-wield aim fields and getters/setters (`m_dualStabilizeWeight`, `m_leftGunForward`, `m_leftMuzzlePos`, `m_leftScreenOffset`).
+     - In `gameuiCrosshairContainerController`: added `m_leftCrosshair: ref<inkCanvas>`, initialized in `InitLeftCrosshair()` with amber diamond pip and left bracket marker `[`.
+     - In `UpdateDetachedAim()`: replaced dual-wield early-return gate with `UpdateDualWieldAim()`, computing independent 3D muzzle traces, screen projections, and artificial T1 stabilization for both right and left weapons.
+     - In `ShootEvents.OnEnter`: removed `!GameObject.IsDualWielding(player)` exclusion gate. Applied stabilized aim vector to `SetMuzzleAimState` so bullets travel directly to that gun's stabilized T3 point.
+- expected_outcome:
+  1. Equipping two pistols or two shotguns maintains decoupled aim active (`State=DUAL_ARMED`).
+  2. Center cyan diamond T1 stays fixed at screen center (0, 0).
+  3. Right gun HUD crosshair and left gun amber reticle track their respective physical muzzle traces.
+  4. When resting in ready stance, both reticles smoothly stabilize inward towards T1.
+  5. Firing either left or right weapon fires the physical ray from that gun's muzzle directly toward its T3 reticle.
+- test_procedure:
+  1. Launch game with Gorilla Akimbo and equip two shotguns (e.g. Carnage).
+  2. Verify that decoupled aim is active, both reticles are visible, and mouse look follows the smoothed chase.
+  3. Test mouse swings: verify both reticles splay out dynamically and settle cleanly towards center when resting.
+  4. Fire right shotgun, then fire left shotgun: verify muzzle flashes, ballistics, and recoil kick for each gun.
+
+# iteration 39
+- date: 2026-11-08 14:55 +0700
+- status: passed (user tested in-game: dual-wield ergonomics and chase rubber leash confirmed working; user settings saved as defaults: chaseLeashStart=20.0, chaseLeashMax=60.0, chaseLeashStiffness=0.6)
+- previous_iteration_results:
+  1. User tested Iteration 38 in-game: dual-wielding with two shotguns (Gorilla Akimbo) works overall!
+  2. Feedback & adjustments requested:
+     - Ergonomics weight calculation: calculate total weight of both guns divided by two + 10%.
+     - Add experimental "rubber leash" for T1 to T2 when separation exceeds a threshold so heavy weapons don't lag excessively far behind during fast mouse movements.
+- target_goal / hypothesis:
+  1. Dual-Wield Weight Ergonomics:
+     - `rawWeight = ((wR + wL) / 2.0) * 1.10`.
+     - Previously, summing both weights directly resulted in ~20 kg for two heavy shotguns (exceeding even the 18 kg HMG), creating sluggish handling. Averaging both weights plus a 10% dual-handling penalty produces ~11 kg, providing balanced dual-wield inertia.
+  2. Experimental T1-to-T2 Chase Rubber Leash:
+     - When separation angle between Camera Gaze (T1) and Gun Direction (T2) exceeds `s_chaseLeashStart` (default 20.0 deg), progressive elastic tension pulls T2 toward T1:
+       $$u = \text{clamp}\left(\frac{\text{gapMag} - L_{\text{start}}}{L_{\text{max}} - L_{\text{start}}}, 0.0, 1.0\right)$$
+       $$\Delta v_{\text{leash}} = (k \cdot 60 + 120) \times u^p$$
+     - At `s_chaseLeashMax` (default 60.0 deg), an absolute distance ceiling `step >= gapMag - s_chaseLeashMax` guarantees that no matter how heavy the weapon is or how fast the mouse moves, the gun will never lag farther behind than the leash limit.
+- changes_made:
+  1. `src/Hooks/InputHook.hpp` & `src/Hooks/InputHook.cpp`:
+     - Added static parameters `s_chaseLeashEnabled`, `s_chaseLeashStart`, `s_chaseLeashMax`, `s_chaseLeashStiffness`.
+     - In `computeChaseStep`: implemented progressive spring tension and absolute leash ceiling.
+     - Added getters and setters `SetChaseLeashParams`, `GetChaseLeashEnabled`, `GetChaseLeashStart`, `GetChaseLeashMax`, `GetChaseLeashStiffness`.
+  2. `src/Main.cpp`:
+     - Implemented `DR_SetChaseLeashParams` and getters; registered them in `OnRegisterScriptTypes` for RED4ext RTTI.
+  3. `red4ext/plugins/DetachedReticle/DetachedReticle.dll`:
+     - Recompiled Release build with MSVC and updated tracked binary.
+  4. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - In `UpdateWeaponErgonomics`: updated formula to `rawWeight = ((wR + wL) / 2.0) * 1.10`.
+     - In `Config`: added default parameters for chase leash (`chaseLeashStart=20.0`, `chaseLeashMax=60.0`, `chaseLeashStiffness=0.6`).
+     - Added `SyncChaseLeashParams()` and hooked it into `onInit`, `SyncSmoothing`, and config loading.
+     - Added ImGui overlay controls and NativeSettings subcategory for live adjustment.
+  5. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/config.json`:
+     - Updated default JSON configuration with new parameters.
+- expected_outcome:
+  1. Dual-wielding shotguns feels substantially more responsive and agile than an HMG, reflecting ~11 kg effective mass.
+  2. Fast mouse sweeps smoothly hit the rubber leash tension at 20 deg separation, accelerating the weapon to follow the camera without falling behind beyond 60 deg.
+  3. All parameters can be tuned in real-time via the CET overlay or NativeSettings menu.
+- test_procedure:
+  1. Launch game with dual shotguns or heavy weapon.
+  2. Verify that dual shotguns feel more nimble than in Iteration 38.
+  3. Perform rapid, wide mouse sweeps: observe that when separation reaches 20 deg, the reticle accelerates toward camera center and never lags beyond 60 deg.
+  4. Verify that CET overlay and NativeSettings sliders adjust the leash behavior live.
 
 # next iteration above this line
 

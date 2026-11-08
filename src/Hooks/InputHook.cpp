@@ -190,6 +190,17 @@ void InputHook::SetRecoilLeashParams(float aMaxRadius, float aLeashCurve) {
 float InputHook::GetRecoilMaxRadius() { return s_recoilMaxRadius; }
 float InputHook::GetRecoilLeashCurve() { return s_recoilLeashCurve; }
 
+void InputHook::SetChaseLeashParams(bool aEnabled, float aStartDist, float aMaxDist, float aStiffness) {
+    s_chaseLeashEnabled = aEnabled;
+    s_chaseLeashStart = std::clamp(aStartDist, 1.0f, 60.0f);
+    s_chaseLeashMax = std::clamp(aMaxDist, s_chaseLeashStart + 0.5f, 90.0f);
+    s_chaseLeashStiffness = std::clamp(aStiffness, 0.2f, 5.0f);
+}
+bool InputHook::GetChaseLeashEnabled() { return s_chaseLeashEnabled; }
+float InputHook::GetChaseLeashStart() { return s_chaseLeashStart; }
+float InputHook::GetChaseLeashMax() { return s_chaseLeashMax; }
+float InputHook::GetChaseLeashStiffness() { return s_chaseLeashStiffness; }
+
 void InputHook::SetRecoilHorizontalParams(bool aStatScaling, float aScatter, float aDamping, float aStrengthFactor) {
     s_recoilHoriStatScaling = aStatScaling;
     s_recoilHoriScatter = std::clamp(aScatter, 0.0f, 4.0f);
@@ -344,6 +355,26 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
                     float nextGap = std::pow(rem, 1.0f / oneMinusP);
                     step = gapMag - nextGap;
                 }
+            }
+        }
+
+        // Experimental T1-to-T2 Chase Rubber Leash
+        // When separation between Camera (T1) and Gun (T2) exceeds s_chaseLeashStart,
+        // progressive spring tension pulls T2 toward T1 to prevent heavy weapons from lagging
+        // excessively far behind during rapid mouse movements.
+        if (s_chaseLeashEnabled && gapMag > s_chaseLeashStart) {
+            float excess = gapMag - s_chaseLeashStart;
+            float span = std::max(s_chaseLeashMax - s_chaseLeashStart, 0.1f);
+            float u = std::clamp(excess / span, 0.0f, 1.0f);
+            float uCurve = std::pow(u, std::clamp(s_chaseLeashStiffness, 0.2f, 5.0f));
+            // Progressive spring pull: adds angular velocity proportional to tension curve
+            float pullSpeed = (s_lambda * 60.0f + 120.0f) * uCurve;
+            step += pullSpeed * aDt;
+
+            // Absolute distance ceiling: at or beyond s_chaseLeashMax, the weapon cannot lag further behind
+            float minRequiredStep = gapMag - s_chaseLeashMax;
+            if (step < minRequiredStep) {
+                step = minRequiredStep;
             }
         }
 
