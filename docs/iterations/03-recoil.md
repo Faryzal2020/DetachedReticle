@@ -567,6 +567,52 @@
   3. Verify T3 immediately returns to screen center diamond (T1).
   4. Press and hold `W` to walk forward, verify character walks dead straight towards the crosshair.
 
+# iteration 17
+- date: 2026-11-10 19:10 +0700
+- status: untested (deployed to branch `fix-baseline-yaw` in repo and `<GAME_ROOT>`, awaiting in-game test)
+- previous_iteration_results (Iteration 16 In-Game Test & Telemetry Analysis):
+  1. **Locomotion Walk Drift (TESTED — VERIFIED WORKING BY LOGS):**
+     - Telemetry (`DetachedReticle.log`, lines 90965–90973, `19:01:44`) confirmed that while walking at 1.80 m/s with `W`:
+       $$\Delta\text{Move\_Cam} = +0.02^\circ, \quad \Delta\text{Move\_Body} = +0.04^\circ, \quad C_{\text{yaw}} = 0.00^\circ$$
+     - The $+12.5^\circ$ walking drift was completely eliminated by `locoBlend` attenuating hipfire $C_{\text{yaw}}$ during locomotion.
+  2. **Reticle T3 Stuck Off-Center (TESTED — FAILED / UNRESOLVED):**
+     - User observed in-game that T3 was still visibly stuck off-center to the left.
+     - Telemetry (`DetachedReticle.log`, lines 91338–91342, `19:05:14`–`19:05:34`) confirmed steady-state lockup:
+       ```
+       [WARN][IDLE_RETICLE_OFF_CENTER] Weapon=Items.MalorianArms_Coda | Duration=22.5s | ReticleScreen=(199.7, 13.8)px | TargetErr=(dYaw:+9.19, dPitch:-0.48)deg | CompApplied=(C_yaw:+8.44, C_pitch:-0.20)deg | ReadyW=0.90 (Gate:[8.5, 12.0] Clamp:8.5) | Trim=(Y:-3.00, P:-1.55)
+       ```
+  3. **Root Cause Analysis (Skeletal Coordinate System Mismatch):**
+     - In `init.lua`, `diffYaw` was evaluated as `diffYaw = normalizeDeg(gunYaw - bodyYaw)`.
+     - In Cyberpunk 2077's first-person posture, `bodyYaw = player:GetWorldYaw()` represents the ground capsule feet collider.
+     - The upper torso skeleton has an anatomical $+7.68^\circ$ rotation relative to the feet capsule.
+     - Because the weapon is mounted to the upper torso, `gunYaw - bodyYaw` measured:
+       $$\text{diffYaw} = \text{BarrelOffset} (+1.49^\circ) + \text{TorsoStanceTwist} (+7.68^\circ) = +9.17^\circ \approx +9.19^\circ$$
+     - Because $+9.19^\circ > \text{maxReady} = 8.5^\circ$, `readyWeight` fell to `0.90`, clamping `targetYaw` at $8.5^\circ$ and driving $C_{\text{yaw}} = +8.44^\circ$.
+     - This $8.44^\circ$ over-compensation deflected the body and camera counter-rotation, projecting T3 ~200 pixels off-center to the left.
+     - Pitch did not suffer from this because it was already evaluated relative to `socketPitch = camPitch - rPitch`.
+- target_goal:
+  1. Define parent camera socket yaw `socketYaw = normalizeDeg(camYaw - rYaw)`.
+  2. Calculate `diffYaw = normalizeDeg(gunYaw - socketYaw)`, canceling out the $+7.68^\circ$ skeletal torso stance twist.
+  3. Restore `diffYaw` to the true physical barrel offset ($\approx +1.49^\circ$ for handguns), well within $\text{maxReady} = 8.5^\circ$, achieving `readyWeight = 1.00`.
+  4. Allow $C_{\text{yaw}}$ and integral screen trim (`trimYaw`) to cleanly bring T3 to center on T1.
+- verified binary & architectural basis:
+  1. `gameFPPCameraComponent` is attached to the head bone and the weapon is attached to the upper torso/arms. Measuring angles relative to `socketYaw = normalizeDeg(camYaw - rYaw)` cancels out skeletal animation rotations common to the upper torso.
+  2. Pure physical barrel offsets are small ($\approx 1.0^\circ$–$2.0^\circ$ for pistols, $\approx 5.8^\circ$ for shotguns, $\approx 6.5^\circ$ for LMG/HMG), all residing safely within the $[8.5^\circ, 12.0^\circ]$ ready stance gate.
+- changes_made:
+  1. [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - Added `socketYaw = normalizeDeg(camYaw - rYaw)` in Section 2 (lines 1183–1190).
+     - Updated Section 4 to evaluate `diffYaw = normalizeDeg(gunYaw - socketYaw)` (lines 1458–1464).
+  2. Deployed updated `init.lua` to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua` and verified SHA256 hashes match.
+- expected_outcome:
+  1. Handgun ready hipfire reports `TargetErr.dYaw ≈ +1.49°` and `ReadyW = 1.00`.
+  2. ReticleScreen converges to $(0.0, 0.0)\text{px}$ without sticking to the left.
+  3. Forward locomotion with `W` continues moving dead-straight along camera gaze.
+- test_procedure:
+  1. Launch Cyberpunk 2077 and load save.
+  2. Equip Malorian in ready hipfire at rest; inspect visual centering of T3 inside T1 center diamond.
+  3. Press and hold `W` to walk forward; verify movement follows camera crosshair without sideways drift.
+  4. Inspect `DetachedReticle.log` to confirm `TargetErr.dYaw` dropped to $\approx +1.49^\circ$ and `ReticleScreen` is centered.
+
 # next iteration above this line
 
 ### Findings Writing Rules:

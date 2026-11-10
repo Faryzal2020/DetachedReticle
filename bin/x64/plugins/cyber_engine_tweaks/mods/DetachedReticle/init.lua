@@ -1180,10 +1180,13 @@ registerForEvent("onUpdate", function(delta)
         -- Derived directly from rendered camera pitch minus the previous frame's written local pitch residual,
         -- guaranteeing the horizontal yaw axis is always aligned with true world-up even if the engine alters pitch externally.
         local socketPitch = 0.0
+        local socketYaw = 0.0
         if hasCamFwd then
             socketPitch = camPitch - (DetachedReticle.lastWrittenRPitch or 0.0)
+            socketYaw = normalizeDeg(camYaw - rYaw)
         else
             pcall(function() socketPitch = Game.DR_GetT2BPitch() end)
+            pcall(function() socketYaw = Game.DR_GetT2BYaw() end)
         end
         local pitchRad = math.rad(socketPitch)
         local fwdZ = math.sin(pitchRad)
@@ -1452,10 +1455,12 @@ registerForEvent("onUpdate", function(delta)
             end
 
             t2bPitch = socketPitch
+            local t2bYaw = socketYaw
 
-            -- Body-relative anatomical offset (fixed-point target C = O):
-            -- Eliminates the half-gain error and dynamic chase gap pollution
-            diffYaw = normalizeDeg(gunYaw - bodyYaw)
+            -- Socket-relative anatomical offset (fixed-point target C = O):
+            -- Measuring relative to the parent camera socket heading (camYaw - rYaw) and actuation pitch
+            -- eliminates skeletal torso/stance rotation contamination and dynamic chase gap pollution.
+            diffYaw = normalizeDeg(gunYaw - t2bYaw)
             diffPitch = gunPitch - t2bPitch
 
             -- Ready stance gate:
