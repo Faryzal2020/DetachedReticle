@@ -430,6 +430,67 @@ local function quatMultiply(a, b)
     )
 end
 
+-- Pillar 1: Sanitize baseline camera orientation on capture to enforce zero local yaw
+local function SanitizeBaselineRot(rawRot)
+    if not rawRot then
+        return Quaternion.new(0.0, 0.0, 0.0, 1.0)
+    end
+
+    local rawYaw = 0.0
+    local rawPitch = 0.0
+    local rawRoll = 0.0
+    local hasEuler = false
+
+    local okEuler, ea = pcall(function()
+        if rawRot.ToEulerAngles then
+            return rawRot:ToEulerAngles()
+        elseif Quaternion and Quaternion.ToEulerAngles then
+            return Quaternion.ToEulerAngles(rawRot)
+        end
+        return nil
+    end)
+
+    if okEuler and ea then
+        rawYaw = ea.yaw or ea.Yaw or 0.0
+        rawPitch = ea.pitch or ea.Pitch or 0.0
+        rawRoll = ea.roll or ea.Roll or 0.0
+        hasEuler = true
+    else
+        local qi = rawRot.i or rawRot.x or 0.0
+        local qj = rawRot.j or rawRot.y or 0.0
+        local qk = rawRot.k or rawRot.z or 0.0
+        local qr = rawRot.r or rawRot.w or 1.0
+        local siny_cosp = 2.0 * (qr * qk + qi * qj)
+        local cosy_cosp = 1.0 - 2.0 * (qj * qj + qk * qk)
+        rawYaw = math.deg(math.atan2(siny_cosp, cosy_cosp))
+        local sinp = 2.0 * (qr * qi - qj * qk)
+        if math.abs(sinp) >= 1.0 then
+            rawPitch = math.deg((sinp >= 0 and 1 or -1) * (math.pi / 2))
+        else
+            rawPitch = math.deg(math.asin(sinp))
+        end
+        local sinr_cosp = 2.0 * (qr * qj + qi * qk)
+        local cosr_cosp = 1.0 - 2.0 * (qi * qi + qj * qj)
+        rawRoll = math.deg(math.atan2(sinr_cosp, cosr_cosp))
+        hasEuler = true
+    end
+
+    if math.abs(rawYaw) > 0.05 or math.abs(rawPitch) > 2.0 or math.abs(rawRoll) > 2.0 then
+        Log(string.format("[BASELINE_SANITIZE] Deviant local camera orientation on baseline capture: raw=(yaw=%+.2f, pitch=%+.2f, roll=%+.2f) -> sanitized (yaw forced 0.0)", rawYaw, rawPitch, rawRoll))
+    end
+
+    local cleanPitch = (hasEuler and math.abs(rawPitch) <= 2.0) and rawPitch or 0.0
+    local cleanRoll = (hasEuler and math.abs(rawRoll) <= 2.0) and rawRoll or 0.0
+
+    if math.abs(cleanPitch) < 0.001 and math.abs(cleanRoll) < 0.001 then
+        return Quaternion.new(0.0, 0.0, 0.0, 1.0)
+    end
+
+    local qPitch = quatAxisAngle(1.0, 0.0, 0.0, cleanPitch)
+    local qRoll = quatAxisAngle(0.0, 1.0, 0.0, cleanRoll)
+    return quatMultiply(qPitch, qRoll)
+end
+
 local function SetupNativeSettings()
     if DetachedReticle.nativeSettingsInitAttempted then return true end
 
@@ -954,7 +1015,7 @@ registerForEvent("onUpdate", function(delta)
 
         if not DetachedReticle.chaseActive then
             DetachedReticle.chaseActive = true
-            DetachedReticle.baselineRot = localRot or Quaternion.new(0, 0, 0, 1)
+            DetachedReticle.baselineRot = SanitizeBaselineRot(localRot)
             local okPos, bPos = pcall(function() return fpp:GetLocalPosition() end)
             if okPos and bPos then
                 DetachedReticle.baselinePos = Vector4.new(bPos.x or 0.0, bPos.y or 0.0, bPos.z or 0.0, bPos.w or 1.0)
@@ -1011,6 +1072,8 @@ registerForEvent("onUpdate", function(delta)
                 DetachedReticle.lastSettledCompTargetPitch = 0.0
                 Log(string.format("Decoupled Aim RE-SEED on re-arm: camPitch=%.2f prevTPitch=%.2f", camPitch, curTPitch))
             end
+            -- Pillar 1: Sanitize baseline orientation on re-arm to eliminate any transient holster deflection
+            DetachedReticle.baselineRot = SanitizeBaselineRot(DetachedReticle.baselineRot or localRot)
         end
 
         -- Read native camera residuals (R = T - T2B = (T - A) + C - W)

@@ -491,6 +491,41 @@
   3. **Unholstered Test:** Draw the Defender LMG (large compensation $C_{\text{yaw}} \approx +6.37^\circ$). Look at the same landmark, press and hold `W` straight ahead for 3–5 seconds without moving the mouse. Inspect `dMove_Cam` and `dMove_Body`.
   4. Compare the two tests: check whether `dMove_Cam` shifts by approximately $-6.37^\circ$ when armed with the LMG.
 
+# iteration 15
+- date: 2026-11-10 13:30 +0700
+- status: untested (deployed to branch `fix-baseline-yaw` in repo and `<GAME_ROOT>`, awaiting in-game test)
+- previous_iteration_results (Iteration 14 Locomotion Telemetry Analysis & Root Cause Identification):
+  1. **Empirical Telemetry from User Logs (`DetachedReticle.log` Cluster 123, lines 5334–5397, `12:58:43`–`12:59:41`):**
+     - User experienced a persistent walking drift: pressing `W` caused the character to walk $+12.5^\circ$ to the left of the camera crosshair (`dMove_Cam = +12.51°`), while perfectly matching the puppet body forward (`dMove_Body = +0.02°`).
+     - Telemetry captured the exact genesis at `12:58:43`–`12:58:45`: during holster transition (detailed locomotion state `Det:8`), the puppet body locked at `bodyYaw = -92.90°` while the player turned the mouse from `-94.62°` to `-105.56°`, creating a $-12.66^\circ$ angular deflection between camera gaze and body.
+     - When unholster finished and `Decoupled Aim ACTIVE` triggered at `12:58:45`, `DetachedReticle.baselineRot = localRot` captured `fpp:GetLocalOrientation()` while it was deflected by $-12.66^\circ$.
+     - Simultaneously, native `s_residualYaw` reset to `0.0`. Every frame, camera orientation was evaluated as `targetRot = quatMultiply(qRel, baselineRot)`. With `rYaw = 0`, `targetRot` was held permanently twisted $-12.66^\circ$ relative to the puppet body.
+     - For 60 seconds across 60 walk events, even with weapon settled (`CompYaw = 0.00°`), every `W` press moved along puppet forward ($+12.5^\circ$ off camera gaze).
+- target_goal:
+  1. Implement **Pillar 1**: sanitize baseline camera orientation on capture to enforce zero local yaw (`yaw = 0.0`).
+  2. Guarantee that transient camera turns or body locks during holster/unholster animations (`Det:8`) cannot bake an angular bias into `baselineRot`.
+  3. Log any deviant baseline orientation capture via `[BASELINE_SANITIZE]` for empirical validation.
+- verified binary & architectural basis:
+  1. In vanilla Cyberpunk 2077 first-person mode, `gameFPPCameraComponent` (`fpp`) at neutral stance has strictly zero local yaw (`yaw = 0.0`) relative to the puppet head bone; world yaw is entirely driven by the puppet body orientation (`player:GetWorldYaw()`).
+  2. Any non-zero yaw in `fpp:GetLocalOrientation()` at capture is a transient artifact of an animation lock or prior residual.
+  3. Forcing `yaw = 0.0` while retaining subtle pitch/roll rig offsets ($\le 2.0^\circ$) ensures that `targetRot` at rest (`rYaw = 0`) aligns the camera forward vector with the puppet body forward vector, mathematically eliminating walk drift.
+- changes_made:
+  1. [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - Added `SanitizeBaselineRot(rawRot)` helper: attempts Euler conversion via `rawRot:ToEulerAngles()` (with a pure quaternion math fallback), checks for deviant angles (`|yaw| > 0.05°` or `|pitch| > 2.0°` or `|roll| > 2.0°`), logs `[BASELINE_SANITIZE]` if deviant, enforces `cleanYaw = 0.0`, preserves rig pitch/roll if within tolerance, and constructs a clean quaternion via `quatAxisAngle` and `quatMultiply`.
+     - In Section 2 initialization (`if not DetachedReticle.chaseActive`): replaced raw assignment `baselineRot = localRot or Quaternion.new(0,0,0,1)` with `baselineRot = SanitizeBaselineRot(localRot)`.
+     - In Section 2 re-arm (`elseif isArmed and not DetachedReticle.wasArmed`): ensured `baselineRot` is passed through `SanitizeBaselineRot`.
+  2. Deployed updated `init.lua` to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
+- expected_outcome:
+  1. When drawing/unholstering a weapon while simultaneously moving or panning the mouse, `SanitizeBaselineRot` detects any transient yaw offset, logs `[BASELINE_SANITIZE] Deviant local camera orientation on baseline capture: raw=(yaw=..., pitch=..., roll=...) -> sanitized (yaw forced 0.0)`, and zeroes out the local yaw.
+  2. Once settled at rest (`rYaw = 0`), the camera gaze $T_1$ is strictly parallel to puppet body forward.
+  3. When pressing `W`, the player travels straight along the camera crosshair (`dMove_Cam = 0.0°`), completely resolving the persistent $+12.5^\circ$ drift bug.
+- test_procedure:
+  1. Launch game, open CET console / Detached Reticle window with Verbose Debug Logging enabled.
+  2. **Stress Test (Unholster while panning):** Holster weapon, then unholster while vigorously sweeping the mouse left and right.
+  3. Stop mouse movement immediately after weapon appears, face a straight road or corridor, and press and hold `W` to walk forward for 3–5 seconds.
+  4. Verify visually that character walks straight towards the crosshair, without angling to the side.
+  5. Check `DetachedReticle.log` for `[BASELINE_SANITIZE]` and confirm `[LOCOMOTION_MONITOR]` reports `dCam ≈ 0.0°` (and `dCam ≈ -CompYaw` when unholstered with compensated weapons).
+
 # next iteration above this line
 
 ### Findings Writing Rules:
