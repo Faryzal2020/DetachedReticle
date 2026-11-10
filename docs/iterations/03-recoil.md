@@ -526,6 +526,47 @@
   4. Verify visually that character walks straight towards the crosshair, without angling to the side.
   5. Check `DetachedReticle.log` for `[BASELINE_SANITIZE]` and confirm `[LOCOMOTION_MONITOR]` reports `dCam ≈ 0.0°` (and `dCam ≈ -CompYaw` when unholstered with compensated weapons).
 
+# iteration 16
+- date: 2026-11-10 19:00 +0700
+- status: untested (deployed to branch `fix-baseline-yaw` in repo and `<GAME_ROOT>`, awaiting in-game test)
+- previous_iteration_results (Iteration 15 Test & Deep Root-Cause Telemetry Analysis):
+  1. User tested Iteration 15 in-game and reported that the bug was still present, noting that visually T3 (gun reticle) was not centered and appeared stuck on the left of the center diamond (T1).
+  2. Empirical Telemetry Analysis (`DetachedReticle.log`, lines 90890–90952, `18:22:20`–`18:24:49`):
+     - `fpp:GetLocalOrientation()` at `Decoupled Aim ACTIVE` entry was already `(0, 0, 0, 1)`, confirming that `baselineRot` was clean and `[BASELINE_SANITIZE]` did not trigger.
+     - However, across all tested weapons (Malorian, Dual Wielding, MilitechAnchor), telemetry revealed an exact $-9.54^\circ$ discrepancy where `dCam_Body - CompYaw = -9.54°`!
+     - In `locomotionTransitions.script:3938`, Cyberpunk's physics controller moves the character via `Vector4.RotByAngleXY(playerForward, GetInputHeading())`. When pressing `W`, the player travels along `playerForward` (`BodyHeading`).
+     - Telemetry captured the exact genesis at `18:22:28`: during sprint holster (`Det:8`), `camYaw` and `bodyYaw` diverged by $-9.54^\circ$.
+     - When `Decoupled Aim ACTIVE` activated, `ResetChase(initPitch)` reset `s_targetYaw = 0` and `s_residualYaw = 0`. Because `0x51D462` only integrates relative mouse deltas, the initial $-9.54^\circ$ divergence was never closed.
+     - Furthermore, when the mouse stopped moving to walk with `W`, DirectInput stopped sending mouse events to `0x51D462`. The native chase gap froze, locking `isSwinging = (rawGapYaw > 0.50)` permanently `true` every frame!
+     - This prevented `targetYaw` from updating, locked `isResting` to `false`, prevented integral screen trim (`trimYaw`) from ever running, and left T3 visibly stuck to the left of T1 while pressing `W` walked sideways along the skewed body heading.
+- target_goal:
+  1. Break the false `isSwinging` deadlock by tracking camera angular deltas to determine true mouse activity (`isMouseMoving`).
+  2. Ensure `isResting` is `true` when the mouse is stationary, allowing the integral screen error trim (`trimYaw`) to smoothly drive T3 to screen center.
+  3. Implement **Locomotion Straight-Walk Alignment**: in hipfire, when moving (`speed2D > 0.3 m/s`), attenuate `targetYaw` via `locoBlend` towards 0 so `BodyHeading` aligns with `CamHeading`, ensuring `W` moves 100% dead straight along camera crosshair.
+  4. Implement **Pillar 4 (Idle Auto-Realignment Watchdog)**: re-sync native pitch and clear stalled residual when mouse is stationary for $\ge 10$ frames.
+  5. Reset `lastSettledCompTargetYaw = nil` and `trimYaw = 0.0` on activation and re-arm so no stale compensation is locked in.
+- verified binary & architectural basis:
+  1. `locomotionTransitions.script:3938` confirms movement vector is rotated relative to `scriptInterface.executionOwner.GetWorldForward()`. Aligning body heading with camera gaze while moving eliminates walk drift by definition.
+  2. The native look integrator at `0x51D462` runs only upon DirectInput mouse events. Tracking camera deltas in Lua allows detecting mouse rest independently of frozen native look deltas.
+- changes_made:
+  1. [`bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`](file:///c:/Users/fary2/Documents/00_ExpressJS%20Projects/DetachedReticle/bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua):
+     - Added `isMouseMoving` detection tracking `dCamYaw` and `dCamPitch` with a 6-frame idle window.
+     - Unlocked `isSwinging = isMouseMoving and ((rawGapYaw > 0.50) or (rawGapPitch > 0.50))`.
+     - Defined `isResting = (not isRecoiling) and ((rawGapYaw < 0.10 and rawGapPitch < 0.10) or (not isMouseMoving))`.
+     - Added `locoBlend` attenuation on `targetYaw` during hipfire movement (`speed2D > 0.3 m/s`).
+     - Added Pillar 4 Idle Auto-Realignment Watchdog in Section 2 to re-sync pitch if shifted while idle.
+     - Separated `dCam_Body` and `rYaw` in `[LOCOMOTION_MONITOR]` logging.
+     - Initialized `lastSettledCompTargetYaw = nil` and `trimYaw = 0.0` on activation and re-arm.
+  2. Deployed `init.lua` to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua` and verified SHA256 hashes match.
+- expected_outcome:
+  1. When mouse is stationary, `isSwinging` is false and `isResting` is true. T3 smoothly glides to center on T1 within 1 second.
+  2. When moving forward with `W`, `locoBlend` brings body heading into alignment with camera gaze, eliminating sideways walking drift.
+- test_procedure:
+  1. Launch game with mod active.
+  2. Unholster weapon while moving or standing still.
+  3. Verify T3 immediately returns to screen center diamond (T1).
+  4. Press and hold `W` to walk forward, verify character walks dead straight towards the crosshair.
+
 # next iteration above this line
 
 ### Findings Writing Rules:

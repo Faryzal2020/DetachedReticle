@@ -875,11 +875,11 @@ local function MonitorLocomotion(player, fpp, isArmed, weapon, dt, rYaw, cYaw, w
         end
 
         local statusStr = isArmed and (DetachedReticle.isDualWielding and "DUAL_ARMED" or "ARMED") or "HOLSTERED"
-        local locoLine = string.format("[LOCOMOTION_MONITOR] State=%s | Weapon=%s | Speed=%.2fm/s (Loco:%d, Det:%d) | MoveHeading=%.2f deg | CamHeading=%.2f deg | BodyHeading=%.2f deg | dMove_Cam=%+.2f deg | dMove_Body=%+.2f deg | dCam_Body(rYaw)=%+.2f deg | CompYaw=%+.2f deg | RecoilYaw=%+.2f deg",
+        local locoLine = string.format("[LOCOMOTION_MONITOR] State=%s | Weapon=%s | Speed=%.2fm/s (Loco:%d, Det:%d) | MoveHeading=%.2f deg | CamHeading=%.2f deg | BodyHeading=%.2f deg | dMove_Cam=%+.2f deg | dMove_Body=%+.2f deg | dCam_Body=%+.2f deg | rYaw=%+.2f deg | CompYaw=%+.2f deg | RecoilYaw=%+.2f deg",
             statusStr, wName, speed2D, locoState, locoDetailed,
             moveHeading, camYaw, bodyYaw,
             dMoveCam, dMoveBody, dCamBody,
-            cYaw or 0.0, wYaw or 0.0)
+            rYaw or 0.0, cYaw or 0.0, wYaw or 0.0)
         Log(locoLine)
     end
 end
@@ -1013,6 +1013,18 @@ registerForEvent("onUpdate", function(delta)
             end
         end)
 
+        -- Track camera / mouse activity across frames to distinguish active aiming from stationary resting
+        local dCamYaw = hasCamFwd and math.abs(normalizeDeg(camYaw - (DetachedReticle.lastCamYaw or camYaw))) or 0.0
+        local dCamPitch = hasCamFwd and math.abs(camPitch - (DetachedReticle.lastCamPitch or camPitch)) or 0.0
+        DetachedReticle.lastCamYaw = hasCamFwd and camYaw or nil
+        DetachedReticle.lastCamPitch = hasCamFwd and camPitch or nil
+        if dCamYaw < 0.05 and dCamPitch < 0.05 then
+            DetachedReticle.mouseIdleFrames = (DetachedReticle.mouseIdleFrames or 0) + 1
+        else
+            DetachedReticle.mouseIdleFrames = 0
+        end
+        local isMouseMoving = (DetachedReticle.mouseIdleFrames < 6)
+
         if not DetachedReticle.chaseActive then
             DetachedReticle.chaseActive = true
             DetachedReticle.baselineRot = SanitizeBaselineRot(localRot)
@@ -1023,11 +1035,13 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.lastAppliedDrop = 0.0
             DetachedReticle.lastWrittenRot = nil
             DetachedReticle.lastWrittenRPitch = 0.0
-            DetachedReticle.lastCamYaw = nil
             DetachedReticle.lastBodyYaw = nil
             DetachedReticle.lastCYaw = nil
-            DetachedReticle.lastSettledCompTargetYaw = 0.0
-            DetachedReticle.lastSettledCompTargetPitch = 0.0
+            DetachedReticle.lastSettledCompTargetYaw = nil
+            DetachedReticle.lastSettledCompTargetPitch = nil
+            DetachedReticle.trimYaw = 0.0
+            DetachedReticle.trimPitch = 0.0
+            DetachedReticle.mouseIdleFrames = 0
 
             -- Capture baseline sensitivity and heading lock before enabling chase
             local okNatX, natX = pcall(function() return Game.DR_GetSensitivityMultX(fpp) end)
@@ -1068,12 +1082,13 @@ registerForEvent("onUpdate", function(delta)
             if math.abs(camPitch - curTPitch) > 0.5 then
                 pcall(function() Game.DR_ResetChasePitch(camPitch) end)
                 DetachedReticle.lastWrittenRPitch = 0.0
-                DetachedReticle.lastSettledCompTargetYaw = 0.0
-                DetachedReticle.lastSettledCompTargetPitch = 0.0
+                DetachedReticle.lastSettledCompTargetYaw = nil
+                DetachedReticle.lastSettledCompTargetPitch = nil
                 Log(string.format("Decoupled Aim RE-SEED on re-arm: camPitch=%.2f prevTPitch=%.2f", camPitch, curTPitch))
             end
             -- Pillar 1: Sanitize baseline orientation on re-arm to eliminate any transient holster deflection
             DetachedReticle.baselineRot = SanitizeBaselineRot(DetachedReticle.baselineRot or localRot)
+            DetachedReticle.mouseIdleFrames = 0
         end
 
         -- Read native camera residuals (R = T - T2B = (T - A) + C - W)
@@ -1083,9 +1098,21 @@ registerForEvent("onUpdate", function(delta)
         pcall(function() rPitch = Game.DR_GetResidualPitch() end)
         pcall(function() wYaw = Game.DR_GetRecoilYaw() end)
         pcall(function() wPitch = Game.DR_GetRecoilPitch() end)
+        local isRecoiling = (math.abs(wYaw) + math.abs(wPitch) > 0.02)
 
-        -- When fully settled at rest, silently re-sync native dead-reckoned pitch if external camera shifted it
-        if hasCamFwd and math.abs(rYaw) < 0.05 and math.abs(rPitch) < 0.05 and math.abs(cYaw) < 0.05 and math.abs(cPitch) < 0.05 and math.abs(wYaw) < 0.05 and math.abs(wPitch) < 0.05 then
+        -- [PILLAR 4] Idle Auto-Realignment Watchdog:
+        -- When the mouse is stationary (idle for >= 10 frames) and not recoiling:
+        -- If external camera controllers (or sprint-unholster transitions) shifted pitch or left a frozen chase gap,
+        -- silently re-sync native pitch and clear any stalled residual.
+        if hasCamFwd and not isMouseMoving and not isRecoiling and DetachedReticle.mouseIdleFrames >= 10 then
+            local curTPitch = camPitch
+            pcall(function() curTPitch = Game.DR_GetTargetPitch() end)
+            if math.abs(camPitch - curTPitch) > 0.5 then
+                pcall(function() Game.DR_ResetChasePitch(camPitch) end)
+                rYaw, rPitch = 0.0, 0.0
+                DetachedReticle.lastWrittenRPitch = 0.0
+            end
+        elseif hasCamFwd and math.abs(rYaw) < 0.05 and math.abs(rPitch) < 0.05 and math.abs(cYaw) < 0.05 and math.abs(cPitch) < 0.05 and not isRecoiling then
             local curTPitch = camPitch
             pcall(function() curTPitch = Game.DR_GetTargetPitch() end)
             if math.abs(camPitch - curTPitch) > 0.5 then
@@ -1391,8 +1418,7 @@ registerForEvent("onUpdate", function(delta)
         pcall(function() aPitch = Game.DR_GetAimPitch() end)
         local rawGapYaw = math.abs(normalizeDeg(tYaw - aYaw))
         local rawGapPitch = math.abs(tPitch - aPitch)
-        local isRecoiling = (math.abs(wYaw) + math.abs(wPitch) > 0.02)
-        local isResting = (rawGapYaw < 0.10) and (rawGapPitch < 0.10) and (not isRecoiling)
+        local isResting = (not isRecoiling) and ((rawGapYaw < 0.10 and rawGapPitch < 0.10) or (not isMouseMoving))
 
         if isResting and stateStr == "HIP" then
             DetachedReticle.restingFrames = (DetachedReticle.restingFrames or 0) + 1
@@ -1458,7 +1484,7 @@ registerForEvent("onUpdate", function(delta)
                 end
             end
             local isReadyStance = (readyWeight > 0.001)
-            local isSwinging = (rawGapYaw > 0.50) or (rawGapPitch > 0.50)
+            local isSwinging = isMouseMoving and ((rawGapYaw > 0.50) or (rawGapPitch > 0.50))
             DetachedReticle.lastReadyWeight = readyWeight
 
             -- Reset integral trim and settled compensation on weapon change;
@@ -1508,6 +1534,19 @@ registerForEvent("onUpdate", function(delta)
             elseif readyWeight >= 0.999 then
                 DetachedReticle.lastSettledCompTargetYaw = targetYaw
                 DetachedReticle.lastSettledCompTargetPitch = targetPitch
+            end
+
+            -- Locomotion Straight-Walk Alignment:
+            -- In hipfire, when player is moving (speed2D > 0.3 m/s), CP2077 physics moves along player:GetWorldForward() (bodyYaw).
+            -- If C_yaw is non-zero, bodyYaw = T2A - C_yaw, causing movement heading to drift at an angle of -C_yaw relative to camera gaze.
+            -- While moving in hipfire (not ADS), smoothly attenuate targetYaw towards 0 so body heading aligns directly with camera gaze,
+            -- ensuring that pressing 'W' walks 100% dead straight along camera crosshair.
+            if not isADS then
+                local speed2D = DetachedReticle.lastSpeed2D or 0.0
+                if speed2D > 0.3 then
+                    local locoBlend = math.max(0.0, 1.0 - math.min(1.0, (speed2D - 0.3) / 0.7))
+                    targetYaw = targetYaw * locoBlend
+                end
             end
 
             if isDual then
@@ -1607,7 +1646,7 @@ registerForEvent("onUpdate", function(delta)
         local isOffCenter = (scrDist > 30.0)
         local isNotADS = (not isADS) and (stateStr ~= "ADS")
         local isNotRestingPos = isArmed and (not isSmartWeapon) and (stateStr ~= "SAFE") and (crosshairState ~= 1) and (rightWeaponState ~= 6) and (stateStr ~= "SPRINT") and (stateStr ~= "RELOAD") and (diffPitch >= -14.0)
-        local isNotSwinging = (rawGapYaw < 0.50) and (rawGapPitch < 0.50) and (not isRecoiling)
+        local isNotSwinging = (not isSwinging) and (not isRecoiling)
         local isOffCenterIdle = isNotADS and isNotRestingPos and isNotSwinging and isOffCenter and (gunFwd ~= nil)
 
         if isOffCenterIdle then
@@ -1643,6 +1682,7 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.isActive = false
             pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
             DetachedReticle.restingFrames = 0
+            DetachedReticle.mouseIdleFrames = 0
             DetachedReticle.offCenterTimer = 0.0
             DetachedReticle.offCenterLogCooldown = 0.0
             if DetachedReticle.chaseActive then
