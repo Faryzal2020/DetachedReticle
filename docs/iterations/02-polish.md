@@ -1,4 +1,4 @@
-﻿# DetachedReticle — Bugfixes & Polish Iterations
+# DetachedReticle — Bugfixes & Polish Iterations
 
 Post-MVP 2 research, bug diagnoses, and iteration tracking for polish and edge-case resolution.
 
@@ -652,6 +652,224 @@ ef<...>). Fixed FromVariant<smartGunUIParameters> to FromVariant<ref<smartGunUIP
   2. Verify that dual shotguns feel more nimble than in Iteration 38.
   3. Perform rapid, wide mouse sweeps: observe that when separation reaches 20 deg, the reticle accelerates toward camera center and never lags beyond 60 deg.
   4. Verify that CET overlay and NativeSettings sliders adjust the leash behavior live.
+
+# iteration 42
+- date: 2026-11-11 00:30 +0700
+- status: untested
+- previous_iteration_results:
+  1. Testing sniper rifles (Overwatch / Grad with long-range scope) revealed bullets consistently miss the reticle center in ADS, landing scattered around the reticle even from a completely stationary, resting position.
+  2. In hipfire, the mod's decoupled aim projects T3 from the muzzle trace and fires bullets along the physical barrel axis.
+  3. In ADS, optical scopes (CrosshairGameController_NoWeapon) are locked to screen center (0, 0), while the weapon bore axis sits 12-18 cm lower with slight angular offsets (height-over-bore parallax). Furthermore, integral trim resets on ADS transitions in init.lua, preventing barrel alignment from converging before firing.
+- target_goal / hypothesis:
+  1. In ADS, reverse the relationship: instead of T3 representing physical barrel trajectory, the bullet should artificially converge toward where the sightline / reticle is raycast onto (the camera gaze hit point).
+  2. Exceptions: HMG ADS (hip-braced heavy weapon) and dual-wielding ADS (has its own dual stabilization model) remain unchanged.
+  3. In hipfire, decoupled aim mechanics and physical barrel ballistics remain 100% active and unmodified.
+- changes_made:
+  1. `r6/scripts/DetachedReticle/DetachedReticle.reds`:
+     - In `UpdateDetachedAim`:
+       - Detected ADS via `gamePSMUpperBodyStates.Aim` and `gamePSMCrosshairStates.Aim`.
+       - For non-HMG weapons in ADS: raycasted along camera gaze vector (`camFwd3`) against World Static and World Dynamic to find `camTarget`. Computed `convDir = Vector4.Normalize(camTarget - muzzlePos)`.
+       - When `convDir` is forward-facing (`Vector4.Dot(convDir, camFwd3) > 0.2`), set `aimFwd = convDir` and `targetPoint = camTarget`.
+       - Passed `aimFwd` to `SetMuzzleAimState` for live continuous tracking by native `ShootingHook`.
+       - Preserved physical `this.m_gunForward` in `aimSys.SetAimState` so Tier 2B body tracking in `init.lua` continues uninterrupted.
+     - In `ShootEvents.OnEnter`:
+       - Implemented the identical ADS check and camera raycast convergence for single weapons (`!isDual && isAiming && !isHMG`).
+       - Passed `aimFwd = convDir` to `SetMuzzleAimState(muzzlePos, aimFwd, camFwd, true)`.
+       - Updated `aimSys.RecordShot` to record `aimFwd` instead of `normMuzzleFwd`.
+- expected_outcome:
+  1. In ADS with Overwatch (or any scoped/iron sight weapon other than HMG), bullets hit dead-center on the target pointed to by the crosshair.
+  2. Hipfire retains 100% decoupled aim with physical barrel ballistics.
+  3. HMG ADS and dual-wielding ADS maintain their respective behaviors without regression.
+- test_procedure:
+  1. Equip Overwatch sniper rifle. Enter ADS, aim at a distinct mark on a distant wall, fire multiple shots, and verify all impacts land directly on the crosshair dot.
+  2. Test short-range, medium-range, and long-range targets in ADS to verify parallax correction.
+  3. Test hipfire to ensure decoupled reticle motion and muzzle-axis trajectories remain intact.
+  4. Test HMG in ADS to verify it does not artificially snap to camera center.
+
+# iteration 43
+- date: 2026-11-11 01:10 +0700
+- status: passed (user confirmed it works and resolves the drift issue; noted ADS recoil missing on auto/burst guns)
+- previous_iteration_results:
+  1. User playtesting of Iteration 42 confirmed that ADS sightline convergence eliminated bullet spread (Divergence=0.00 deg in ballistics telemetry records #16-#57).
+  2. However, user observed a distinct visual drift during live fire: after repeatedly firing several different guns in ADS, the ADS sight (the 3D gun model and scope optic) gradually creeps either rising or lowering after each shot.
+  3. Analysis identified two verified causes in `init.lua`:
+     - Cause 1 (`adsLeverArmComp` path-integral hysteresis): Camera local translation in `init.lua:1151-1154` added `(dDrop * fwdZ)` incrementally to `fpp:GetLocalPosition()`. Because `fwdZ = sin(pitch)` varies dynamically over time during recoil and recovery, the closed-loop path integral around a shot cycle $\oint \sin(pitch) d(dropDist) \ne 0$. This permanently accumulated non-zero vertical drift $\pm \Delta Y$ on the camera component after every shot.
+     - Cause 2 (Tier 2B skeletal animation latching): `isRecoiling` in `init.lua:1331` only tracked procedural look recoil (`wPitch > 0.02`), which returns to zero in ~0.25s. The 1st-person weapon bone recoil animation takes 0.5s-1.2s to fully settle. When `wPitch` dropped below 0.02 while holding ADS (`readyWeight >= 0.999`), `init.lua` sampled transient skeletal bone pitch and latched it into `lastSettledCompTargetPitch`, feeding artificial pitch offsets to `InputHook.cpp` and shifting puppet/camera residual pitch.
+- target_goal / hypothesis:
+  1. Fix `adsLeverArmComp`: Calculate camera translation directly as an absolute displacement from the immutable `baselinePos` captured at unholster (`targetPosY = bPos.y + dropDist * fwdZ`), never accumulating deltas onto mutable `curPos`. When recoil recovers and `dropDist = 0`, camera position is guaranteed to return to baseline with zero residual drift.
+  2. Bypass Tier 2B body offset in standard ADS: In ADS, vanilla's 1st-person animation already aligns the optic with the camera eye-line. By bypassing Tier 2B (`Game.DR_SetBarrelOffset(0.0, 0.0)`) in standard ADS (`isADS and not isHeavyWeapon`), identical to dual-wielding, we decouple ADS completely from skeletal animation noise while preserving Tier 2B for hipfire and cradle-zoomed HMGs.
+- changes_made:
+  1. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - In `adsLeverArmComp` camera transform block: replaced incremental `(curPos.y + dDrop * fwdZ)` accumulation with absolute displacement from `baselinePos`:
+       `targetPosY = (bPos.y or 0.0) + (dropDist * fwdZ)`, `targetPosZ = (bPos.z or 0.0) + (dropDist * fwdXY)`.
+     - In Tier 2B compensation block:
+       - Defined `isCombatStance = (not isSmartWeapon) and (stateStr == "HIP" or (isHeavyWeapon and stateStr == "ADS"))`.
+       - Restricted `lastSettledCompTargetYaw / Pitch` latching and integral screen trim to `isCombatStance`.
+       - Added explicit bypass branch `elseif isADS and not isHeavyWeapon then`, setting `Game.DR_SetBarrelOffset(0.0, 0.0)` and clearing settled compensation targets.
+- expected_outcome:
+  1. Firing repeatedly in ADS with any weapon (Overwatch, SOR-22, Malorian, etc.) results in the scope and gun model returning to the exact initial screen position with zero vertical creep (no gradual rising or lowering).
+  2. Hipfire retains 100% decoupled aim and Tier 2B anatomical compensation.
+  3. Transitions between HIP and ADS smoothly blend offsets without popping or persistent offset corruption.
+  4. HMG retaining `isHeavyWeapon` continues to receive cradle-zoom Tier 2B compensation.
+- test_procedure:
+  1. Equip Overwatch or SOR-22.
+  2. Enter ADS, note the exact pixel alignment of the reticle/scope relative to a distant background landmark.
+  3. Fire 5-10 consecutive rounds, pausing between shots for recoil to finish.
+  4. Verify the scope and weapon model return to the exact same resting position after every shot with zero rising or lowering.
+  5. Test hipfire to ensure decoupled reticle motion and Tier 2B compensation remain intact.
+
+# iteration 44
+- date: 2026-11-11 01:40 +0700
+- status: untested
+- previous_iteration_results:
+  1. User tested Iteration 43 in-game and confirmed: "okay it actually works, and resolves the issues" (the sight creep / vertical rising and lowering across repeated shots is completely resolved).
+  2. However, user noticed a gameplay issue introduced in Iteration 42: in ADS, weapons no longer exhibit simulated recoil for auto/burst guns because T3 was pinned to screen center (0, 0).
+  3. User clarified design intent: T3 was never intended to be static; in ADS, auto/burst weapons (assault rifles, SMGs, LMGs, pistols, revolvers, shotguns) must realistically retain dynamic T3 reticle recoil kick, while precision rifles and sniper rifles maintain camera sightline convergence to hit where the scope reticle is aimed.
+- target_goal / hypothesis:
+  1. Restrict ADS camera sightline convergence (`aimFwd = convDir`, `targetPoint = camTarget`) strictly to Precision Rifles (`Wea_PrecisionRifle`) and Sniper Rifles (`Wea_SniperRifle`).
+  2. For all other weapons (auto/burst guns, handguns, shotguns, LMGs) in ADS:
+     - Compute `targetPoint` from physical `this.m_gunForward` so T3 dynamically kicks, climbs, and vibrates on screen with weapon recoil.
+     - Fire bullets along physical muzzle forward (`normMuzzleFwd`) straight towards the dynamic T3 target point, restoring realistic ADS recoil handling.
+- changes_made:
+  1. `r6/scripts/DetachedReticle/DetachedReticle.reds`:
+     - In `UpdateDetachedAim`:
+       - Evaluated `let isPrecisionOrSniper: Bool = Equals(wType, gamedataItemType.Wea_PrecisionRifle) || Equals(wType, gamedataItemType.Wea_SniperRifle)`.
+       - Gated camera sightline convergence behind `isAiming && isPrecisionOrSniper && !isHMG`.
+       - Auto/burst and other weapons in ADS fall into the physical barrel raycast branch, projecting dynamic `screenOffset` from `this.m_gunForward`.
+     - In `ShootEvents.OnEnter`:
+       - Evaluated `isPrecisionOrSniper` and gated `aimFwd = convDir` strictly for precision and sniper rifles in ADS.
+       - Auto/burst and other weapons keep `aimFwd = normMuzzleFwd`, directing bullets straight to the kicked T3 impact point.
+- expected_outcome:
+  1. Precision Rifles (SOR-22, Achilles) and Sniper Rifles (Overwatch, Grad, Nekomata) retain pinpoint accuracy in ADS, hitting the scope crosshair center.
+  2. Auto/burst weapons (Copperhead, Ajax, Saratoga, Defender, etc.) realistically kick and climb during ADS fire, with T3 kicking on screen and bullets landing on the climbing T3 reticle.
+  3. No vertical baseline drift occurs across shots (Iteration 43 baseline fix remains 100% active).
+- test_procedure:
+  1. Equip an assault rifle or SMG (Copperhead / Saratoga). Enter ADS, fire a burst or full auto: verify T3 reticle kicks and climbs on screen, and bullets hit where T3 climbs.
+  2. Equip Overwatch or SOR-22. Enter ADS, aim at a distant mark: verify the single shot hits dead center on the scope crosshair without spread.
+  3. Fire multiple shots with both weapon types to confirm neither suffers from baseline sight creep after recoil settles.
+
+# iteration 45
+- date: 2026-11-11 02:45 +0700
+- status: failed
+- previous_iteration_results:
+  1. User confirmed Iteration 43 solved the vertical sight creep across shots in ADS.
+  2. In Iteration 44, simulated recoil was restored to auto/burst weapons in ADS while keeping precision and sniper rifles converged to optic center.
+  3. User observed slow swaying motion in ADS while holding the camera motionless and asked to disable breathing sway. Telemetry logs empirically confirmed this idle motion corresponds to CDPR's 1st-person weapon breathing sway (~6s cycle).
+  4. User explicitly requested: "implementing both wouldn't tell us which one works, make both of them toggleable so i can test each."
+- target_goal / hypothesis:
+  1. Implement two independent, live-toggleable options (in config, CET ImGui overlay, NativeSettings UI, and redscript):
+     - Toggle 1 (`disableProceduralSway`): Tests Hypothesis A (engine procedural weapon sway). Dynamically adds `Multiplier = 0.0` modifiers for `SwaySideMaximumAngleDistance`, `SwaySideMinimumAngleDistance`, `SwayCenterMaximumAngleOffset`, and `Sway` via `StatsSystem.AddModifier/RemoveModifier` to weapon and player entities.
+     - Toggle 2 (`adsIdleStabilize`): Tests Hypothesis B (viewmodel skeletal breathing animation). When resting in ADS without mouse movement (`AbsF(yawLag) < 0.60 && AbsF(pitchLag) < 0.60 && !isRecoiling && timeSinceShot > 0.35`), stabilizes T3 and the initial shot to `camTarget`, holding the reticle rock-solid at center, while releasing immediately on shot firing (`isRecoiling` / recoil recovery window) or mouse movement to retain 100% of simulated recoil kick and pan tracking weight.
+- changes_made:
+  1. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/config.json`:
+     - Added `"disableProceduralSway": false` and `"adsIdleStabilize": false`.
+  2. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Initialized `Config.disableProceduralSway` and `Config.adsIdleStabilize` (default: `false`).
+     - Added serialization in `LoadConfig()` and `SaveConfig()`.
+     - In `SetupNativeSettings()`: added subcategory `ADS Sway & Stabilization` with two switches.
+     - In `onDraw()`: added ImGui checkboxes with descriptive tooltips under `ADS Sway & Stabilization`.
+     - Added `DetachedReticle.SetDisableProceduralSway(val)` and `DetachedReticle.SetAdsIdleStabilize(val)`.
+     - In `onUpdate`: passed `isRecoiling`, `Config.disableProceduralSway`, and `Config.adsIdleStabilize` to `aimSys` every frame.
+     - Updated `GetOptions()` log string.
+  3. `r6/scripts/DetachedReticle/DetachedReticle.reds`:
+     - In `DetachedAimSystem`:
+       - Added fields: `m_disableProceduralSway`, `m_adsIdleStabilize`, `m_isRecoiling`, `m_lastShotEngineTime`, `m_swayWeaponMods`, `m_swayPlayerMods`, `m_swayWeaponOwner`, `m_swayPlayerOwner`, `m_swayWeaponId`, `m_hasSwayApplied`.
+       - Implemented `ApplySwayModifiers`, `RemoveSwayModifiers`, `OnWeaponUnequipped`, and toggle getters/setters.
+       - In `RecordShot`: recorded `m_lastShotEngineTime`.
+     - In `UpdateDetachedAim`:
+       - Managed procedural sway modifiers on weapon equip/unequip/change.
+       - Computed `yawLagDeg` and `pitchLagDeg` before raycast.
+       - Evaluated `isRestingADS`: when active and resting in ADS with auto/burst weapons, stabilized `targetPoint` to `camTarget`, locking T3 still at optic center; broke stabilization immediately when firing or panning.
+     - In `ShootEvents.OnEnter`:
+       - Converged initial resting ADS shots to `camTarget` when `adsIdleStabilize` is active.
+       - Recorded `aimSys.SetLastShotEngineTime(curEngineTime)`.
+       - Allowed rapid/auto follow-up shots to follow physical `normMuzzleFwd` to preserve recoil climb.
+- failure_analysis:
+  - Redscript compilation failed with `[NO_MATCHING_OVERLOAD] arguments passed to 'OperatorNotEqual' do not match any of the overloads: 1st argument: expected 'EntityID', given 'Bool' at DetachedReticle.reds:47:12`.
+  - Cause: In redscript, primitive `Bool` does not have an `!=` or `==` operator overload (`if this.m_disableProceduralSway != enable`).
+
+# iteration 46
+- date: 2026-11-11 18:55 +0700
+- status: passed
+- previous_iteration_results:
+  - Iteration 45 redscript compilation failed due to `this.m_disableProceduralSway != enable` at line 47.
+- target_goal / hypothesis:
+  - Fix the boolean inequality check in `SetDisableProceduralSway` by directly assigning `this.m_disableProceduralSway = enable` and checking `if !enable && this.m_hasSwayApplied`.
+  - Clean up redundant scoped re-declarations of `let aimSys: ref<DetachedAimSystem>` in `ShootEvents.OnEnter` to ensure clean compilation.
+- changes_made:
+  1. `r6/scripts/DetachedReticle/DetachedReticle.reds`:
+     - In `DetachedAimSystem.SetDisableProceduralSway`: removed boolean `!=` operator, assigning `enable` directly and cleaning modifiers if `!enable && this.m_hasSwayApplied`.
+     - In `ShootEvents.OnEnter`: scoped single `let aimSys: ref<DetachedAimSystem> = DetachedAimSystem.GetInstance(...)` at top of `if isDecoupledActive` block, eliminating duplicate sub-block declarations.
+  2. `docs/research/noted-issues.md`:
+     - Documented redscript language restriction: primitive `Bool` has no `!=` / `==` operator overloads.
+- expected_outcome:
+  - Redscript compiles cleanly with zero errors in `r6/logs/redscript_rCURRENT.log`.
+  - Both toggles functional as described in Iteration 45.
+- test_procedure:
+  - Deploy `r6/scripts/DetachedReticle/DetachedReticle.reds`.
+  - Launch game and verify `r6/logs/redscript_rCURRENT.log` reports `Compilation complete` and `Output successfully saved`.
+  - Proceed with Iteration 45 test matrix.
+- test_results:
+  1. Redscript compiled cleanly with zero errors upon game launch.
+  2. User verified in-game:
+     - Breathing sway in ADS is completely eliminated without needing to disable procedural stats (`disableProceduralSway = false`).
+     - Weapons that previously had accuracy issues in ADS now fire consistently, landing near and slightly below the reticle as expected from physical barrel ballistics.
+     - Resting ADS reticle stabilization successfully holds T3 rock-solid at optic center while resting, and breaks dynamically into simulated recoil upon firing.
+
+# iteration 47
+- date: 2026-11-11 19:40 +0700
+- status: untested
+- previous_iteration_results:
+  1. User verified in Iteration 46 that resting ADS reticle stabilization works well and eliminates breathing drift while holding ADS still, and weapons with accuracy issues now fire near/below the reticle.
+  2. User reported two remaining issues:
+     - The `disableProceduralSway` option toggle does not enable/disable anything in-game.
+     - In ADS, auto/burst weapons have vertical recoil climb but lack random horizontal recoil push (should be half of the intensity of hipfiring horizontal spread).
+- target_goal / hypothesis:
+  1. Fix `disableProceduralSway`:
+     - Root cause: In Iteration 45/46, modifiers were applied using `StatsSystem.AddModifier` with `Multiplier = 0.0` to `weapon.GetEntityID()` and `player.GetEntityID()`. In REDengine, weapon item stats live on `weapon.GetItemData().GetStatsObjectID()` and `Cast<StatsObjectID>(weapon.GetItemID())`. Furthermore, `PlayerWeaponHandlingModifiers` continually manages additive and multiplier modifiers on weapon entities during stamina changes, so `Multiplier = 0.0` does not override additive stats.
+     - Solution: Use `StatsSystem.ForceModifier` across all 10 sway stat types (`SwaySideMaximumAngleDistance`, `SwaySideMinimumAngleDistance`, `SwayCenterMaximumAngleOffset`, `SwaySideTopAngleLimit`, `SwaySideBottomAngleLimit`, `Sway`, `SwayCurvatureMaximumFactor`, `SwayCurvatureMinimumFactor`, `SwayInitialOffsetRandomFactor`, `SwayStartBlendTime`) applied directly to `itemData.GetStatsObjectID()`, `weapon.GetItemID()`, `weapon.GetEntityID()`, and `player.GetEntityID()`. When toggled off or unequipped, clean up via `StatsSystem.UnforceStat`. Bridge status logging to CET via `aimSys:GetSwayStatusLog()`.
+  2. Implement ADS horizontal recoil push (half intensity of hipfire):
+     - Root cause: In vanilla 1st-person ADS, the weapon and arms are rigidly locked to the First Person Camera component. When `InputHook` applies native recoil yaw to body heading (`outYaw`) and counter-rotates the camera by `-s_recoilYaw` (`s_residualYaw`), the arms rotate with the camera, producing ~0° relative horizontal deflection in camera space. Furthermore, CDPR's ADS firing animation only animates vertical pitch kick with 0 horizontal displacement. Thus, ADS weapons had vertical climb but zero horizontal recoil kick or spread.
+     - Solution:
+       - Declare `DR_GetRecoilYaw()` and `DR_GetRecoilPitch()` in `NativeBridge.reds` to query native horizontal recoil deflection directly in script.
+       - Add `adsRecoilHoriMult` (default: `0.5`, half intensity) in config and Native Settings slider [0.0..1.0].
+       - In `UpdateDetachedAim`: during non-resting ADS rapid/auto fire (`isAiming && !isHMG && !isPrecisionOrSniper && !isRestingADS`), deflect `effGunFwd = Vector4.Normalize(this.m_gunForward + camRight * TanF(Deg2Rad(DR_GetRecoilYaw() * adsRecoilHoriMult)))`. The projected reticle kicks left/right dynamically.
+       - In `ShootEvents.OnEnter`: deflect bullet trajectory along the exact same vector `aimFwd = Vector4.Normalize(normMuzzleFwd + camRight * TanF(Deg2Rad(DR_GetRecoilYaw() * adsRecoilHoriMult)))`. Bullets land precisely where the kicking reticle points.
+- changes_made:
+  1. `r6/scripts/DetachedReticle/NativeBridge.reds`:
+     - Declared `public native func DR_GetRecoilYaw() -> Float;` and `public native func DR_GetRecoilPitch() -> Float;`.
+  2. `r6/scripts/DetachedReticle/DetachedReticle.reds`:
+     - In `DetachedAimSystem`:
+       - Added fields: `m_adsRecoilHoriMult`, `m_swayItemOwner`, `m_swayItemIdOwner`, `m_hasItemOwner`, `m_swayStatusLog`.
+       - Added getters and setters: `SetAdsRecoilHoriMult`, `GetAdsRecoilHoriMult` (defaults to 0.5), `GetSwayStatusLog`, `ClearSwayStatusLog`.
+       - In `ApplySwayModifiers`: converted to `StatsSystem.ForceModifier` across all 10 sway stat types on `ItemData`, `ItemID`, `Weapon`, and `Player` object IDs.
+       - In `RemoveSwayModifiers`: converted to `StatsSystem.UnforceStat` across all 10 sway stat types for all owners.
+     - In `UpdateDetachedAim`:
+       - In non-resting ADS fire (`isAiming && !isHMG && !isPrecisionOrSniper && !isRestingADS`), computed `effGunFwd = Vector4.Normalize(this.m_gunForward + camRight * TanF(Deg2Rad(DR_GetRecoilYaw() * adsRecoilHoriMult)))`.
+       - Used `effGunFwd` for raycasting `targetPoint` and updating `aimSys.SetAimState`.
+     - In `ShootEvents.OnEnter`:
+       - Added horizontal recoil deflection branch: `aimFwd = Vector4.Normalize(normMuzzleFwd + camRight * TanF(Deg2Rad(DR_GetRecoilYaw() * adsRecoilHoriMult)))` for auto/burst weapons in ADS during recoil.
+  3. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/config.json`:
+     - Added `"adsRecoilHoriMult": 0.5`.
+  4. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Initialized `Config.adsRecoilHoriMult = 0.5` with config serialization.
+     - In `SetupNativeSettings()`: added `ADS Horizontal Recoil Multiplier` slider under `ADS Sway & Stabilization` (range 0.0 to 1.0, step 0.05, default 0.5).
+     - Added `DetachedReticle.SetAdsRecoilHoriMult(val)`.
+     - In `onUpdate`: synced `Config.adsRecoilHoriMult` to `aimSys` and polled `GetSwayStatusLog()` to print stat modifier updates to `DetachedReticle.log`.
+     - Updated `GetOptions()` log string with `adsRecoilHoriMult`.
+  5. `docs/research/noted-issues.md`:
+     - Documented weapon item stat object IDs and `StatsSystem.ForceModifier` requirement.
+     - Documented ADS First Person Camera parenting locking out horizontal recoil animation.
+- expected_outcome:
+  - Toggling `disableProceduralSway` in-game forces/unforces weapon sway stats to 0.0, observable in `DetachedReticle.log` and in weapon idle behavior.
+  - In ADS, rapid or automatic fire with non-sniper weapons produces dynamic alternating horizontal recoil kicks on both the reticle (T3) and bullet impacts at half the intensity of hipfire horizontal scatter.
+  - Resting ADS remains stabilized at optical center, and sniper/precision rifles continue to converge smoothly to the center crosshair.
+- test_procedure:
+  - Deploy modified files to `E:\Cyberpunk 2077`.
+  - Launch game, check `r6/logs/redscript_rCURRENT.log` for clean compilation.
+  - Test `disableProceduralSway` toggle on/off: verify log output `[SWAY_STATS] Applied ForceModifier...` and `[SWAY_STATS] Unforced all sway stats...`.
+  - Test ADS automatic fire with assault rifles (e.g. Copperhead, Ajax) and SMGs: verify visible alternating horizontal recoil kick on the reticle and bullet impact cluster at 50% hipfire spread.
+  - Test slider `adsRecoilHoriMult` (0.0 = purely vertical, 0.5 = half intensity, 1.0 = full hipfire intensity).
 
 # next iteration above this line
 

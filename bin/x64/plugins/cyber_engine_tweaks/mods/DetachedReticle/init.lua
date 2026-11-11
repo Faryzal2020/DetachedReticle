@@ -30,6 +30,10 @@ local Config = {
     -- ADS Lever-Arm Drop Compensation
     adsLeverArmComp = true,       -- Dynamically lower lever-arm root during ADS recoil to prevent sight occlusion
     adsLeverArmLength = 0.20,     -- Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.20; LMG applies x3.5 = 0.70m)
+    -- ADS Breathing Sway & Idle Stabilization Toggles
+    disableProceduralSway = false,-- Disables engine procedural weapon sway via stat multipliers (0.0)
+    adsIdleStabilize = false,     -- Script-side resting ADS reticle stabilization to optic center
+    adsRecoilHoriMult = 0.5,      -- Multiplier for random horizontal recoil push in ADS relative to hipfire spread (default: 0.5 = half intensity)
     weightHandlingScaling = true, -- Scale catch-up speed & curve exponent dynamically based on weapon weight & player Strength
     dualStabilizeMax = 0.65,      -- Dual-wielding: fraction of anatomical spread stabilized towards camera gaze T1 when resting (default: 0.65)
     -- Experimental T1-to-T2 Chase Rubber Leash
@@ -188,6 +192,9 @@ local function LoadConfig()
                 if data.recoilHoriDamping ~= nil then Config.recoilHoriDamping = tonumber(data.recoilHoriDamping) or Config.recoilHoriDamping end
                 if data.adsLeverArmComp ~= nil then Config.adsLeverArmComp = (data.adsLeverArmComp == true) end
                 if data.adsLeverArmLength ~= nil then Config.adsLeverArmLength = tonumber(data.adsLeverArmLength) or Config.adsLeverArmLength end
+                if data.disableProceduralSway ~= nil then Config.disableProceduralSway = (data.disableProceduralSway == true) end
+                if data.adsIdleStabilize ~= nil then Config.adsIdleStabilize = (data.adsIdleStabilize == true) end
+                if data.adsRecoilHoriMult ~= nil then Config.adsRecoilHoriMult = tonumber(data.adsRecoilHoriMult) or Config.adsRecoilHoriMult end
                 if data.weightHandlingScaling ~= nil then Config.weightHandlingScaling = (data.weightHandlingScaling == true) end
                 if data.dualStabilizeMax ~= nil then Config.dualStabilizeMax = tonumber(data.dualStabilizeMax) or Config.dualStabilizeMax end
                 if data.chaseLeashEnabled ~= nil then Config.chaseLeashEnabled = (data.chaseLeashEnabled == true) end
@@ -685,6 +692,39 @@ local function SetupNativeSettings()
                 end
             )
 
+            ns.addSubcategory("/detachedReticle/adsSway", "ADS Sway & Stabilization")
+
+            ns.addSwitch(
+                "/detachedReticle/adsSway",
+                "Disable Procedural Sway",
+                "Applies zero multiplier to weapon sway stats (SwaySideMax/MinAngleDistance, SwayCenterMaxOffset, Sway) to eliminate weapon idle breathing drift",
+                Config.disableProceduralSway, false,
+                function(val)
+                    DetachedReticle.SetDisableProceduralSway(val)
+                end
+            )
+
+            ns.addSwitch(
+                "/detachedReticle/adsSway",
+                "Resting ADS Reticle Stabilization",
+                "Script-side stabilization that holds the ADS reticle precisely at optic center while resting, releasing immediately during recoil kicks or mouse movement",
+                Config.adsIdleStabilize, false,
+                function(val)
+                    DetachedReticle.SetAdsIdleStabilize(val)
+                end
+            )
+
+            ns.addSlider(
+                "/detachedReticle/adsSway",
+                "ADS Horizontal Recoil Multiplier",
+                "Intensity multiplier for random horizontal recoil push in ADS relative to hipfire horizontal spread (default: 0.5 = half intensity)",
+                0.0, 1.0, 0.05, "%.2f",
+                Config.adsRecoilHoriMult, 0.5,
+                function(val)
+                    DetachedReticle.SetAdsRecoilHoriMult(val)
+                end
+            )
+
             Log("[SETTINGS] NativeSettings tab '/detachedReticle' successfully initialized.")
         end
     end)
@@ -1132,26 +1172,28 @@ registerForEvent("onUpdate", function(delta)
             dropDist = armLen * math.sin(math.rad(wPitch))
         end
 
-        local curPos = nil
-        local okCurPos, cp = pcall(function() return fpp:GetLocalPosition() end)
-        if okCurPos and cp then
-            curPos = cp
-        else
-            curPos = DetachedReticle.baselinePos or Vector4.new(0.0, 0.0, 0.0, 1.0)
+        local bPos = DetachedReticle.baselinePos
+        if not bPos then
+            local okCurPos, cp = pcall(function() return fpp:GetLocalPosition() end)
+            if okCurPos and cp then
+                bPos = Vector4.new(cp.x or 0.0, cp.y or 0.0, cp.z or 0.0, cp.w or 1.0)
+                DetachedReticle.baselinePos = bPos
+            else
+                bPos = Vector4.new(0.0, 0.0, 0.0, 1.0)
+            end
         end
 
-        local lastDrop = DetachedReticle.lastAppliedDrop or 0.0
         DetachedReticle.lastAppliedDrop = dropDist
 
         -- In the parent coordinate frame (head socket tilted by socketPitch):
         -- True world-up is (0.0, fwdZ, fwdXY).
         -- Moving the camera along world-up by +dropDist lowers the gun body relative to camera gaze.
-        -- Apply delta dDrop = dropDist - lastDrop to prevent compounding:
-        local dDrop = dropDist - lastDrop
-        local targetPosX = (curPos.x or 0.0)
-        local targetPosY = (curPos.y or 0.0) + (dDrop * fwdZ)
-        local targetPosZ = (curPos.z or 0.0) + (dDrop * fwdXY)
-        local targetPos = Vector4.new(targetPosX, targetPosY, targetPosZ, curPos.w or 1.0)
+        -- Calculate absolute displacement from baselinePos (never accumulating increments onto mutable curPos)
+        -- to guarantee zero residual drift across shots:
+        local targetPosX = bPos.x or 0.0
+        local targetPosY = (bPos.y or 0.0) + (dropDist * fwdZ)
+        local targetPosZ = (bPos.z or 0.0) + (dropDist * fwdXY)
+        local targetPos = Vector4.new(targetPosX, targetPosY, targetPosZ, bPos.w or 1.0)
 
         pcall(function()
             fpp:SetLocalTransform(targetPos, targetRot)
@@ -1337,6 +1379,19 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.restingFrames = 0
         end
 
+        if aimSys then
+            pcall(function() aimSys:SetIsRecoiling(isRecoiling) end)
+            pcall(function() aimSys:SetDisableProceduralSway(Config.disableProceduralSway) end)
+            pcall(function() aimSys:SetAdsIdleStabilize(Config.adsIdleStabilize) end)
+            pcall(function() aimSys:SetAdsRecoilHoriMult(Config.adsRecoilHoriMult) end)
+            local swayLog = nil
+            pcall(function() swayLog = aimSys:GetSwayStatusLog() end)
+            if swayLog and swayLog ~= "" then
+                Log(swayLog)
+                pcall(function() aimSys:ClearSwayStatusLog() end)
+            end
+        end
+
         -- 4. Tier 2B Active Barrel Offset Control Loop (Per-Frame Execution)
         local diffYaw = 0.0
         local diffPitch = 0.0
@@ -1420,7 +1475,8 @@ registerForEvent("onUpdate", function(delta)
 
             -- Convergence on camera hit point: slow integral trim on screen error (only when fully resting and not recoiling)
             -- Sign convention: scrX > 0 means reticle is right -> subtract trimYaw to steer gun left towards center (negative feedback)
-            if isResting and isReadyStance and isArmed then
+            local isCombatStance = (not isSmartWeapon) and (stateStr == "HIP" or (isHeavyWeapon and stateStr == "ADS"))
+            if isResting and isReadyStance and isArmed and isCombatStance then
                 local dt = (type(delta) == "number" and delta > 0.0001 and delta < 0.1) and delta or 0.016
                 local trimClamp = 3.0
                 DetachedReticle.trimYaw = math.max(-trimClamp, math.min(trimClamp, (DetachedReticle.trimYaw or 0.0) - scrX * 0.005 * dt))
@@ -1436,13 +1492,12 @@ registerForEvent("onUpdate", function(delta)
             -- swinging (mouse pan > 0.5 deg where upper-body turn lag twists diffYaw), or momentarily dipping
             -- readyWeight from skeletal recoil animations while remaining in HIP/ADS stance.
             local hasSettledComp = (DetachedReticle.lastSettledCompTargetYaw ~= nil) and (DetachedReticle.lastSettledCompTargetPitch ~= nil)
-            local isCombatStance = (not isSmartWeapon) and (stateStr == "HIP" or stateStr == "ADS")
             if isRecoiling or isSwinging or (isCombatStance and readyWeight < 0.999 and hasSettledComp) then
                 if hasSettledComp then
                     targetYaw = DetachedReticle.lastSettledCompTargetYaw
                     targetPitch = DetachedReticle.lastSettledCompTargetPitch
                 end
-            elseif readyWeight >= 0.999 then
+            elseif readyWeight >= 0.999 and isCombatStance then
                 DetachedReticle.lastSettledCompTargetYaw = targetYaw
                 DetachedReticle.lastSettledCompTargetPitch = targetPitch
             end
@@ -1460,6 +1515,17 @@ registerForEvent("onUpdate", function(delta)
                 if aimSys then
                     pcall(function() aimSys:SetDualStabilizeWeight(stabFactor) end)
                 end
+            elseif isADS and not isHeavyWeapon then
+                -- Standard ADS: NO Tier 2B body compensation.
+                -- In ADS, vanilla 1st-person animation aligns the weapon's optic directly with the eye line.
+                -- Applying Tier 2B body compensation in ADS is redundant and causes post-recoil skeletal animation
+                -- pitch offsets to be latched into lastSettledCompTargetPitch, causing the sight to creep.
+                -- Heavy weapons (HMG) use cradle hip-zoom, so they retain Tier 2B.
+                pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
+                DetachedReticle.trimYaw = 0.0
+                DetachedReticle.trimPitch = 0.0
+                DetachedReticle.lastSettledCompTargetYaw = nil
+                DetachedReticle.lastSettledCompTargetPitch = nil
             elseif Config.activeAimOffset and isArmed and isCombatStance and (isReadyStance or isRecoiling or isSwinging or hasSettledComp) then
                 pcall(function() Game.DR_SetBarrelOffset(targetYaw, targetPitch) end)
             else
@@ -1857,6 +1923,22 @@ registerForEvent("onDraw", function()
             ImGui.SetTooltip("Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch).\nDefault: 0.20 m (LMG automatically applies 3.5x multiplier = 0.70 m).")
         end
 
+        -- ADS Sway & Stabilization
+        ImGui.Separator()
+        ImGui.Text("ADS Sway & Stabilization:")
+
+        local newProcSway, procSwayChanged = ImGui.Checkbox("Disable Procedural Sway", Config.disableProceduralSway)
+        if procSwayChanged then DetachedReticle.SetDisableProceduralSway(newProcSway) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Applies zero multiplier to weapon sway stats to test if engine procedural sway causes the idle drift.\nDefault: Off")
+        end
+
+        local newAdsStab, adsStabChanged = ImGui.Checkbox("Resting ADS Reticle Stabilization", Config.adsIdleStabilize)
+        if adsStabChanged then DetachedReticle.SetAdsIdleStabilize(newAdsStab) end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip("Stabilizes T3 to optic center while resting in ADS, releasing immediately upon firing or mouse pan to preserve simulated recoil.\nDefault: Off")
+        end
+
         -- Debug Telemetry Checkbox
         local newDebug, debugChanged = ImGui.Checkbox("Verbose Debug Logging", Config.debugLogging)
         if debugChanged then
@@ -2129,6 +2211,36 @@ DetachedReticle.SetAdsLeverArmLength = function(val)
     Log(string.format("[OPTIONS] adsLeverArmLength set to: %.2f m", Config.adsLeverArmLength))
 end
 
+DetachedReticle.SetDisableProceduralSway = function(val)
+    Config.disableProceduralSway = val and true or false
+    SaveConfig()
+    local aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
+    if aimSys then
+        pcall(function() aimSys:SetDisableProceduralSway(Config.disableProceduralSway) end)
+    end
+    Log(string.format("[OPTIONS] disableProceduralSway set to: %s", tostring(Config.disableProceduralSway)))
+end
+
+DetachedReticle.SetAdsIdleStabilize = function(val)
+    Config.adsIdleStabilize = val and true or false
+    SaveConfig()
+    local aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
+    if aimSys then
+        pcall(function() aimSys:SetAdsIdleStabilize(Config.adsIdleStabilize) end)
+    end
+    Log(string.format("[OPTIONS] adsIdleStabilize set to: %s", tostring(Config.adsIdleStabilize)))
+end
+
+DetachedReticle.SetAdsRecoilHoriMult = function(val)
+    Config.adsRecoilHoriMult = tonumber(val) or 0.5
+    SaveConfig()
+    local aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
+    if aimSys then
+        pcall(function() aimSys:SetAdsRecoilHoriMult(Config.adsRecoilHoriMult) end)
+    end
+    Log(string.format("[OPTIONS] adsRecoilHoriMult set to: %.2f", Config.adsRecoilHoriMult))
+end
+
 DetachedReticle.SetDebugLogging = function(val)
     Config.debugLogging = val and true or false
     SaveConfig()
@@ -2136,11 +2248,12 @@ DetachedReticle.SetDebugLogging = function(val)
 end
 
 DetachedReticle.GetOptions = function()
-    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | expPower=%.2f | weightHandlingScaling=%s | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg | recoilMaxRadius=%.1f deg | recoilLeashCurve=%.2f | adsLeverArmComp=%s | adsLeverArmLength=%.2fm",
+    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | expPower=%.2f | weightHandlingScaling=%s | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg | recoilMaxRadius=%.1f deg | recoilLeashCurve=%.2f | adsLeverArmComp=%s | adsLeverArmLength=%.2fm | disableProceduralSway=%s | adsIdleStabilize=%s | adsRecoilHoriMult=%.2f",
         tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode,
         Config.expPower, tostring(Config.weightHandlingScaling), Config.brakeThreshold, Config.brakeMaxSpeed,
         Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.compMinSpeed, Config.compGapThreshold,
-        Config.recoilMaxRadius, Config.recoilLeashCurve, tostring(Config.adsLeverArmComp), Config.adsLeverArmLength))
+        Config.recoilMaxRadius, Config.recoilLeashCurve, tostring(Config.adsLeverArmComp), Config.adsLeverArmLength,
+        tostring(Config.disableProceduralSway), tostring(Config.adsIdleStabilize), Config.adsRecoilHoriMult))
     return Config
 end
 
