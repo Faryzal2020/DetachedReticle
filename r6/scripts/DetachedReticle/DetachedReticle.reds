@@ -30,40 +30,7 @@ public class DetachedAimSystem extends ScriptableSystem {
     private let m_leftGunForward: Vector4;
     private let m_leftMuzzlePos: Vector4;
     private let m_leftScreenOffset: Vector2;
-
-    // ADS Sway & Resting Stabilization fields
-    private let m_disableProceduralSway: Bool;
-    private let m_adsIdleStabilize: Bool;
     private let m_adsRecoilHoriMult: Float;
-    private let m_isRecoiling: Bool;
-    private let m_lastShotEngineTime: Float;
-    private let m_swayItemOwner: StatsObjectID;
-    private let m_swayItemIdOwner: StatsObjectID;
-    private let m_swayWeaponOwner: StatsObjectID;
-    private let m_swayPlayerOwner: StatsObjectID;
-    private let m_hasItemOwner: Bool;
-    private let m_swayWeaponId: EntityID;
-    private let m_hasSwayApplied: Bool;
-    private let m_swayStatusLog: String;
-
-    public func SetDisableProceduralSway(enable: Bool) -> Void {
-        this.m_disableProceduralSway = enable;
-        if !enable && this.m_hasSwayApplied {
-            this.RemoveSwayModifiers(this.GetGameInstance());
-        }
-    }
-
-    public func GetDisableProceduralSway() -> Bool {
-        return this.m_disableProceduralSway;
-    }
-
-    public func SetAdsIdleStabilize(enable: Bool) -> Void {
-        this.m_adsIdleStabilize = enable;
-    }
-
-    public func GetAdsIdleStabilize() -> Bool {
-        return this.m_adsIdleStabilize;
-    }
 
     public func SetAdsRecoilHoriMult(mult: Float) -> Void {
         this.m_adsRecoilHoriMult = mult;
@@ -74,143 +41,6 @@ public class DetachedAimSystem extends ScriptableSystem {
             return 0.5;
         }
         return this.m_adsRecoilHoriMult;
-    }
-
-    public func GetSwayStatusLog() -> String {
-        return this.m_swayStatusLog;
-    }
-
-    public func ClearSwayStatusLog() -> Void {
-        this.m_swayStatusLog = "";
-    }
-
-    public func SetIsRecoiling(recoiling: Bool) -> Void {
-        this.m_isRecoiling = recoiling;
-    }
-
-    public func GetIsRecoiling() -> Bool {
-        return this.m_isRecoiling;
-    }
-
-    public func SetLastShotEngineTime(t: Float) -> Void {
-        this.m_lastShotEngineTime = t;
-    }
-
-    public func GetLastShotEngineTime() -> Float {
-        return this.m_lastShotEngineTime;
-    }
-
-    public func HasSwayApplied() -> Bool {
-        return this.m_hasSwayApplied;
-    }
-
-    public func GetSwayWeaponId() -> EntityID {
-        return this.m_swayWeaponId;
-    }
-
-    public func ApplySwayModifiers(game: GameInstance, weapon: ref<WeaponObject>, player: ref<PlayerPuppet>) -> Void {
-        if this.m_hasSwayApplied {
-            this.RemoveSwayModifiers(game);
-        }
-        if !IsDefined(weapon) || !IsDefined(player) {
-            return;
-        }
-        let statsSys: ref<StatsSystem> = GameInstance.GetStatsSystem(game);
-        if !IsDefined(statsSys) {
-            return;
-        }
-
-        let weaOwner: StatsObjectID = Cast<StatsObjectID>(weapon.GetEntityID());
-        let plyOwner: StatsObjectID = Cast<StatsObjectID>(player.GetEntityID());
-        let itemIdOwner: StatsObjectID = Cast<StatsObjectID>(weapon.GetItemID());
-
-        let itemData: ref<gameItemData> = weapon.GetItemData();
-        let hasItem: Bool = IsDefined(itemData);
-        let itemOwner: StatsObjectID;
-        if hasItem {
-            itemOwner = itemData.GetStatsObjectID();
-        }
-
-        let statsToForce: array<gamedataStatType>;
-        ArrayPush(statsToForce, gamedataStatType.SwaySideMaximumAngleDistance);
-        ArrayPush(statsToForce, gamedataStatType.SwaySideMinimumAngleDistance);
-        ArrayPush(statsToForce, gamedataStatType.SwayCenterMaximumAngleOffset);
-        ArrayPush(statsToForce, gamedataStatType.SwaySideTopAngleLimit);
-        ArrayPush(statsToForce, gamedataStatType.SwaySideBottomAngleLimit);
-        ArrayPush(statsToForce, gamedataStatType.Sway);
-        ArrayPush(statsToForce, gamedataStatType.SwayCurvatureMaximumFactor);
-        ArrayPush(statsToForce, gamedataStatType.SwayCurvatureMinimumFactor);
-        ArrayPush(statsToForce, gamedataStatType.SwayInitialOffsetRandomFactor);
-        ArrayPush(statsToForce, gamedataStatType.SwayStartBlendTime);
-
-        let i: Int32 = 0;
-        let count: Int32 = ArraySize(statsToForce);
-        while i < count {
-            let statType: gamedataStatType = statsToForce[i];
-            let mod: ref<gameStatModifierData> = RPGManager.CreateStatModifier(statType, gameStatModifierType.Additive, 0.0);
-            statsSys.ForceModifier(weaOwner, mod);
-            statsSys.ForceModifier(plyOwner, mod);
-            statsSys.ForceModifier(itemIdOwner, mod);
-            if hasItem {
-                statsSys.ForceModifier(itemOwner, mod);
-            }
-            i += 1;
-        }
-
-        this.m_swayWeaponOwner = weaOwner;
-        this.m_swayPlayerOwner = plyOwner;
-        this.m_swayItemIdOwner = itemIdOwner;
-        this.m_hasItemOwner = hasItem;
-        if hasItem {
-            this.m_swayItemOwner = itemOwner;
-        }
-        this.m_swayWeaponId = weapon.GetEntityID();
-        this.m_hasSwayApplied = true;
-        this.m_swayStatusLog = "[SWAY_STATS] Applied ForceModifier(0.0) across 10 sway stats to ItemData, ItemID, Weapon, and Player.";
-        FTLog("[DetachedReticle] Procedural weapon sway disabled via StatsSystem.ForceModifier.");
-    }
-
-    public func RemoveSwayModifiers(game: GameInstance) -> Void {
-        if !this.m_hasSwayApplied {
-            return;
-        }
-        let statsSys: ref<StatsSystem> = GameInstance.GetStatsSystem(game);
-        if IsDefined(statsSys) {
-            let statsToUnforce: array<gamedataStatType>;
-            ArrayPush(statsToUnforce, gamedataStatType.SwaySideMaximumAngleDistance);
-            ArrayPush(statsToUnforce, gamedataStatType.SwaySideMinimumAngleDistance);
-            ArrayPush(statsToUnforce, gamedataStatType.SwayCenterMaximumAngleOffset);
-            ArrayPush(statsToUnforce, gamedataStatType.SwaySideTopAngleLimit);
-            ArrayPush(statsToUnforce, gamedataStatType.SwaySideBottomAngleLimit);
-            ArrayPush(statsToUnforce, gamedataStatType.Sway);
-            ArrayPush(statsToUnforce, gamedataStatType.SwayCurvatureMaximumFactor);
-            ArrayPush(statsToUnforce, gamedataStatType.SwayCurvatureMinimumFactor);
-            ArrayPush(statsToUnforce, gamedataStatType.SwayInitialOffsetRandomFactor);
-            ArrayPush(statsToUnforce, gamedataStatType.SwayStartBlendTime);
-
-            let i: Int32 = 0;
-            let count: Int32 = ArraySize(statsToUnforce);
-            while i < count {
-                let statType: gamedataStatType = statsToUnforce[i];
-                statsSys.UnforceStat(this.m_swayWeaponOwner, statType);
-                statsSys.UnforceStat(this.m_swayPlayerOwner, statType);
-                statsSys.UnforceStat(this.m_swayItemIdOwner, statType);
-                if this.m_hasItemOwner {
-                    statsSys.UnforceStat(this.m_swayItemOwner, statType);
-                }
-                i += 1;
-            }
-        }
-        this.m_hasSwayApplied = false;
-        this.m_hasItemOwner = false;
-        this.m_swayStatusLog = "[SWAY_STATS] Unforced all sway stats: restored to vanilla.";
-        FTLog("[DetachedReticle] Procedural weapon sway modifiers unforced/removed.");
-    }
-
-    public func OnWeaponUnequipped(game: GameInstance) -> Void {
-        if this.m_hasSwayApplied {
-            this.RemoveSwayModifiers(game);
-        }
     }
 
     public func SetDualStabilizeWeight(w: Float) -> Void {
@@ -265,7 +95,6 @@ public class DetachedAimSystem extends ScriptableSystem {
         this.m_lastShotAngleDeg = this.m_angleLagDeg;
         this.m_lastShotTestMode = testMode;
         this.m_lastShotTestModeName = modeName;
-        this.m_lastShotEngineTime = EngineTime.ToFloat(GameInstance.GetEngineTime(this.GetGameInstance()));
     }
 
     public func SetTestMode(mode: Int32) -> Void {
@@ -615,23 +444,9 @@ private func UpdateDetachedAim() -> Void {
         if IsDefined(this.m_cameraCrosshair) { this.m_cameraCrosshair.SetVisible(false); }
         if IsDefined(activeWidget) { activeWidget.SetTranslation(new Vector2(0.0, 0.0)); }
         if IsDefined(aimSys) {
-            aimSys.OnWeaponUnequipped(player.GetGame());
             aimSys.SetAimState(new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector4(0.0, 0.0, 0.0, 0.0), new Vector2(0.0, 0.0), 0.0, 0.0, 0.0, false);
         }
         return;
-    }
-
-    // Update procedural weapon sway stat modifiers if toggle is active
-    if IsDefined(aimSys) {
-        if aimSys.GetDisableProceduralSway() {
-            if !aimSys.HasSwayApplied() || aimSys.GetSwayWeaponId() != weapon.GetEntityID() {
-                aimSys.ApplySwayModifiers(player.GetGame(), weapon, player);
-            }
-        } else {
-            if aimSys.HasSwayApplied() {
-                aimSys.RemoveSwayModifiers(player.GetGame());
-            }
-        }
     }
 
     let isSmartWeapon: Bool = Equals(RPGManager.GetWeaponEvolution(weapon.GetItemID()), gamedataWeaponEvolution.Smart);
@@ -720,20 +535,11 @@ private func UpdateDetachedAim() -> Void {
     }
     let wType: gamedataItemType = WeaponObject.GetWeaponType(weapon.GetItemID());
     let isHMG: Bool = weapon.IsHeavyWeapon() || Equals(wType, gamedataItemType.Wea_HeavyMachineGun);
-    let isPrecisionOrSniper: Bool = Equals(wType, gamedataItemType.Wea_PrecisionRifle) || Equals(wType, gamedataItemType.Wea_SniperRifle);
 
-    let isRestingADS: Bool = false;
-    if isAiming && !isHMG && !isPrecisionOrSniper && IsDefined(aimSys) && aimSys.GetAdsIdleStabilize() {
-        let isRecoiling: Bool = aimSys.GetIsRecoiling();
-        let timeSinceShot: Float = currentEngineTime - aimSys.GetLastShotEngineTime();
-        if AbsF(yawLagDeg) < 0.60 && AbsF(pitchLagDeg) < 0.60 && !isRecoiling && timeSinceShot > 0.35 {
-            isRestingADS = true;
-        }
-    }
-
-    // Physical aim line in 3D world: raycast to find exact target impact point
+    // Effective barrel direction: starts from the physical 3D gun barrel (m_gunForward)
+    // plus ADS horizontal recoil deflection
     let effGunFwd: Vector4 = this.m_gunForward;
-    if isAiming && !isHMG && !isPrecisionOrSniper && !isRestingADS {
+    if isAiming && !isHMG {
         let horiMult: Float = IsDefined(aimSys) ? aimSys.GetAdsRecoilHoriMult() : 0.5;
         let adsHoriYawDeg: Float = DR_GetRecoilYaw() * horiMult;
         if AbsF(adsHoriYawDeg) > 0.001 {
@@ -747,31 +553,34 @@ private func UpdateDetachedAim() -> Void {
     let aimFwd: Vector4 = effGunFwd;
 
     let sqs: ref<SpatialQueriesSystem> = GameInstance.GetSpatialQueriesSystem(player.GetGame());
-    if isAiming && !isHMG && (isPrecisionOrSniper || isRestingADS) {
-        // In ADS for precision & sniper rifles, or stabilized resting ADS: sightline convergence towards camera gaze target
-        let camTargetRange: Float = 200.0;
-        let camTargetEnd: Vector4 = camPos + (camFwd3 * camTargetRange);
-        let camTarget: Vector4 = camTargetEnd;
+    if isAiming && !isHMG {
+        // In ADS, the 3D gun and scope naturally align with the camera (T1) while retaining
+        // 3D breathing sway, mouse-chase lag (T2A), and recoil (W) in effGunFwd.
+        // Raycasting from camPos (scope/sight eye origin) along effGunFwd zeroes out the 6-13cm
+        // height-over-bore drop between the scope and MuzzleSlot while 100% preserving effGunFwd's pitch & yaw.
+        let sightTargetRange: Float = 200.0;
+        let sightTargetEnd: Vector4 = camPos + (effGunFwd * sightTargetRange);
+        let sightTarget: Vector4 = sightTargetEnd;
         if IsDefined(sqs) {
-            let camTrace: TraceResult;
-            if sqs.SyncRaycastByCollisionPreset(camPos, camTargetEnd, n"World Static", camTrace) && TraceResult.IsValid(camTrace) {
-                camTarget = new Vector4(camTrace.position.X, camTrace.position.Y, camTrace.position.Z, 1.0);
+            let sightTrace: TraceResult;
+            if sqs.SyncRaycastByCollisionPreset(camPos, sightTargetEnd, n"World Static", sightTrace) && TraceResult.IsValid(sightTrace) {
+                sightTarget = new Vector4(sightTrace.position.X, sightTrace.position.Y, sightTrace.position.Z, 1.0);
             }
-            if sqs.SyncRaycastByCollisionPreset(camPos, camTarget, n"World Dynamic", camTrace) && TraceResult.IsValid(camTrace) {
-                let dynHit: Vector4 = new Vector4(camTrace.position.X, camTrace.position.Y, camTrace.position.Z, 1.0);
-                if Vector4.DistanceSquared(camPos, dynHit) < Vector4.DistanceSquared(camPos, camTarget) {
-                    camTarget = dynHit;
+            if sqs.SyncRaycastByCollisionPreset(camPos, sightTarget, n"World Dynamic", sightTrace) && TraceResult.IsValid(sightTrace) {
+                let dynHit: Vector4 = new Vector4(sightTrace.position.X, sightTrace.position.Y, sightTrace.position.Z, 1.0);
+                if Vector4.DistanceSquared(camPos, dynHit) < Vector4.DistanceSquared(camPos, sightTarget) {
+                    sightTarget = dynHit;
                 }
             }
         }
-        let toCamTarget: Vector4 = camTarget - muzzlePos;
-        let convDir: Vector4 = Vector4.Normalize(toCamTarget);
-        if Vector4.Dot(convDir, camFwd3) > 0.2 {
+        let toSightTarget: Vector4 = sightTarget - muzzlePos;
+        let convDir: Vector4 = Vector4.Normalize(toSightTarget);
+        if Vector4.Dot(convDir, effGunFwd) > 0.2 {
             aimFwd = convDir;
-            targetPoint = camTarget;
+            targetPoint = sightTarget;
         }
     } else {
-        // Hipfire, recoiling/moving ADS, or unstabilized ADS: physical barrel aim line
+        // Hipfire or HMG: physical barrel aim line from muzzlePos
         if IsDefined(sqs) {
             let traceStatic: TraceResult;
             if sqs.SyncRaycastByCollisionPreset(muzzlePos, traceEnd, n"World Static", traceStatic) && TraceResult.IsValid(traceStatic) {
@@ -1120,7 +929,6 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
             let isAiming: Bool = false;
             let wType: gamedataItemType = WeaponObject.GetWeaponType(weapon.GetItemID());
             let isHMG: Bool = weapon.IsHeavyWeapon() || Equals(wType, gamedataItemType.Wea_HeavyMachineGun);
-            let isPrecisionOrSniper: Bool = Equals(wType, gamedataItemType.Wea_PrecisionRifle) || Equals(wType, gamedataItemType.Wea_SniperRifle);
             if IsDefined(scriptInterface.localBlackboard) {
                 let upperBody: Int32 = scriptInterface.localBlackboard.GetInt(GetAllBlackboardDefs().PlayerStateMachine.UpperBody);
                 let crosshair: Int32 = scriptInterface.localBlackboard.GetInt(GetAllBlackboardDefs().PlayerStateMachine.Crosshair);
@@ -1135,25 +943,15 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
                 }
             }
 
-            let isRestingADS: Bool = false;
-            let curEngineTime: Float = EngineTime.ToFloat(GameInstance.GetEngineTime(scriptInterface.GetGame()));
-            if isAiming && !isHMG && !isPrecisionOrSniper && IsDefined(aimSys) && aimSys.GetAdsIdleStabilize() {
-                let isRecoiling: Bool = aimSys.GetIsRecoiling();
-                let prevShotTime: Float = aimSys.GetLastShotEngineTime();
-                let timeSinceShot: Float = curEngineTime - prevShotTime;
-                let camRight: Vector4 = Transform.GetRight(camTransform);
-                let camUp: Vector4 = Transform.GetUp(camTransform);
-                let dx: Float = Vector4.Dot(normMuzzleFwd, camRight);
-                let dy: Float = Vector4.Dot(normMuzzleFwd, camUp);
-                let dz: Float = Vector4.Dot(normMuzzleFwd, camFwd);
-                let yawLag: Float = Rad2Deg(AtanF(dx, dz));
-                let pitchLag: Float = Rad2Deg(AtanF(dy, dz));
-                if AbsF(yawLag) < 0.60 && AbsF(pitchLag) < 0.60 && !isRecoiling && timeSinceShot > 0.35 {
-                    isRestingADS = true;
+            if isAiming && !isHMG {
+                let effGunFwd: Vector4 = normMuzzleFwd;
+                let horiMult: Float = IsDefined(aimSys) ? aimSys.GetAdsRecoilHoriMult() : 0.5;
+                let adsHoriYawDeg: Float = DR_GetRecoilYaw() * horiMult;
+                if AbsF(adsHoriYawDeg) > 0.001 {
+                    let camRight: Vector4 = Transform.GetRight(camTransform);
+                    effGunFwd = Vector4.Normalize(normMuzzleFwd + camRight * TanF(Deg2Rad(adsHoriYawDeg)));
                 }
-            }
 
-            if isAiming && !isHMG && (isPrecisionOrSniper || isRestingADS) {
                 let sqs: ref<SpatialQueriesSystem> = GameInstance.GetSpatialQueriesSystem(scriptInterface.GetGame());
                 let camPos: Vector4 = new Vector4(0.0, 0.0, 0.0, 1.0);
                 if IsDefined(camSys) && camSys.GetActiveCameraWorldTransform(camTransform) {
@@ -1164,32 +962,25 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
                 if maxRange <= 0.0 {
                     maxRange = 200.0;
                 }
-                let camTarget: Vector4 = camPos + (camFwd * maxRange);
+                let sightTarget: Vector4 = camPos + (effGunFwd * maxRange);
                 if IsDefined(sqs) {
-                    let camTrace: TraceResult;
-                    if sqs.SyncRaycastByCollisionPreset(camPos, camTarget, n"World Static", camTrace) && TraceResult.IsValid(camTrace) {
-                        camTarget = new Vector4(camTrace.position.X, camTrace.position.Y, camTrace.position.Z, 1.0);
+                    let sightTrace: TraceResult;
+                    if sqs.SyncRaycastByCollisionPreset(camPos, sightTarget, n"World Static", sightTrace) && TraceResult.IsValid(sightTrace) {
+                        sightTarget = new Vector4(sightTrace.position.X, sightTrace.position.Y, sightTrace.position.Z, 1.0);
                     }
-                    if sqs.SyncRaycastByCollisionPreset(camPos, camTarget, n"World Dynamic", camTrace) && TraceResult.IsValid(camTrace) {
-                        let dynHit: Vector4 = new Vector4(camTrace.position.X, camTrace.position.Y, camTrace.position.Z, 1.0);
-                        if Vector4.DistanceSquared(camPos, dynHit) < Vector4.DistanceSquared(camPos, camTarget) {
-                            camTarget = dynHit;
+                    if sqs.SyncRaycastByCollisionPreset(camPos, sightTarget, n"World Dynamic", sightTrace) && TraceResult.IsValid(sightTrace) {
+                        let dynHit: Vector4 = new Vector4(sightTrace.position.X, sightTrace.position.Y, sightTrace.position.Z, 1.0);
+                        if Vector4.DistanceSquared(camPos, dynHit) < Vector4.DistanceSquared(camPos, sightTarget) {
+                            sightTarget = dynHit;
                         }
                     }
                 }
-                let toCamTarget: Vector4 = camTarget - muzzlePos;
-                let convDir: Vector4 = Vector4.Normalize(toCamTarget);
-                if Vector4.Dot(convDir, camFwd) > 0.2 {
+                let toSightTarget: Vector4 = sightTarget - muzzlePos;
+                let convDir: Vector4 = Vector4.Normalize(toSightTarget);
+                if Vector4.Dot(convDir, effGunFwd) > 0.2 {
                     aimFwd = convDir;
-                }
-            } else if isAiming && !isHMG && !isPrecisionOrSniper {
-                let horiMult: Float = IsDefined(aimSys) ? aimSys.GetAdsRecoilHoriMult() : 0.5;
-                let adsHoriYawDeg: Float = DR_GetRecoilYaw() * horiMult;
-                if AbsF(adsHoriYawDeg) > 0.001 {
-                    let camRight: Vector4 = Transform.GetRight(camTransform);
-                    aimFwd = Vector4.Normalize(normMuzzleFwd + camRight * TanF(Deg2Rad(adsHoriYawDeg)));
                 } else {
-                    aimFwd = normMuzzleFwd;
+                    aimFwd = effGunFwd;
                 }
             }
         }
@@ -1198,7 +989,6 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
         SetMuzzleAimState(muzzlePos, aimFwd, camFwd, true);
 
         if IsDefined(aimSys) {
-            aimSys.SetLastShotEngineTime(EngineTime.ToFloat(GameInstance.GetEngineTime(scriptInterface.GetGame())));
             let attackRecord: ref<Attack_Record> = this.GetDesiredAttackRecord(stateContext, scriptInterface);
             let maxRange: Float = IsDefined(attackRecord) ? attackRecord.Range() : 200.0;
             if maxRange <= 0.0 {

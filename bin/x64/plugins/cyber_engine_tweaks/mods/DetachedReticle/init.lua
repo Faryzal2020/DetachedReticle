@@ -30,9 +30,6 @@ local Config = {
     -- ADS Lever-Arm Drop Compensation
     adsLeverArmComp = true,       -- Dynamically lower lever-arm root during ADS recoil to prevent sight occlusion
     adsLeverArmLength = 0.20,     -- Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.20; LMG applies x3.5 = 0.70m)
-    -- ADS Breathing Sway & Idle Stabilization Toggles
-    disableProceduralSway = false,-- Disables engine procedural weapon sway via stat multipliers (0.0)
-    adsIdleStabilize = false,     -- Script-side resting ADS reticle stabilization to optic center
     adsRecoilHoriMult = 0.5,      -- Multiplier for random horizontal recoil push in ADS relative to hipfire spread (default: 0.5 = half intensity)
     weightHandlingScaling = true, -- Scale catch-up speed & curve exponent dynamically based on weapon weight & player Strength
     dualStabilizeMax = 0.65,      -- Dual-wielding: fraction of anatomical spread stabilized towards camera gaze T1 when resting (default: 0.65)
@@ -192,8 +189,6 @@ local function LoadConfig()
                 if data.recoilHoriDamping ~= nil then Config.recoilHoriDamping = tonumber(data.recoilHoriDamping) or Config.recoilHoriDamping end
                 if data.adsLeverArmComp ~= nil then Config.adsLeverArmComp = (data.adsLeverArmComp == true) end
                 if data.adsLeverArmLength ~= nil then Config.adsLeverArmLength = tonumber(data.adsLeverArmLength) or Config.adsLeverArmLength end
-                if data.disableProceduralSway ~= nil then Config.disableProceduralSway = (data.disableProceduralSway == true) end
-                if data.adsIdleStabilize ~= nil then Config.adsIdleStabilize = (data.adsIdleStabilize == true) end
                 if data.adsRecoilHoriMult ~= nil then Config.adsRecoilHoriMult = tonumber(data.adsRecoilHoriMult) or Config.adsRecoilHoriMult end
                 if data.weightHandlingScaling ~= nil then Config.weightHandlingScaling = (data.weightHandlingScaling == true) end
                 if data.dualStabilizeMax ~= nil then Config.dualStabilizeMax = tonumber(data.dualStabilizeMax) or Config.dualStabilizeMax end
@@ -628,6 +623,16 @@ local function SetupNativeSettings()
                 end
             )
 
+            ns.addRangeFloat(
+                "/detachedReticle/recoilHorizontal",
+                "ADS Horizontal Recoil Multiplier",
+                "Intensity multiplier for random horizontal recoil push in ADS relative to hipfire horizontal spread (default: 0.5 = half intensity)",
+                0.0, 1.0, 0.05, "%.2f", Config.adsRecoilHoriMult, 0.5,
+                function(val)
+                    DetachedReticle.SetAdsRecoilHoriMult(val)
+                end
+            )
+
             ns.addSubcategory("/detachedReticle/chaseLeash", "Experimental T1-to-T2 Chase Rubber Leash")
 
             ns.addSwitch(
@@ -689,39 +694,6 @@ local function SetupNativeSettings()
                 0.05, 1.00, 0.05, "%.2f m", Config.adsLeverArmLength, 0.20,
                 function(val)
                     DetachedReticle.SetAdsLeverArmLength(val)
-                end
-            )
-
-            ns.addSubcategory("/detachedReticle/adsSway", "ADS Sway & Stabilization")
-
-            ns.addSwitch(
-                "/detachedReticle/adsSway",
-                "Disable Procedural Sway",
-                "Applies zero multiplier to weapon sway stats (SwaySideMax/MinAngleDistance, SwayCenterMaxOffset, Sway) to eliminate weapon idle breathing drift",
-                Config.disableProceduralSway, false,
-                function(val)
-                    DetachedReticle.SetDisableProceduralSway(val)
-                end
-            )
-
-            ns.addSwitch(
-                "/detachedReticle/adsSway",
-                "Resting ADS Reticle Stabilization",
-                "Script-side stabilization that holds the ADS reticle precisely at optic center while resting, releasing immediately during recoil kicks or mouse movement",
-                Config.adsIdleStabilize, false,
-                function(val)
-                    DetachedReticle.SetAdsIdleStabilize(val)
-                end
-            )
-
-            ns.addSlider(
-                "/detachedReticle/adsSway",
-                "ADS Horizontal Recoil Multiplier",
-                "Intensity multiplier for random horizontal recoil push in ADS relative to hipfire horizontal spread (default: 0.5 = half intensity)",
-                0.0, 1.0, 0.05, "%.2f",
-                Config.adsRecoilHoriMult, 0.5,
-                function(val)
-                    DetachedReticle.SetAdsRecoilHoriMult(val)
                 end
             )
 
@@ -1380,16 +1352,7 @@ registerForEvent("onUpdate", function(delta)
         end
 
         if aimSys then
-            pcall(function() aimSys:SetIsRecoiling(isRecoiling) end)
-            pcall(function() aimSys:SetDisableProceduralSway(Config.disableProceduralSway) end)
-            pcall(function() aimSys:SetAdsIdleStabilize(Config.adsIdleStabilize) end)
             pcall(function() aimSys:SetAdsRecoilHoriMult(Config.adsRecoilHoriMult) end)
-            local swayLog = nil
-            pcall(function() swayLog = aimSys:GetSwayStatusLog() end)
-            if swayLog and swayLog ~= "" then
-                Log(swayLog)
-                pcall(function() aimSys:ClearSwayStatusLog() end)
-            end
         end
 
         -- 4. Tier 2B Active Barrel Offset Control Loop (Per-Frame Execution)
@@ -1923,22 +1886,6 @@ registerForEvent("onDraw", function()
             ImGui.SetTooltip("Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch).\nDefault: 0.20 m (LMG automatically applies 3.5x multiplier = 0.70 m).")
         end
 
-        -- ADS Sway & Stabilization
-        ImGui.Separator()
-        ImGui.Text("ADS Sway & Stabilization:")
-
-        local newProcSway, procSwayChanged = ImGui.Checkbox("Disable Procedural Sway", Config.disableProceduralSway)
-        if procSwayChanged then DetachedReticle.SetDisableProceduralSway(newProcSway) end
-        if ImGui.IsItemHovered() then
-            ImGui.SetTooltip("Applies zero multiplier to weapon sway stats to test if engine procedural sway causes the idle drift.\nDefault: Off")
-        end
-
-        local newAdsStab, adsStabChanged = ImGui.Checkbox("Resting ADS Reticle Stabilization", Config.adsIdleStabilize)
-        if adsStabChanged then DetachedReticle.SetAdsIdleStabilize(newAdsStab) end
-        if ImGui.IsItemHovered() then
-            ImGui.SetTooltip("Stabilizes T3 to optic center while resting in ADS, releasing immediately upon firing or mouse pan to preserve simulated recoil.\nDefault: Off")
-        end
-
         -- Debug Telemetry Checkbox
         local newDebug, debugChanged = ImGui.Checkbox("Verbose Debug Logging", Config.debugLogging)
         if debugChanged then
@@ -2211,26 +2158,6 @@ DetachedReticle.SetAdsLeverArmLength = function(val)
     Log(string.format("[OPTIONS] adsLeverArmLength set to: %.2f m", Config.adsLeverArmLength))
 end
 
-DetachedReticle.SetDisableProceduralSway = function(val)
-    Config.disableProceduralSway = val and true or false
-    SaveConfig()
-    local aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
-    if aimSys then
-        pcall(function() aimSys:SetDisableProceduralSway(Config.disableProceduralSway) end)
-    end
-    Log(string.format("[OPTIONS] disableProceduralSway set to: %s", tostring(Config.disableProceduralSway)))
-end
-
-DetachedReticle.SetAdsIdleStabilize = function(val)
-    Config.adsIdleStabilize = val and true or false
-    SaveConfig()
-    local aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
-    if aimSys then
-        pcall(function() aimSys:SetAdsIdleStabilize(Config.adsIdleStabilize) end)
-    end
-    Log(string.format("[OPTIONS] adsIdleStabilize set to: %s", tostring(Config.adsIdleStabilize)))
-end
-
 DetachedReticle.SetAdsRecoilHoriMult = function(val)
     Config.adsRecoilHoriMult = tonumber(val) or 0.5
     SaveConfig()
@@ -2248,12 +2175,12 @@ DetachedReticle.SetDebugLogging = function(val)
 end
 
 DetachedReticle.GetOptions = function()
-    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | expPower=%.2f | weightHandlingScaling=%s | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg | recoilMaxRadius=%.1f deg | recoilLeashCurve=%.2f | adsLeverArmComp=%s | adsLeverArmLength=%.2fm | disableProceduralSway=%s | adsIdleStabilize=%s | adsRecoilHoriMult=%.2f",
+    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | expPower=%.2f | weightHandlingScaling=%s | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg | recoilMaxRadius=%.1f deg | recoilLeashCurve=%.2f | adsLeverArmComp=%s | adsLeverArmLength=%.2fm | adsRecoilHoriMult=%.2f",
         tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode,
         Config.expPower, tostring(Config.weightHandlingScaling), Config.brakeThreshold, Config.brakeMaxSpeed,
         Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.compMinSpeed, Config.compGapThreshold,
         Config.recoilMaxRadius, Config.recoilLeashCurve, tostring(Config.adsLeverArmComp), Config.adsLeverArmLength,
-        tostring(Config.disableProceduralSway), tostring(Config.adsIdleStabilize), Config.adsRecoilHoriMult))
+        Config.adsRecoilHoriMult))
     return Config
 end
 

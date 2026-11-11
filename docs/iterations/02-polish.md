@@ -871,6 +871,59 @@ ef<...>). Fixed FromVariant<smartGunUIParameters> to FromVariant<ref<smartGunUIP
   - Test ADS automatic fire with assault rifles (e.g. Copperhead, Ajax) and SMGs: verify visible alternating horizontal recoil kick on the reticle and bullet impact cluster at 50% hipfire spread.
   - Test slider `adsRecoilHoriMult` (0.0 = purely vertical, 0.5 = half intensity, 1.0 = full hipfire intensity).
 
+# iteration 48
+- date: 2026-11-11 20:47 +0700
+- status: passed
+- previous_iteration_results:
+  1. In Iterations 42 and 44, Precision Rifles (`Wea_PrecisionRifle`) and Sniper Rifles (`Wea_SniperRifle`) in ADS were special-cased (`isPrecisionOrSniper`) to raycast from `camPos` along `camFwd3` (T1) and set `targetPoint = camTarget` and `aimFwd = Vector4.Normalize(camTarget - muzzlePos)`.
+  2. While this eliminated the $6\text{--}13\text{ cm}$ height-over-bore drop between the scope (`camPos`) and `MuzzleSlot` (`muzzlePos`), raycasting along `camFwd3` completely discarded `this.m_gunForward` (`normMuzzleFwd`), directly snapping T3 and bullets to T1 and bypassing the 3D gun barrel's natural breathing sway, mouse-chase lag (`T2A`), and recoil (`W`).
+  3. Telemetry logs (`DetachedReticle.log` `02:21:24`–`02:21:31` with `Items.Preset_Psycho_ma_wat_lch_06_end` / Overwatch) confirmed that upon entering ADS (`F=11250`), the 3D weapon and scope naturally align with the camera (`dYaw = -0.01°`, `dPitch = -0.05°`, `ReticleScreen = (0.5, 4.1) px`), and over the next 6 seconds the 3D gun's breathing animation sways `m_gunForward` by up to `0.57°` (`17.3 px`), while `MuzzleRelCam` sits vertically $6\text{--}13\text{ cm}$ below the camera (`U = -0.06m to -0.13m`, `R = 0.00m`).
+- target_goal / hypothesis:
+  1. Restore the core architectural rule across all weapons (including Precision and Sniper rifles):
+     - T3 and bullet trajectories must always be derived from the 3D gun barrel's direction (`m_gunForward` / `normMuzzleFwd`) plus optional artificial angular modifications (`effGunFwd`).
+     - In ADS, T3 aligns with the camera *indirectly* because the 3D gun and scope naturally align with the camera via vanilla 1st-person animation, while preserving 3D breathing sway, mouse-chase lag (`T2A`), and recoil (`W`).
+  2. Eliminate the $6\text{--}13\text{ cm}$ height-over-bore parallax drop in ADS for all non-HMG weapons without discarding `effGunFwd`:
+     - In ADS (`isAiming && !isHMG`), raycast the sightline from the scope/eye origin (`camPos`) along **`effGunFwd`** (instead of `camFwd3`) to find `sightTarget`, set `targetPoint = sightTarget`, and converge the bullet trajectory from `muzzlePos` to `sightTarget` (`aimFwd = Vector4.Normalize(sightTarget - muzzlePos)`).
+     - Because `sightTarget - camPos` is strictly parallel to `effGunFwd`, T3's screen projection reflects 100% of `effGunFwd`'s pitch and yaw (including natural 3D breathing sway, chase lag, and recoil) with zero close/mid-range height-over-bore drop, and every shot from `muzzlePos` lands directly on T3 before natural stat-based spread.
+- changes_made:
+  1. `r6/scripts/DetachedReticle/DetachedReticle.reds`:
+     - In `UpdateDetachedAim`:
+       - Removed the `isPrecisionOrSniper` special-case override so Precision and Sniper rifles follow the exact same rules as all other non-HMG weapons.
+       - Constructed `effGunFwd` from `this.m_gunForward`, applying artificial angular modifications when in ADS (`effGunFwd = camFwd3` when `isRestingADS` is active via `adsIdleStabilize`, or horizontal recoil deflection `adsHoriYawDeg` when `!isRestingADS`).
+       - In ADS (`isAiming && !isHMG`), raycasted from `camPos` along `effGunFwd` (`World Static` and `World Dynamic`, `200.0m`) to find `sightTarget`, setting `targetPoint = sightTarget` and `aimFwd = Vector4.Normalize(sightTarget - muzzlePos)`.
+     - In `ShootEvents.OnEnter`:
+       - Removed the `isPrecisionOrSniper` special-case override and mirrored `UpdateDetachedAim`: constructed `effGunFwd` from `normMuzzleFwd` + angular modifications and raycasted from `camPos` along `effGunFwd` so shots from `muzzlePos` converge onto `sightTarget` (matching T3's pitch and yaw before natural bullet spread).
+- expected_outcome:
+  1. In ADS with Precision Rifles (e.g. Achilles, Sor-22) and Sniper Rifles (e.g. Grad/Overwatch, Nekomata, Ashura) with `adsIdleStabilize = false`:
+     - T3 naturally aligns with the camera when entering ADS, exhibits the 3D weapon's natural breathing sway, lags behind fast mouse pans (`T2A`), and kicks with recoil (`W`).
+     - Shots fired at any point during breathing sway, mouse panning, or recoil travel toward T3 (before natural weapon spread), with zero $6\text{--}13\text{ cm}$ height-over-bore drop.
+  2. When `adsIdleStabilize = true`, resting ADS applies the artificial angular modification (`effGunFwd = camFwd3`) uniformly across all non-HMG weapons, and breaks out immediately upon firing or panning.
+- test_procedure:
+  1. Deploy `r6/scripts/DetachedReticle/DetachedReticle.reds` to `E:\Cyberpunk 2077\r6\scripts\DetachedReticle\DetachedReticle.reds`.
+  2. Launch game and verify clean compilation in `E:\Cyberpunk 2077\r6\logs\redscript_rCURRENT.log`.
+  3. Equip a Sniper Rifle (e.g. Grad / Overwatch) and a Precision Rifle (e.g. Achilles) with `adsIdleStabilize = false`:
+     - Enter ADS and hold mouse still: verify T3 moves gently with the 3D gun's breathing sway rather than being frozen at `(0, 0)`.
+     - Pan mouse in ADS: verify T3 trails with the weapon's heavy chase lag (`T2A`) and settles back to center.
+     - Fire shots at various points of the breathing sway cycle and at close/mid/far distances: verify bullets land at T3 without height-over-bore drop.
+- test_results:
+  1. User verified in-game with `adsIdleStabilize = false`: the scope-zeroed barrel direction solution (`camPos` + `effGunFwd`) works well and resolves the main ADS accuracy/alignment issue while preserving natural breathing sway.
+
+# iteration 49
+- date: 2026-11-11 21:01 +0700
+- status: passed
+- previous_iteration_results:
+  1. User confirmed Iteration 48 works well with `adsIdleStabilize` disabled, and requested removing `adsIdleStabilize` and `disableProceduralSway` from the config and codebase since they are no longer needed now that the scope-zeroed barrel direction solution resolves the underlying ADS issue.
+- target_goal / hypothesis:
+  1. Cleanly remove `disableProceduralSway` and `adsIdleStabilize` from `config.json`, `init.lua`, and `DetachedReticle.reds`, while retaining `adsRecoilHoriMult` under `/detachedReticle/recoilHorizontal`.
+- changes_made:
+  1. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/config.json`:
+     - Removed `"disableProceduralSway"` and `"adsIdleStabilize"`.
+  2. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Removed `disableProceduralSway` and `adsIdleStabilize` from `Config`, `LoadConfig()`, `onUpdate`, ImGui `onDraw()`, console setters, and `GetOptions()`.
+     - Removed `/detachedReticle/adsSway` subcategory in `SetupNativeSettings()` and moved `ADS Horizontal Recoil Multiplier` (`ns.addRangeFloat`) under `/detachedReticle/recoilHorizontal`.
+  3. `r6/scripts/DetachedReticle/DetachedReticle.reds`:
+     - Removed procedural sway stat modifier fields/methods and resting ADS idle stabilization fields/logic from `DetachedAimSystem`, `UpdateDetachedAim`, and `ShootEvents.OnEnter`.
+
 # next iteration above this line
 
 ### Findings Writing Rules:
