@@ -924,6 +924,38 @@ ef<...>). Fixed FromVariant<smartGunUIParameters> to FromVariant<ref<smartGunUIP
   3. `r6/scripts/DetachedReticle/DetachedReticle.reds`:
      - Removed procedural sway stat modifier fields/methods and resting ADS idle stabilization fields/logic from `DetachedAimSystem`, `UpdateDetachedAim`, and `ShootEvents.OnEnter`.
 
+# iteration 50
+- date: 2026-11-11 22:42 +0700
+- status: passed
+- previous_iteration_results:
+  1. User reported that when running and the gun is not at the "ready" / hip-fire / ADS position, the movement direction deviates several degrees to the right or left of `T1` yaw (varying by weapon), caused by `T2B` barrel compensation remaining active. User requested turning off (neutralizing) `T2B` when not aiming / not in ready posture, with a gradual transition (`~0.2–0.4s`) between ON and OFF to prevent camera jitter/shake.
+- target_goal / hypothesis:
+  1. **Root causes verified in `DetachedReticle.log` and vanilla PSM scripts (`crosshairTransitions.script`, `locomotionTransitions.script`, `weaponTransitions.script`):**
+     - Physical WASD forward movement (`MoveHeading`) follows puppet body yaw (`T2B`), so any non-zero `CompYaw` skews movement direction by `-CompYaw` relative to camera yaw (`T1`).
+     - During Sprint (`Locomotion == 2` or `LocomotionDetailed == 4` / `5`), `crosshairTransitions.script:22-23` returns `gamePSMCrosshairStates.HipFire` (`8`) and `RightWeapon` remains `5` (`Ready`). Because `init.lua` only checked `crosshairState == 7` for `"SPRINT"`, `stateStr` evaluated to `"HIP"` while sprinting, causing `T2B` to actively track the weapon's sprint chest-carry angle (e.g. `Sor22` `+8.40°`, `Kyubi` `+6.17°`, `Malorian` `-8.46°`, `Psycho` `+8.35°`).
+     - During `PublicSafe -> Ready` (`weaponTransitions.script:1606`) and `Sprint -> Stand` transitions, `RightWeapon` flips to `5` (`Ready`) before the arms finish swinging the barrel back to the hipfire pose (`gunRelVel` `20–150 deg/s`), latching transient swing angles (`+5.9°` to `+8.4°`) into `lastSettledCompTargetYaw`. Conversely, when lowering into `PublicSafe` (`F=10943`), the barrel starts rotating toward `+45°` before `RightWeapon` flips to `6`, pulling `CompYaw`/`CompPitch` up to `+3.8°` before snapping to `0.0`.
+     - In `init.lua:1458, 1492`, `hasSettledComp` overrode `readyWeight < 0.999` and kept feeding `lastSettledCompTargetYaw` into `DR_SetBarrelOffset` even when `isReadyStance` was `false`.
+     - Stepping `s_targetCompYaw`/`Pitch` to `0.0` in a single frame caused a 1-frame lookahead prediction mismatch in `InputHook.cpp:687-698`, producing a visible camera twitch.
+  2. **Fix in `init.lua`:**
+     - Read `Locomotion` (`locoState`) and `LocomotionDetailed` (`locoDetailed`) from `psmBB`; detect sprint (`crosshairState == 7 or locoState == 2 or locoDetailed == 4 or locoDetailed == 5`) and non-ready locomotion states (`Slide`, `Dodge`, `Vault`, `Climb`, `Workspot`).
+     - Track body-relative barrel angular velocity `gunRelVel`, a `0.20s` post-recoil hold window (`inRecoilWindow`), departure from settled pose (`isLeavingSettledPose`), and a settled ready posture timer (`readyStableTimer >= 0.10s`) before enabling `T2B`.
+     - Ramp `t2bActiveLinear` $\in [0, 1]$ over `0.25s` using a $C^1$-continuous smoothstep `t2bBlend = u * u * (3.0 - 2.0 * u)` (giving a smooth `~0.30s` total transition with the native filter), holding `lastValidCompYaw`/`Pitch` during ramp-down so non-ready transition animations are never sampled.
+     - Only latch `lastSettledCompTargetYaw`/`Pitch` when settled at rest in ready posture (`gunRelVel < 3.5 deg/s`, `lastMoveSpeed < 0.25 m/s`, `readyStableTimer >= 0.15s`).
+- changes_made:
+  1. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Added `locoState` and `locoDetailed` reads from `PlayerStateMachine` blackboard in `onUpdate` and `upperBodyState`/`rightWeaponState`/`crosshairState`/`T2BBlend` telemetry in `MonitorLocomotion`.
+     - Updated `stateStr` and `isReadyPosture` to gate out Sprint, CrouchSprint, Safe/PublicSafe, Equip/Unequip, Reload/QuickMelee, and non-ready locomotion states.
+     - Implemented `readyStableTimer`, `gunRelVel` settled-offset latching, `isLeavingSettledPose` early ramp-down detection, and the gradual `0.25s` smoothstep `t2bBlend` envelope (`~0.30s` total transition) for turning `T2B` ON and OFF.
+- expected_outcome:
+  1. When sprinting or running with the weapon lowered / safe / not in ready posture, `T2B` compensation smoothly ramps to `0.0` over `~0.30s`, aligning puppet body heading (`T2B`) and movement direction (`MoveHeading`) with `T1` camera yaw (`dMove_Cam ~ 0.0°`).
+  2. Transitions into and out of `T2B` (Ready Hipfire $\leftrightarrow$ Sprint, Ready Hipfire $\leftrightarrow$ Safe, Ready Hipfire $\leftrightarrow$ ADS) occur smoothly over `~0.30s` without camera snap or jitter, and never latch mid-swing arm animation angles.
+- test_procedure:
+  1. Deploy `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua` to `E:\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\DetachedReticle\init.lua`.
+  2. Test multiple weapons (`Sor22`, `Kyubi`, `Malorian`, `Psycho`, `Tactician`) while sprinting, running with weapon lowered/safe, and transitioning between Sprint/Safe/ADS and Ready Hipfire.
+  3. Verify in-game and in `DetachedReticle.log` (`[LOCOMOTION_MONITOR]` and `[T2B_OFFSET_COMP]`) that `CompYaw` smoothly neutralizes to `0.00 deg` (`dMove_Cam ~ 0.00 deg`) when not in ready posture and smoothly restores in ready hipfire without camera shake.
+- test_results:
+  1. User verified in-game: `T2B` compensation cleanly neutralizes when running/sprinting or not in ready/hip-fire/ADS posture so movement aligns with `T1` yaw, and transitions between ON and OFF are smooth with no jitter or shake.
+
 # next iteration above this line
 
 ### Findings Writing Rules:
