@@ -223,6 +223,7 @@ After any large edit, confirm that the `Decoupled Aim ACTIVE` log line appears a
 
 - A release is a zip of the tracked mod folders (`bin/`, `r6/`, `red4ext/`) plus `README.md`, built into `dist/`.
 - It contains **only** mod files: no `reference/`, `docs/`, `src/`, dumps or logs.
+- **Never run `git checkout main` in this local workspace**, because `main` only tracks `bin/`, `r6/`, and `red4ext/`, so checking out `main` deletes `docs/`, `src/`, `AGENTS.md`, `CMakeLists.txt`, and `docs/DetachedReticle.code-workspace` from disk while checked out. Always stay on `testing` and update `main` via Git plumbing (`$env:GIT_INDEX_FILE` + `git read-tree --prefix=` / `git write-tree` + `git commit-tree` + `git update-ref refs/heads/main`) or a separate temporary worktree before pushing `origin main <tag>`.
 - The README must state:
   - the exact game build
   - every required dependency
