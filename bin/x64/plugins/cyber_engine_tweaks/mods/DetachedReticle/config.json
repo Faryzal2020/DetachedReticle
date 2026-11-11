@@ -21,7 +21,7 @@
   "recoilHoriDamping": 0.7,
   "adsLeverArmComp": true,
   "adsLeverArmLength": 0.2,
-  "dualStabilizeMax": 0.65,
+  "dualStabilizeMax": 1.0,
   "adsRecoilHoriMult": 0.5,
   "chaseLeashEnabled": true,
   "chaseLeashStart": 20.0,
