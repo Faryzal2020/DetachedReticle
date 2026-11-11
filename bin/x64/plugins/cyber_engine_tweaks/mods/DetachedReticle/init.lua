@@ -30,6 +30,7 @@ local Config = {
     -- ADS Lever-Arm Drop Compensation
     adsLeverArmComp = true,       -- Dynamically lower lever-arm root during ADS recoil to prevent sight occlusion
     adsLeverArmLength = 0.20,     -- Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.20; LMG applies x3.5 = 0.70m)
+    adsRecoilHoriMult = 0.5,      -- Multiplier for random horizontal recoil push in ADS relative to hipfire spread (default: 0.5 = half intensity)
     weightHandlingScaling = true, -- Scale catch-up speed & curve exponent dynamically based on weapon weight & player Strength
     dualStabilizeMax = 0.65,      -- Dual-wielding: fraction of anatomical spread stabilized towards camera gaze T1 when resting (default: 0.65)
     -- Experimental T1-to-T2 Chase Rubber Leash
@@ -188,6 +189,7 @@ local function LoadConfig()
                 if data.recoilHoriDamping ~= nil then Config.recoilHoriDamping = tonumber(data.recoilHoriDamping) or Config.recoilHoriDamping end
                 if data.adsLeverArmComp ~= nil then Config.adsLeverArmComp = (data.adsLeverArmComp == true) end
                 if data.adsLeverArmLength ~= nil then Config.adsLeverArmLength = tonumber(data.adsLeverArmLength) or Config.adsLeverArmLength end
+                if data.adsRecoilHoriMult ~= nil then Config.adsRecoilHoriMult = tonumber(data.adsRecoilHoriMult) or Config.adsRecoilHoriMult end
                 if data.weightHandlingScaling ~= nil then Config.weightHandlingScaling = (data.weightHandlingScaling == true) end
                 if data.dualStabilizeMax ~= nil then Config.dualStabilizeMax = tonumber(data.dualStabilizeMax) or Config.dualStabilizeMax end
                 if data.chaseLeashEnabled ~= nil then Config.chaseLeashEnabled = (data.chaseLeashEnabled == true) end
@@ -621,6 +623,16 @@ local function SetupNativeSettings()
                 end
             )
 
+            ns.addRangeFloat(
+                "/detachedReticle/recoilHorizontal",
+                "ADS Horizontal Recoil Multiplier",
+                "Intensity multiplier for random horizontal recoil push in ADS relative to hipfire horizontal spread (default: 0.5 = half intensity)",
+                0.0, 1.0, 0.05, "%.2f", Config.adsRecoilHoriMult, 0.5,
+                function(val)
+                    DetachedReticle.SetAdsRecoilHoriMult(val)
+                end
+            )
+
             ns.addSubcategory("/detachedReticle/chaseLeash", "Experimental T1-to-T2 Chase Rubber Leash")
 
             ns.addSwitch(
@@ -796,11 +808,17 @@ local function MonitorLocomotion(player, fpp, isArmed, weapon, dt, rYaw, cYaw, w
 
         local locoState = -1
         local locoDetailed = -1
+        local upperState = -1
+        local weapState = -1
+        local xhairState = -1
         pcall(function()
             local psmBB = player:GetPlayerStateMachineBlackboard()
             if psmBB then
                 locoState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.Locomotion)
                 locoDetailed = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.LocomotionDetailed)
+                upperState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.UpperBody)
+                weapState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.RightWeapon)
+                xhairState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.Crosshair)
             end
         end)
 
@@ -814,11 +832,11 @@ local function MonitorLocomotion(player, fpp, isArmed, weapon, dt, rYaw, cYaw, w
         end
 
         local statusStr = isArmed and (DetachedReticle.isDualWielding and "DUAL_ARMED" or "ARMED") or "HOLSTERED"
-        local locoLine = string.format("[LOCOMOTION_MONITOR] State=%s | Weapon=%s | Speed=%.2fm/s (Loco:%d, Det:%d) | MoveHeading=%.2f deg | CamHeading=%.2f deg | BodyHeading=%.2f deg | dMove_Cam=%+.2f deg | dMove_Body=%+.2f deg | dCam_Body(rYaw)=%+.2f deg | CompYaw=%+.2f deg | RecoilYaw=%+.2f deg",
-            statusStr, wName, speed2D, locoState, locoDetailed,
+        local locoLine = string.format("[LOCOMOTION_MONITOR] State=%s | Weapon=%s | Speed=%.2fm/s | States=(Upper:%d, Weapon:%d, Loco:%d, Det:%d, Xhair:%d) | MoveHeading=%.2f deg | CamHeading=%.2f deg | BodyHeading=%.2f deg | dMove_Cam=%+.2f deg | dMove_Body=%+.2f deg | dCam_Body(rYaw)=%+.2f deg | CompYaw=%+.2f deg (T2BBlend=%.2f) | RecoilYaw=%+.2f deg",
+            statusStr, wName, speed2D, upperState, weapState, locoState, locoDetailed, xhairState,
             moveHeading, camYaw, bodyYaw,
             dMoveCam, dMoveBody, dCamBody,
-            cYaw or 0.0, wYaw or 0.0)
+            cYaw or 0.0, DetachedReticle.lastT2BBlend or 0.0, wYaw or 0.0)
         Log(locoLine)
     end
 end
@@ -965,8 +983,14 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.lastCamYaw = nil
             DetachedReticle.lastBodyYaw = nil
             DetachedReticle.lastCYaw = nil
-            DetachedReticle.lastSettledCompTargetYaw = 0.0
-            DetachedReticle.lastSettledCompTargetPitch = 0.0
+            DetachedReticle.lastSettledCompTargetYaw = nil
+            DetachedReticle.lastSettledCompTargetPitch = nil
+            DetachedReticle.t2bActiveLinear = 0.0
+            DetachedReticle.lastT2BBlend = 0.0
+            DetachedReticle.lastValidCompYaw = 0.0
+            DetachedReticle.lastValidCompPitch = 0.0
+            DetachedReticle.readyStableTimer = 0.0
+            DetachedReticle.recoilHoldTimer = 0.0
 
             -- Capture baseline sensitivity and heading lock before enabling chase
             local okNatX, natX = pcall(function() return Game.DR_GetSensitivityMultX(fpp) end)
@@ -1007,8 +1031,14 @@ registerForEvent("onUpdate", function(delta)
             if math.abs(camPitch - curTPitch) > 0.5 then
                 pcall(function() Game.DR_ResetChasePitch(camPitch) end)
                 DetachedReticle.lastWrittenRPitch = 0.0
-                DetachedReticle.lastSettledCompTargetYaw = 0.0
-                DetachedReticle.lastSettledCompTargetPitch = 0.0
+                DetachedReticle.lastSettledCompTargetYaw = nil
+                DetachedReticle.lastSettledCompTargetPitch = nil
+                DetachedReticle.t2bActiveLinear = 0.0
+                DetachedReticle.lastT2BBlend = 0.0
+                DetachedReticle.lastValidCompYaw = 0.0
+                DetachedReticle.lastValidCompPitch = 0.0
+                DetachedReticle.readyStableTimer = 0.0
+                DetachedReticle.recoilHoldTimer = 0.0
                 Log(string.format("Decoupled Aim RE-SEED on re-arm: camPitch=%.2f prevTPitch=%.2f", camPitch, curTPitch))
             end
         end
@@ -1032,20 +1062,26 @@ registerForEvent("onUpdate", function(delta)
             end
         end
 
-        -- Resolve aiming posture and ADS state
+        -- Resolve aiming posture, locomotion, and ADS state
         local psmBB = nil
         pcall(function() psmBB = player:GetPlayerStateMachineBlackboard() end)
         local crosshairState = -1
         local upperBodyState = -1
         local rightWeaponState = -1
+        local locoState = -1
+        local locoDetailed = -1
         if psmBB then
             pcall(function()
                 crosshairState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.Crosshair)
                 upperBodyState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.UpperBody)
                 rightWeaponState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.RightWeapon)
+                locoState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.Locomotion)
+                locoDetailed = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.LocomotionDetailed)
             end)
         end
         local isADS = (crosshairState == 4 or upperBodyState == 6)
+        local isSprinting = (crosshairState == 7) or (locoState == 2) or (locoDetailed == 4) or (locoDetailed == 5)
+        local isNonReadyLoco = isSprinting or (locoState > 1 and locoState ~= 3) or (locoDetailed > 3 and locoState ~= 3)
 
         -- Resolve weapon type and evolution
         local weaponName = "Unknown"
@@ -1132,26 +1168,28 @@ registerForEvent("onUpdate", function(delta)
             dropDist = armLen * math.sin(math.rad(wPitch))
         end
 
-        local curPos = nil
-        local okCurPos, cp = pcall(function() return fpp:GetLocalPosition() end)
-        if okCurPos and cp then
-            curPos = cp
-        else
-            curPos = DetachedReticle.baselinePos or Vector4.new(0.0, 0.0, 0.0, 1.0)
+        local bPos = DetachedReticle.baselinePos
+        if not bPos then
+            local okCurPos, cp = pcall(function() return fpp:GetLocalPosition() end)
+            if okCurPos and cp then
+                bPos = Vector4.new(cp.x or 0.0, cp.y or 0.0, cp.z or 0.0, cp.w or 1.0)
+                DetachedReticle.baselinePos = bPos
+            else
+                bPos = Vector4.new(0.0, 0.0, 0.0, 1.0)
+            end
         end
 
-        local lastDrop = DetachedReticle.lastAppliedDrop or 0.0
         DetachedReticle.lastAppliedDrop = dropDist
 
         -- In the parent coordinate frame (head socket tilted by socketPitch):
         -- True world-up is (0.0, fwdZ, fwdXY).
         -- Moving the camera along world-up by +dropDist lowers the gun body relative to camera gaze.
-        -- Apply delta dDrop = dropDist - lastDrop to prevent compounding:
-        local dDrop = dropDist - lastDrop
-        local targetPosX = (curPos.x or 0.0)
-        local targetPosY = (curPos.y or 0.0) + (dDrop * fwdZ)
-        local targetPosZ = (curPos.z or 0.0) + (dDrop * fwdXY)
-        local targetPos = Vector4.new(targetPosX, targetPosY, targetPosZ, curPos.w or 1.0)
+        -- Calculate absolute displacement from baselinePos (never accumulating increments onto mutable curPos)
+        -- to guarantee zero residual drift across shots:
+        local targetPosX = bPos.x or 0.0
+        local targetPosY = (bPos.y or 0.0) + (dropDist * fwdZ)
+        local targetPosZ = (bPos.z or 0.0) + (dropDist * fwdXY)
+        local targetPos = Vector4.new(targetPosX, targetPosY, targetPosZ, bPos.w or 1.0)
 
         pcall(function()
             fpp:SetLocalTransform(targetPos, targetRot)
@@ -1309,12 +1347,14 @@ registerForEvent("onUpdate", function(delta)
         local stateStr = "HIP"
         if isADS then
             stateStr = "ADS"
-        elseif crosshairState == 5 or upperBodyState == 3 then
+        elseif crosshairState == 5 or upperBodyState == 3 or rightWeaponState == 2 or rightWeaponState == 7 then
             stateStr = "RELOAD"
-        elseif crosshairState == 7 then
+        elseif isSprinting then
             stateStr = "SPRINT"
-        elseif crosshairState == 1 or upperBodyState == 1 or rightWeaponState == 6 then
+        elseif crosshairState == 1 or upperBodyState == 1 or upperBodyState == 2 or upperBodyState == 5 or upperBodyState == 7 or rightWeaponState == 6 or rightWeaponState == 1 then
             stateStr = "SAFE"
+        elseif isNonReadyLoco then
+            stateStr = "LOCO"
         end
 
         -- Check mouse deflection gap and active recoil state to determine resting status
@@ -1335,6 +1375,10 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.restingFrames = (DetachedReticle.restingFrames or 0) + 1
         else
             DetachedReticle.restingFrames = 0
+        end
+
+        if aimSys then
+            pcall(function() aimSys:SetAdsRecoilHoriMult(Config.adsRecoilHoriMult) end)
         end
 
         -- 4. Tier 2B Active Barrel Offset Control Loop (Per-Frame Execution)
@@ -1369,17 +1413,54 @@ registerForEvent("onUpdate", function(delta)
             diffYaw = normalizeDeg(gunYaw - bodyYaw)
             diffPitch = gunPitch - t2bPitch
 
+            -- Frame delta and body-relative barrel angular velocity (deg/s)
+            local dt = (type(delta) == "number" and delta > 0.0001 and delta < 0.1) and delta or 0.016
+            local dDiffYaw = normalizeDeg(diffYaw - (DetachedReticle.prevDiffYaw or diffYaw))
+            local dDiffPitch = diffPitch - (DetachedReticle.prevDiffPitch or diffPitch)
+            DetachedReticle.prevDiffYaw = diffYaw
+            DetachedReticle.prevDiffPitch = diffPitch
+            local gunRelVel = math.sqrt(dDiffYaw * dDiffYaw + dDiffPitch * dDiffPitch) / dt
+
+            -- Brief post-recoil hold window (0.20s) so skeletal recoil recovery dips or 1-frame
+            -- RightWeapon=0 (Ready -> Shoot transition) never drop Tier 2B mid-burst.
+            if isRecoiling then
+                DetachedReticle.recoilHoldTimer = 0.20
+            else
+                DetachedReticle.recoilHoldTimer = math.max(0.0, (DetachedReticle.recoilHoldTimer or 0.0) - dt)
+            end
+            local inRecoilWindow = isRecoiling or ((DetachedReticle.recoilHoldTimer or 0.0) > 0.0)
+            local isSwinging = (rawGapYaw > 0.50) or (rawGapPitch > 0.50)
+
+            -- Reset integral trim and settled compensation on weapon change;
+            -- on HIP <-> ADS transitions, reset trim and settled target for non-heavy weapons
+            -- (HMG toggles crosshairState 4 <-> 8 on every zoomed shot without changing stance, whereas LMG/rifles transition between hip-cradle and iron-sight ADS)
+            if weaponName ~= DetachedReticle.lastTrimWeapon then
+                DetachedReticle.lastTrimWeapon = weaponName
+                DetachedReticle.lastTrimADS = isADS
+                DetachedReticle.trimYaw = 0.0
+                DetachedReticle.trimPitch = 0.0
+                DetachedReticle.lastSettledCompTargetYaw = nil
+                DetachedReticle.lastSettledCompTargetPitch = nil
+                DetachedReticle.readyStableTimer = 0.0
+            elseif isADS ~= DetachedReticle.lastTrimADS then
+                DetachedReticle.lastTrimADS = isADS
+                if not isHeavyWeapon then
+                    DetachedReticle.trimYaw = 0.0
+                    DetachedReticle.trimPitch = 0.0
+                    DetachedReticle.lastSettledCompTargetYaw = nil
+                    DetachedReticle.lastSettledCompTargetPitch = nil
+                    DetachedReticle.readyStableTimer = 0.0
+                end
+            end
+
             -- Ready stance gate:
-            -- Universal Ready Stance Gate (Solution B):
-            -- In Cyberpunk, weapons in ready hipfire (or ADS) have steady-state barrel offsets:
-            --   - Regular handguns/rifles: steady-state offset ~0.5-2.0 deg.
-            --   - Double-barrel shotguns (Testera, Igla, Palica, Satara): steady-state offset ~5.6-6.1 deg yaw.
-            --   - Heavy weapons (HMG) & LMGs: steady-state offset ~6.4-7.1 deg pitch.
-            -- Smart weapons: homing targeting, bypass Tier 2B completely.
-            -- When weapon is in ready hipfire or ADS (not SAFE, SPRINT, RELOAD, rightWeaponState != 6, and diffPitch >= -14.0 deg),
-            -- use wide gate [8.5 deg, 12.0 deg] with clamp +/- 8.5 deg so all weapon archetypes center accurately.
-            -- When safe, resting, sprint, reload, or holstered, readyWeight falls to 0.0, smoothly relaxing compensation.
-            local isReadyPosture = (not isSmartWeapon) and (stateStr == "HIP" or stateStr == "ADS") and (rightWeaponState ~= 6) and (diffPitch >= -14.0)
+            -- RightWeapon == 5 (Ready), 3 (Charge), 4, or 0 only when already active in ready upperBodyState (Shoot transition).
+            local curLinear = DetachedReticle.t2bActiveLinear or 0.0
+            local isWeaponStateReady = (rightWeaponState == 5) or (rightWeaponState == 3) or (rightWeaponState == 4)
+                or (rightWeaponState == 0 and (inRecoilWindow or (curLinear > 0.5 and (upperBodyState == 4 or upperBodyState == 6))))
+            local isCombatStance = (not isSmartWeapon) and (not isDual) and (stateStr == "HIP" or (isHeavyWeapon and stateStr == "ADS"))
+            local isReadyPosture = isCombatStance and (not isNonReadyLoco) and isWeaponStateReady and (diffPitch >= -14.0)
+
             local maxAngle = math.max(math.abs(diffYaw), math.abs(diffPitch))
             readyWeight = 0.0
             maxReady = 8.5
@@ -1395,33 +1476,50 @@ registerForEvent("onUpdate", function(delta)
                 end
             end
             local isReadyStance = (readyWeight > 0.001)
-            local isSwinging = (rawGapYaw > 0.50) or (rawGapPitch > 0.50)
             DetachedReticle.lastReadyWeight = readyWeight
 
-            -- Reset integral trim and settled compensation on weapon change;
-            -- on HIP <-> ADS transitions, reset trim and settled target for non-heavy weapons
-            -- (HMG toggles crosshairState 4 <-> 8 on every zoomed shot without changing stance, whereas LMG/rifles transition between hip-cradle and iron-sight ADS)
-            if weaponName ~= DetachedReticle.lastTrimWeapon then
-                DetachedReticle.lastTrimWeapon = weaponName
-                DetachedReticle.lastTrimADS = isADS
-                DetachedReticle.trimYaw = 0.0
-                DetachedReticle.trimPitch = 0.0
-                DetachedReticle.lastSettledCompTargetYaw = nil
-                DetachedReticle.lastSettledCompTargetPitch = nil
-            elseif isADS ~= DetachedReticle.lastTrimADS then
-                DetachedReticle.lastTrimADS = isADS
-                if not isHeavyWeapon then
-                    DetachedReticle.trimYaw = 0.0
-                    DetachedReticle.trimPitch = 0.0
-                    DetachedReticle.lastSettledCompTargetYaw = nil
-                    DetachedReticle.lastSettledCompTargetPitch = nil
+            -- Detect if the gun is physically leaving its settled ready posture (e.g. beginning to lower
+            -- into PublicSafe or swing into Sprint before the PSM blackboard state integer flips):
+            local hasSettledComp = (DetachedReticle.lastSettledCompTargetYaw ~= nil) and (DetachedReticle.lastSettledCompTargetPitch ~= nil)
+            local isLeavingSettledPose = false
+            if hasSettledComp and (not isSwinging) and (not inRecoilWindow) then
+                local devYaw = math.abs(normalizeDeg(diffYaw - DetachedReticle.lastSettledCompTargetYaw))
+                local devPitch = math.abs(diffPitch - DetachedReticle.lastSettledCompTargetPitch)
+                if (devYaw > 3.0 or devPitch > 3.0) and (gunRelVel >= 6.0) then
+                    isLeavingSettledPose = true
                 end
             end
 
-            -- Convergence on camera hit point: slow integral trim on screen error (only when fully resting and not recoiling)
+            -- Track how long the weapon has physically settled in ready posture after any non-ready state
+            if isReadyPosture and (readyWeight >= 0.90) and (not isLeavingSettledPose) and (gunRelVel < 8.0 or isSwinging or inRecoilWindow) then
+                DetachedReticle.readyStableTimer = math.min(1.0, (DetachedReticle.readyStableTimer or 0.0) + dt)
+            elseif (not isReadyPosture) or (readyWeight < 0.50 and not inRecoilWindow and not isSwinging) or isLeavingSettledPose then
+                DetachedReticle.readyStableTimer = 0.0
+            end
+
+            -- Determine whether Tier 2B should be active:
+            -- Requires 0.10s of stable settled ready posture before turning ON (so Sprint-exit / Safe-exit
+            -- arm swing animations complete before T2B engages), and turns OFF immediately when leaving
+            -- ready posture (SPRINT, SAFE, ADS non-heavy, RELOAD, LOCO, lowered/unready).
+            local shouldEnableT2B = Config.activeAimOffset and isArmed and isReadyPosture and (not isLeavingSettledPose)
+                and (readyWeight >= 0.50 or inRecoilWindow or (isSwinging and curLinear > 0.5))
+                and ((DetachedReticle.readyStableTimer or 0.0) >= 0.10 or curLinear > 0.01)
+
+            -- Gradual ON <-> OFF transition over 0.25s using C1-continuous smoothstep (total ~0.30s with native filter)
+            local t2bTransTime = 0.25
+            if shouldEnableT2B then
+                curLinear = math.min(1.0, curLinear + dt / t2bTransTime)
+            else
+                curLinear = math.max(0.0, curLinear - dt / t2bTransTime)
+            end
+            DetachedReticle.t2bActiveLinear = curLinear
+            local t2bBlend = curLinear * curLinear * (3.0 - 2.0 * curLinear)
+            DetachedReticle.lastT2BBlend = t2bBlend
+
+            -- Convergence on camera hit point: slow integral trim on screen error (only when fully resting and T2B fully blended on)
             -- Sign convention: scrX > 0 means reticle is right -> subtract trimYaw to steer gun left towards center (negative feedback)
-            if isResting and isReadyStance and isArmed then
-                local dt = (type(delta) == "number" and delta > 0.0001 and delta < 0.1) and delta or 0.016
+            local isStandingStill = ((DetachedReticle.lastMoveSpeed or 0.0) < 0.25)
+            if isResting and isStandingStill and shouldEnableT2B and (curLinear >= 0.999) and (gunRelVel < 3.5) then
                 local trimClamp = 3.0
                 DetachedReticle.trimYaw = math.max(-trimClamp, math.min(trimClamp, (DetachedReticle.trimYaw or 0.0) - scrX * 0.005 * dt))
                 DetachedReticle.trimPitch = math.max(-trimClamp, math.min(trimClamp, (DetachedReticle.trimPitch or 0.0) - scrY * 0.005 * dt))
@@ -1432,41 +1530,69 @@ registerForEvent("onUpdate", function(delta)
             local targetYaw = math.max(-maxClamp, math.min(maxClamp, rawTargetYaw))
             local targetPitch = math.max(-maxClamp, math.min(maxClamp, rawTargetPitch))
 
-            -- Hold Tier 2B target at its last settled pre-recoil/pre-swing value whenever recoiling,
-            -- swinging (mouse pan > 0.5 deg where upper-body turn lag twists diffYaw), or momentarily dipping
-            -- readyWeight from skeletal recoil animations while remaining in HIP/ADS stance.
-            local hasSettledComp = (DetachedReticle.lastSettledCompTargetYaw ~= nil) and (DetachedReticle.lastSettledCompTargetPitch ~= nil)
-            local isCombatStance = (not isSmartWeapon) and (stateStr == "HIP" or stateStr == "ADS")
-            if isRecoiling or isSwinging or (isCombatStance and readyWeight < 0.999 and hasSettledComp) then
-                if hasSettledComp then
-                    targetYaw = DetachedReticle.lastSettledCompTargetYaw
-                    targetPitch = DetachedReticle.lastSettledCompTargetPitch
+            -- Latch settled anatomical barrel offset ONLY when the gun is genuinely settled at rest in ready posture:
+            -- standing still (< 0.25 m/s), not recoiling, not swinging, and low barrel angular velocity (< 3.5 deg/s).
+            -- If the weapon was drawn while moving and has no standing settled sample yet, seed it once stable.
+            if shouldEnableT2B and (readyWeight >= 0.999) and (not inRecoilWindow) and (not isSwinging) then
+                if isStandingStill and (gunRelVel < 3.5) and ((DetachedReticle.readyStableTimer or 0.0) >= 0.15) then
+                    DetachedReticle.lastSettledCompTargetYaw = targetYaw
+                    DetachedReticle.lastSettledCompTargetPitch = targetPitch
+                    hasSettledComp = true
+                elseif (not hasSettledComp) and (gunRelVel < 6.0) and ((DetachedReticle.readyStableTimer or 0.0) >= 0.15) then
+                    DetachedReticle.lastSettledCompTargetYaw = targetYaw
+                    DetachedReticle.lastSettledCompTargetPitch = targetPitch
+                    hasSettledComp = true
                 end
-            elseif readyWeight >= 0.999 then
-                DetachedReticle.lastSettledCompTargetYaw = targetYaw
-                DetachedReticle.lastSettledCompTargetPitch = targetPitch
+            end
+
+            local baseYaw = 0.0
+            local basePitch = 0.0
+            if shouldEnableT2B then
+                if hasSettledComp and (inRecoilWindow or isSwinging or (not isStandingStill) or (gunRelVel >= 3.5) or (readyWeight < 0.999)) then
+                    baseYaw = DetachedReticle.lastSettledCompTargetYaw
+                    basePitch = DetachedReticle.lastSettledCompTargetPitch
+                else
+                    baseYaw = targetYaw
+                    basePitch = targetPitch
+                end
+                DetachedReticle.lastValidCompYaw = baseYaw
+                DetachedReticle.lastValidCompPitch = basePitch
+            else
+                -- Hold the last valid settled compensation while t2bBlend smoothly ramps down to 0.0,
+                -- preventing the lowering/sprinting/ADS transition animation from being sampled during ramp-down.
+                baseYaw = DetachedReticle.lastValidCompYaw or 0.0
+                basePitch = DetachedReticle.lastValidCompPitch or 0.0
+                if curLinear <= 0.0001 then
+                    DetachedReticle.lastValidCompYaw = 0.0
+                    DetachedReticle.lastValidCompPitch = 0.0
+                    DetachedReticle.trimYaw = 0.0
+                    DetachedReticle.trimPitch = 0.0
+                end
             end
 
             if isDual then
                 -- Dual-wielding: NO Tier 2B body compensation. Body follows T2A smoothed chase.
-                pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
+                DetachedReticle.t2bActiveLinear = 0.0
+                DetachedReticle.lastT2BBlend = 0.0
+                DetachedReticle.lastValidCompYaw = 0.0
+                DetachedReticle.lastValidCompPitch = 0.0
                 DetachedReticle.trimYaw = 0.0
                 DetachedReticle.trimPitch = 0.0
                 DetachedReticle.lastSettledCompTargetYaw = nil
                 DetachedReticle.lastSettledCompTargetPitch = nil
+                pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
 
                 -- Feed dynamic stabilization factor (readyWeight) to DetachedAimSystem for artificial T3 stabilization
                 local stabFactor = (readyWeight or 1.0) * (Config.dualStabilizeMax or 0.65)
                 if aimSys then
                     pcall(function() aimSys:SetDualStabilizeWeight(stabFactor) end)
                 end
-            elseif Config.activeAimOffset and isArmed and isCombatStance and (isReadyStance or isRecoiling or isSwinging or hasSettledComp) then
-                pcall(function() Game.DR_SetBarrelOffset(targetYaw, targetPitch) end)
             else
-                -- While holstering, drawing, or unready: decay C smoothly to 0 via native filter
-                pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
+                pcall(function() Game.DR_SetBarrelOffset(baseYaw * t2bBlend, basePitch * t2bBlend) end)
             end
         else
+            DetachedReticle.t2bActiveLinear = 0.0
+            DetachedReticle.lastT2BBlend = 0.0
             pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
         end
 
@@ -1511,8 +1637,8 @@ registerForEvent("onUpdate", function(delta)
             pcall(function() t2bYaw = Game.DR_GetT2BYaw() end)
             pcall(function() t2bPitch = Game.DR_GetT2BPitch() end)
 
-            local compLine = string.format("[T2B_OFFSET_COMP] ReadyW=" .. string.format("%.2f", DetachedReticle.lastReadyWeight or 0.0) .. " | TargetErr=(dYaw:%+.2f deg, dPitch:%+.2f deg) | Trim=(Y:%+.2f, P:%+.2f) | CompApplied=(C_yaw:%+.2f deg, C_pitch:%+.2f deg) | RecoilW=(Y:%+.2f, P:%+.2f) | T2A_Aim=(Yaw:%.2f, Pitch:%.2f) | T2B_Body=(Yaw:%.2f, Pitch:%.2f) | Residual=(rYaw:%.4f, rPitch:%.4f)",
-                diffYaw, diffPitch, (DetachedReticle.trimYaw or 0.0), (DetachedReticle.trimPitch or 0.0), cYaw, cPitch, wYaw, wPitch, bodyYaw, aPitch, t2bYaw, t2bPitch, rYaw, rPitch)
+            local compLine = string.format("[T2B_OFFSET_COMP] ReadyW=%.2f T2BBlend=%.2f | TargetErr=(dYaw:%+.2f deg, dPitch:%+.2f deg) | Trim=(Y:%+.2f, P:%+.2f) | CompApplied=(C_yaw:%+.2f deg, C_pitch:%+.2f deg) | RecoilW=(Y:%+.2f, P:%+.2f) | T2A_Aim=(Yaw:%.2f, Pitch:%.2f) | T2B_Body=(Yaw:%.2f, Pitch:%.2f) | Residual=(rYaw:%.4f, rPitch:%.4f)",
+                DetachedReticle.lastReadyWeight or 0.0, DetachedReticle.lastT2BBlend or 0.0, diffYaw, diffPitch, (DetachedReticle.trimYaw or 0.0), (DetachedReticle.trimPitch or 0.0), cYaw, cPitch, wYaw, wPitch, bodyYaw, aPitch, t2bYaw, t2bPitch, rYaw, rPitch)
             Log(compLine)
 
             -- Anomaly Watchdogs:
@@ -1543,7 +1669,7 @@ registerForEvent("onUpdate", function(delta)
         local scrDist = math.sqrt(scrX * scrX + scrY * scrY)
         local isOffCenter = (scrDist > 30.0)
         local isNotADS = (not isADS) and (stateStr ~= "ADS")
-        local isNotRestingPos = isArmed and (not isSmartWeapon) and (stateStr ~= "SAFE") and (crosshairState ~= 1) and (rightWeaponState ~= 6) and (stateStr ~= "SPRINT") and (stateStr ~= "RELOAD") and (diffPitch >= -14.0)
+        local isNotRestingPos = isArmed and (not isSmartWeapon) and (stateStr == "HIP") and (crosshairState ~= 1) and (rightWeaponState ~= 6) and (diffPitch >= -14.0)
         local isNotSwinging = (rawGapYaw < 0.50) and (rawGapPitch < 0.50) and (not isRecoiling)
         local isOffCenterIdle = isNotADS and isNotRestingPos and isNotSwinging and isOffCenter and (gunFwd ~= nil)
 
@@ -1579,6 +1705,14 @@ registerForEvent("onUpdate", function(delta)
         if DetachedReticle.isActive then
             DetachedReticle.isActive = false
             pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
+            DetachedReticle.t2bActiveLinear = 0.0
+            DetachedReticle.lastT2BBlend = 0.0
+            DetachedReticle.lastValidCompYaw = 0.0
+            DetachedReticle.lastValidCompPitch = 0.0
+            DetachedReticle.readyStableTimer = 0.0
+            DetachedReticle.recoilHoldTimer = 0.0
+            DetachedReticle.lastSettledCompTargetYaw = nil
+            DetachedReticle.lastSettledCompTargetPitch = nil
             DetachedReticle.restingFrames = 0
             DetachedReticle.offCenterTimer = 0.0
             DetachedReticle.offCenterLogCooldown = 0.0
@@ -2129,6 +2263,16 @@ DetachedReticle.SetAdsLeverArmLength = function(val)
     Log(string.format("[OPTIONS] adsLeverArmLength set to: %.2f m", Config.adsLeverArmLength))
 end
 
+DetachedReticle.SetAdsRecoilHoriMult = function(val)
+    Config.adsRecoilHoriMult = tonumber(val) or 0.5
+    SaveConfig()
+    local aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
+    if aimSys then
+        pcall(function() aimSys:SetAdsRecoilHoriMult(Config.adsRecoilHoriMult) end)
+    end
+    Log(string.format("[OPTIONS] adsRecoilHoriMult set to: %.2f", Config.adsRecoilHoriMult))
+end
+
 DetachedReticle.SetDebugLogging = function(val)
     Config.debugLogging = val and true or false
     SaveConfig()
@@ -2136,11 +2280,12 @@ DetachedReticle.SetDebugLogging = function(val)
 end
 
 DetachedReticle.GetOptions = function()
-    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | expPower=%.2f | weightHandlingScaling=%s | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg | recoilMaxRadius=%.1f deg | recoilLeashCurve=%.2f | adsLeverArmComp=%s | adsLeverArmLength=%.2fm",
+    Log(string.format("[OPTIONS] enabled=%s | catchUpSpeed=%.2f | deadzone=%.2f deg | maxDivergence=%.2f deg | smoothingMode=%s | expPower=%.2f | weightHandlingScaling=%s | brakeThresh=%.1f deg | brakeMax=%.0f deg/s | compSettled=%.1f | compMoving=%.1f | compMax=%.0f deg/s | compMin=%.1f deg/s | compThresh=%.1f deg | recoilMaxRadius=%.1f deg | recoilLeashCurve=%.2f | adsLeverArmComp=%s | adsLeverArmLength=%.2fm | adsRecoilHoriMult=%.2f",
         tostring(Config.enabled), Config.catchUpSpeed, Config.deadzone, Config.maxDivergence, Config.smoothingMode,
         Config.expPower, tostring(Config.weightHandlingScaling), Config.brakeThreshold, Config.brakeMaxSpeed,
         Config.compSpeedSettled, Config.compSpeedMoving, Config.compMaxSpeed, Config.compMinSpeed, Config.compGapThreshold,
-        Config.recoilMaxRadius, Config.recoilLeashCurve, tostring(Config.adsLeverArmComp), Config.adsLeverArmLength))
+        Config.recoilMaxRadius, Config.recoilLeashCurve, tostring(Config.adsLeverArmComp), Config.adsLeverArmLength,
+        Config.adsRecoilHoriMult))
     return Config
 end
 
