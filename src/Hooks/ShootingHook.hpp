@@ -11,6 +11,7 @@ public:
     static void Shutdown();
 
     static void SetMuzzleAimState(const RED4ext::Vector4& aMuzzlePos, const RED4ext::Vector4& aMuzzleFwd, const RED4ext::Vector4& aCamFwd, bool aIsDecoupled);
+    static void QueueMuzzleShot(const RED4ext::Vector4& aMuzzlePos, const RED4ext::Vector4& aMuzzleFwd, const RED4ext::Vector4& aCamFwd, int32_t aPelletCount);
 
     static inline RED4ext::Vector4 s_muzzlePos{ 0.0f, 0.0f, 0.0f, 1.0f };
     static inline RED4ext::Vector4 s_muzzleFwd{ 0.0f, 1.0f, 0.0f, 0.0f };

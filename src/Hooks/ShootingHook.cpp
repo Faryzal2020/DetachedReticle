@@ -40,6 +40,79 @@ static thread_local float s_waPhysicalRayOrigin[3] = {};
 static thread_local float s_waPhysicalRayMuzzleForward[3] = {};
 static thread_local float s_waPhysicalRayCamForward[3] = {};
 
+// Per-shot FIFO ring buffer so simultaneous dual-wield shots (Right & Left guns firing on the same frame)
+// never overwrite each other's muzzle origin and converged T3 trajectory before PhysicalRay executes.
+struct QueuedShot {
+    float muzzlePos[3];
+    float muzzleFwd[3];
+    float camFwd[3];
+    int32_t remainingRays;
+    uint64_t timestampMs;
+};
+
+static constexpr size_t kMaxQueuedShots = 16;
+static constexpr uint64_t kShotQueueExpiryMs = 120;
+static SRWLOCK s_shotQueueLock = SRWLOCK_INIT;
+static QueuedShot s_shotQueue[kMaxQueuedShots] = {};
+static size_t s_shotQueueHead = 0;
+static size_t s_shotQueueCount = 0;
+static QueuedShot s_activeShot = {};
+static bool s_hasActiveShot = false;
+
+static void ConsumeShotState(float* outMuzzle, float* outFwd, float* outCam) {
+    const uint64_t nowMs = GetTickCount64();
+    AcquireSRWLockExclusive(&s_shotQueueLock);
+
+    if (s_hasActiveShot && (s_activeShot.remainingRays <= 0 || (nowMs - s_activeShot.timestampMs) > kShotQueueExpiryMs)) {
+        s_hasActiveShot = false;
+    }
+
+    while (s_shotQueueCount > 0) {
+        const QueuedShot& front = s_shotQueue[s_shotQueueHead];
+        if (front.remainingRays <= 0 || (nowMs - front.timestampMs) > kShotQueueExpiryMs) {
+            s_shotQueueHead = (s_shotQueueHead + 1) % kMaxQueuedShots;
+            --s_shotQueueCount;
+        } else {
+            break;
+        }
+    }
+
+    if (!s_hasActiveShot && s_shotQueueCount > 0) {
+        s_activeShot = s_shotQueue[s_shotQueueHead];
+        s_shotQueueHead = (s_shotQueueHead + 1) % kMaxQueuedShots;
+        --s_shotQueueCount;
+        s_hasActiveShot = true;
+    }
+
+    if (s_hasActiveShot && s_activeShot.remainingRays > 0) {
+        outMuzzle[0] = s_activeShot.muzzlePos[0];
+        outMuzzle[1] = s_activeShot.muzzlePos[1];
+        outMuzzle[2] = s_activeShot.muzzlePos[2];
+        outFwd[0] = s_activeShot.muzzleFwd[0];
+        outFwd[1] = s_activeShot.muzzleFwd[1];
+        outFwd[2] = s_activeShot.muzzleFwd[2];
+        outCam[0] = s_activeShot.camFwd[0];
+        outCam[1] = s_activeShot.camFwd[1];
+        outCam[2] = s_activeShot.camFwd[2];
+        --s_activeShot.remainingRays;
+        if (s_activeShot.remainingRays <= 0) {
+            s_hasActiveShot = false;
+        }
+    } else {
+        outMuzzle[0] = ShootingHook::s_muzzlePos.X;
+        outMuzzle[1] = ShootingHook::s_muzzlePos.Y;
+        outMuzzle[2] = ShootingHook::s_muzzlePos.Z;
+        outFwd[0] = ShootingHook::s_muzzleFwd.X;
+        outFwd[1] = ShootingHook::s_muzzleFwd.Y;
+        outFwd[2] = ShootingHook::s_muzzleFwd.Z;
+        outCam[0] = ShootingHook::s_camFwd.X;
+        outCam[1] = ShootingHook::s_camFwd.Y;
+        outCam[2] = ShootingHook::s_camFwd.Z;
+    }
+
+    ReleaseSRWLockExclusive(&s_shotQueueLock);
+}
+
 static inline bool WaPlausiblePtr(uintptr_t p) {
     return p >= 0x10000ull && p < 0x00007FFFFFFFFFFFull && (p & 7ull) == 0;
 }
@@ -206,9 +279,15 @@ extern "C" char Hooked_WaPhysicalRayOrigin(void* rcx, void* rdx, float* out) {
     if (!result || !out || !ShootingHook::s_isDecoupled) return result;
 
     __try {
-        const float muzzle[3] = { ShootingHook::s_muzzlePos.X, ShootingHook::s_muzzlePos.Y, ShootingHook::s_muzzlePos.Z };
-        const float forward[3] = { ShootingHook::s_muzzleFwd.X, ShootingHook::s_muzzleFwd.Y, ShootingHook::s_muzzleFwd.Z };
-        const float cam[3] = { ShootingHook::s_camFwd.X, ShootingHook::s_camFwd.Y, ShootingHook::s_camFwd.Z };
+        // Verify this ray belongs to the local player's weapon before consuming from the shot queue
+        if (!WaPlayerOwnedWeapon(rdx)) {
+            return result;
+        }
+
+        float muzzle[3] = {};
+        float forward[3] = {};
+        float cam[3] = {};
+        ConsumeShotState(muzzle, forward, cam);
 
         // Quick distance check between camera origin and weapon muzzle (must be within 3.0 m)
         const float dx = out[0] - muzzle[0];
@@ -216,11 +295,6 @@ extern "C" char Hooked_WaPhysicalRayOrigin(void* rcx, void* rdx, float* out) {
         const float dz = out[2] - muzzle[2];
         const float distanceSq = dx*dx + dy*dy + dz*dz;
         if (!std::isfinite(distanceSq) || distanceSq > 3.0f * 3.0f) {
-            return result;
-        }
-
-        // Verify this ray belongs to the local player's weapon
-        if (!WaPlayerOwnedWeapon(rdx)) {
             return result;
         }
 
@@ -407,6 +481,60 @@ void ShootingHook::SetMuzzleAimState(const RED4ext::Vector4& aMuzzlePos, const R
     s_muzzleFwd = aMuzzleFwd;
     s_camFwd = aCamFwd;
     s_isDecoupled = aIsDecoupled;
+    if (!aIsDecoupled) {
+        AcquireSRWLockExclusive(&s_shotQueueLock);
+        s_shotQueueHead = 0;
+        s_shotQueueCount = 0;
+        s_hasActiveShot = false;
+        ReleaseSRWLockExclusive(&s_shotQueueLock);
+    }
+}
+
+void ShootingHook::QueueMuzzleShot(const RED4ext::Vector4& aMuzzlePos, const RED4ext::Vector4& aMuzzleFwd, const RED4ext::Vector4& aCamFwd, int32_t aPelletCount) {
+    s_muzzlePos = aMuzzlePos;
+    s_muzzleFwd = aMuzzleFwd;
+    s_camFwd = aCamFwd;
+    s_isDecoupled = true;
+
+    const uint64_t nowMs = GetTickCount64();
+    const int32_t rays = (aPelletCount > 1) ? aPelletCount : 1;
+
+    AcquireSRWLockExclusive(&s_shotQueueLock);
+
+    if (s_hasActiveShot && (s_activeShot.remainingRays <= 0 || (nowMs - s_activeShot.timestampMs) > kShotQueueExpiryMs)) {
+        s_hasActiveShot = false;
+    }
+
+    while (s_shotQueueCount > 0) {
+        const QueuedShot& front = s_shotQueue[s_shotQueueHead];
+        if (front.remainingRays <= 0 || (nowMs - front.timestampMs) > kShotQueueExpiryMs) {
+            s_shotQueueHead = (s_shotQueueHead + 1) % kMaxQueuedShots;
+            --s_shotQueueCount;
+        } else {
+            break;
+        }
+    }
+
+    if (s_shotQueueCount >= kMaxQueuedShots) {
+        s_shotQueueHead = (s_shotQueueHead + 1) % kMaxQueuedShots;
+        --s_shotQueueCount;
+    }
+
+    const size_t tail = (s_shotQueueHead + s_shotQueueCount) % kMaxQueuedShots;
+    s_shotQueue[tail].muzzlePos[0] = aMuzzlePos.X;
+    s_shotQueue[tail].muzzlePos[1] = aMuzzlePos.Y;
+    s_shotQueue[tail].muzzlePos[2] = aMuzzlePos.Z;
+    s_shotQueue[tail].muzzleFwd[0] = aMuzzleFwd.X;
+    s_shotQueue[tail].muzzleFwd[1] = aMuzzleFwd.Y;
+    s_shotQueue[tail].muzzleFwd[2] = aMuzzleFwd.Z;
+    s_shotQueue[tail].camFwd[0] = aCamFwd.X;
+    s_shotQueue[tail].camFwd[1] = aCamFwd.Y;
+    s_shotQueue[tail].camFwd[2] = aCamFwd.Z;
+    s_shotQueue[tail].remainingRays = rays;
+    s_shotQueue[tail].timestampMs = nowMs;
+    ++s_shotQueueCount;
+
+    ReleaseSRWLockExclusive(&s_shotQueueLock);
 }
 
 } // namespace DetachedReticle

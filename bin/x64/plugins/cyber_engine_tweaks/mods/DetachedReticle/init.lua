@@ -32,7 +32,7 @@ local Config = {
     adsLeverArmLength = 0.20,     -- Effective lever-arm length L in meters for vertical drop h = L * sin(wPitch) (default: 0.20; LMG applies x3.5 = 0.70m)
     adsRecoilHoriMult = 0.5,      -- Multiplier for random horizontal recoil push in ADS relative to hipfire spread (default: 0.5 = half intensity)
     weightHandlingScaling = true, -- Scale catch-up speed & curve exponent dynamically based on weapon weight & player Strength
-    dualStabilizeMax = 0.65,      -- Dual-wielding: fraction of anatomical spread stabilized towards camera gaze T1 when resting (default: 0.65)
+    dualStabilizeMax = 1.0,       -- Dual-wielding: fraction of static anatomical splay stabilized towards center reticle in ready stance (default: 1.0)
     -- Experimental T1-to-T2 Chase Rubber Leash
     chaseLeashEnabled = true,     -- Experimental rubber leash pulling T2 when separation from T1 exceeds threshold
     chaseLeashStart = 20.0,       -- Degrees: separation where rubber leash tension begins pulling T2 (default: 20.0)
@@ -191,7 +191,13 @@ local function LoadConfig()
                 if data.adsLeverArmLength ~= nil then Config.adsLeverArmLength = tonumber(data.adsLeverArmLength) or Config.adsLeverArmLength end
                 if data.adsRecoilHoriMult ~= nil then Config.adsRecoilHoriMult = tonumber(data.adsRecoilHoriMult) or Config.adsRecoilHoriMult end
                 if data.weightHandlingScaling ~= nil then Config.weightHandlingScaling = (data.weightHandlingScaling == true) end
-                if data.dualStabilizeMax ~= nil then Config.dualStabilizeMax = tonumber(data.dualStabilizeMax) or Config.dualStabilizeMax end
+                if data.dualStabilizeMax ~= nil then
+                    local loadedDualStab = tonumber(data.dualStabilizeMax) or Config.dualStabilizeMax
+                    if math.abs(loadedDualStab - 0.65) < 0.001 then
+                        loadedDualStab = 1.0
+                    end
+                    Config.dualStabilizeMax = loadedDualStab
+                end
                 if data.chaseLeashEnabled ~= nil then Config.chaseLeashEnabled = (data.chaseLeashEnabled == true) end
                 if data.chaseLeashStart ~= nil then Config.chaseLeashStart = tonumber(data.chaseLeashStart) or Config.chaseLeashStart end
                 if data.chaseLeashMax ~= nil then Config.chaseLeashMax = tonumber(data.chaseLeashMax) or Config.chaseLeashMax end
@@ -1068,6 +1074,7 @@ registerForEvent("onUpdate", function(delta)
         local crosshairState = -1
         local upperBodyState = -1
         local rightWeaponState = -1
+        local leftWeaponState = -1
         local locoState = -1
         local locoDetailed = -1
         if psmBB then
@@ -1075,6 +1082,7 @@ registerForEvent("onUpdate", function(delta)
                 crosshairState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.Crosshair)
                 upperBodyState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.UpperBody)
                 rightWeaponState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.RightWeapon)
+                leftWeaponState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.LeftWeapon)
                 locoState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.Locomotion)
                 locoDetailed = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.LocomotionDetailed)
             end)
@@ -1347,11 +1355,11 @@ registerForEvent("onUpdate", function(delta)
         local stateStr = "HIP"
         if isADS then
             stateStr = "ADS"
-        elseif crosshairState == 5 or upperBodyState == 3 or rightWeaponState == 2 or rightWeaponState == 7 then
+        elseif crosshairState == 5 or upperBodyState == 3 or ((not isDual) and (rightWeaponState == 2 or rightWeaponState == 7)) or (isDual and (rightWeaponState == 2 or rightWeaponState == 7) and (leftWeaponState == 2 or leftWeaponState == 7)) then
             stateStr = "RELOAD"
         elseif isSprinting then
             stateStr = "SPRINT"
-        elseif crosshairState == 1 or upperBodyState == 1 or upperBodyState == 2 or upperBodyState == 5 or upperBodyState == 7 or rightWeaponState == 6 or rightWeaponState == 1 then
+        elseif crosshairState == 1 or upperBodyState == 1 or upperBodyState == 2 or upperBodyState == 5 or rightWeaponState == 6 or (isDual and leftWeaponState == 6) then
             stateStr = "SAFE"
         elseif isNonReadyLoco then
             stateStr = "LOCO"
@@ -1454,9 +1462,9 @@ registerForEvent("onUpdate", function(delta)
             end
 
             -- Ready stance gate:
-            -- RightWeapon == 5 (Ready), 3 (Charge), 4, or 0 only when already active in ready upperBodyState (Shoot transition).
+            -- RightWeapon == 5 (Ready), 8 (Shoot), 1 (Charging), 3 (QuickMelee), 4 (NoAmmo), or 0 only when already active in ready upperBodyState (Shoot transition).
             local curLinear = DetachedReticle.t2bActiveLinear or 0.0
-            local isWeaponStateReady = (rightWeaponState == 5) or (rightWeaponState == 3) or (rightWeaponState == 4)
+            local isWeaponStateReady = (rightWeaponState == 5) or (rightWeaponState == 8) or (rightWeaponState == 1) or (rightWeaponState == 3) or (rightWeaponState == 4)
                 or (rightWeaponState == 0 and (inRecoilWindow or (curLinear > 0.5 and (upperBodyState == 4 or upperBodyState == 6))))
             local isCombatStance = (not isSmartWeapon) and (not isDual) and (stateStr == "HIP" or (isHeavyWeapon and stateStr == "ADS"))
             local isReadyPosture = isCombatStance and (not isNonReadyLoco) and isWeaponStateReady and (diffPitch >= -14.0)
@@ -1571,7 +1579,7 @@ registerForEvent("onUpdate", function(delta)
             end
 
             if isDual then
-                -- Dual-wielding: NO Tier 2B body compensation. Body follows T2A smoothed chase.
+                -- Dual-wielding: NO Tier 2B body compensation. Body follows T2A smoothed chase + W recoil.
                 DetachedReticle.t2bActiveLinear = 0.0
                 DetachedReticle.lastT2BBlend = 0.0
                 DetachedReticle.lastValidCompYaw = 0.0
@@ -1582,12 +1590,29 @@ registerForEvent("onUpdate", function(delta)
                 DetachedReticle.lastSettledCompTargetPitch = nil
                 pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
 
-                -- Feed dynamic stabilization factor (readyWeight) to DetachedAimSystem for artificial T3 stabilization
-                local stabFactor = (readyWeight or 1.0) * (Config.dualStabilizeMax or 0.65)
+                -- Dual-wield ready stance gate (active in both non-ADS and ADS when not sprinting/safe/reloading)
+                local dualLinear = DetachedReticle.dualStabLinear or 1.0
+                local isRightHandReady = (rightWeaponState == 5) or (rightWeaponState == 8) or (rightWeaponState == 1) or (rightWeaponState == 3) or (rightWeaponState == 4)
+                    or (rightWeaponState == 0 and (inRecoilWindow or dualLinear > 0.5))
+                local isLeftHandReady = (leftWeaponState == 5) or (leftWeaponState == 8) or (leftWeaponState == 1) or (leftWeaponState == 3) or (leftWeaponState == 4)
+                    or (leftWeaponState == 0 and (inRecoilWindow or dualLinear > 0.5))
+                local isDualWeaponStateReady = (rightWeaponState ~= 6 and leftWeaponState ~= 6) and (isRightHandReady or isLeftHandReady)
+                local isDualReadyPosture = (not isSmartWeapon) and (stateStr == "HIP" or stateStr == "ADS") and (not isNonReadyLoco) and isDualWeaponStateReady and (diffPitch >= -20.0)
+
+                local dualTransTime = 0.25
+                if isDualReadyPosture then
+                    dualLinear = math.min(1.0, dualLinear + dt / dualTransTime)
+                else
+                    dualLinear = math.max(0.0, dualLinear - dt / dualTransTime)
+                end
+                DetachedReticle.dualStabLinear = dualLinear
+                local dualStabBlend = dualLinear * dualLinear * (3.0 - 2.0 * dualLinear)
+                local stabFactor = dualStabBlend * (Config.dualStabilizeMax or 1.0)
                 if aimSys then
                     pcall(function() aimSys:SetDualStabilizeWeight(stabFactor) end)
                 end
             else
+                DetachedReticle.dualStabLinear = 1.0
                 pcall(function() Game.DR_SetBarrelOffset(baseYaw * t2bBlend, basePitch * t2bBlend) end)
             end
         else

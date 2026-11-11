@@ -956,6 +956,46 @@ ef<...>). Fixed FromVariant<smartGunUIParameters> to FromVariant<ref<smartGunUIP
 - test_results:
   1. User verified in-game: `T2B` compensation cleanly neutralizes when running/sprinting or not in ready/hip-fire/ADS posture so movement aligns with `T1` yaw, and transitions between ON and OFF are smooth with no jitter or shake.
 
+# iteration 51
+- date: 2026-11-12 00:04 +0700
+- status: passed
+- previous_iteration_results:
+  1. User reported two issues when dual-wielding in ready stance (both non-ADS and ADS):
+     - Bullets coming from the right gun and left gun both go to the left gun's reticle instead of each of their own T3 reticles.
+     - Each gun's T3 should have artificial stabilization towards the center reticle, with natural sways (without altering T2B).
+- target_goal / hypothesis:
+  1. **Root Cause 1 — Same-Frame Overwrite in `ShootingHook` (`src/Hooks/ShootingHook.cpp`, `DetachedReticle.reds`, `shootTransitions.script:290-297`):**
+     - Verified in `DetachedReticle.log` (`#11..#85`): when dual-wielding in ADS, firing full-auto pairs (`Items.Preset_Lexington_Pimp`), or firing both guns (`BothWeapons`), both `WeaponRight` and `WeaponLeft` state machines enter `ShootEvents.OnEnter` on the **exact same frame** (`m_shotCount` jumps by 2 per frame).
+     - `WeaponRight` entered `ShootEvents.OnEnter` first and wrote `rightMuzzlePos` / `rightAimFwd` to the single static `ShootingHook::s_muzzlePos` / `s_muzzleFwd`. Microseconds later on the same PSM tick (before the native Effect System executed `gameEffectObjectProvider_PhysicalRay::Execute`), `WeaponLeft` entered `ShootEvents.OnEnter` and overwrote `s_muzzlePos` and `s_muzzleFwd` with the **left gun's** muzzle and trajectory. Consequently, when `Hooked_WaPhysicalRayOrigin` (`0x9507B7`) and `Hooked_WaPhysicalRayForward` (`0x9507EC`) ran for both guns' rays, both rays read the left gun's muzzle and forward vector.
+     - Additionally, `UpdateDualWieldAim` and `ShootEvents.OnEnter` previously blended 3D unit vectors toward `camTarget` (`100m` `World Static` only) rather than converging each hand's bullet ray from `muzzlePos` onto the exact 3D target point (`rightTargetPt` / `leftTargetPt`) projected by that hand's T3 reticle.
+  2. **Root Cause 2 — Dual-Wield Ready Stance Gates & Virtual Barrel Stabilization (`init.lua`, `DetachedReticle.reds`, `psmImports.script:581-591, 842-853`):**
+     - In `init.lua:1354`, `upperBodyState == 7` (`gamePSMUpperBodyStates.DualWield == 7`) was misclassified as `stateStr = "SAFE"`, and `rightWeaponState == 8` (`gamePSMRangedWeaponStates.Shoot == 8`) was omitted from `isWeaponStateReady`.
+     - In Iteration 50 (`init.lua:1461`), `and (not isDual)` was added to `isCombatStance`, causing `readyWeight` to always be `0.0` when dual-wielding; in Lua, `(readyWeight or 1.0)` evaluated `0.0 or 1.0` to `0.0`, so `aimSys:SetDualStabilizeWeight(0.0)` was always `0.0` in both non-ADS and ADS.
+     - Furthermore, the old screen-space scaling formula (`screenOffset * (1.0 - stabWeight)`) scaled down natural 3D sway, `T2A` chase lag, and `W` recoil equally rather than isolating each arm's resting anatomical splay.
+     - By measuring each gun's body-relative (`T2B`-relative) angles `(relYaw_i, relPitch_i) = (gunYaw_i - rYaw, gunPitch_i + rPitch)` in camera space, tracking each hand's low-pass resting anatomical offset `(baseYaw_i, basePitch_i)` ($\tau = 0.08\text{ s}$ during the $0.45\text{ s}$ equip / `HIP <-> ADS` transition window; $\tau = 2.5\text{ s}$ once settled so $>98\%$ of natural 3D breathing/walking sway passes through), subtracting `stabWeight * base_i` from each gun's barrel angle, and interpolating the sight raycast origin `sightOrigin_i = muzPos_i * (1 - stabWeight) + camPos * stabWeight`, both guns' T3 reticles stabilize onto the center reticle in ready stance (both non-ADS and ADS) while preserving 100% of each gun's natural 3D sway, `T2A` chase lag, and `W` recoil, without ever altering `T2B` (`DR_SetBarrelOffset(0.0, 0.0)`).
+- changes_made:
+  1. `src/Hooks/ShootingHook.hpp`, `src/Hooks/ShootingHook.cpp`, `src/Main.cpp`, `r6/scripts/DetachedReticle/NativeBridge.reds`, `red4ext/plugins/DetachedReticle/DetachedReticle.dll`:
+     - Added thread-safe (`SRWLOCK`) per-shot FIFO ring buffer (`QueuedShot` with `remainingRays` and `120 ms` expiry) and RTTI function `QueueMuzzleShot(muzzlePos, muzzleFwd, camFwd, pelletCount)` to `ShootingHook`, plus `DR_GetResidualYaw()` and `DR_GetResidualPitch()` declarations in `NativeBridge.reds`.
+     - In `Hooked_WaPhysicalRayOrigin`, after `WaPlayerOwnedWeapon(rdx)` succeeds, consumes one ray from the front of the FIFO shot queue so simultaneous Right and Left gun shots on the same frame each use their own muzzle origin and converged T3 trajectory.
+     - Rebuilt `DetachedReticle.dll`.
+  2. `r6/scripts/DetachedReticle/DetachedReticle.reds`:
+     - Added per-hand resting baseline fields and `UpdateDualBaseOffsets` / `ResetDualSettled` to `DetachedAimSystem`.
+     - Updated `UpdateDualWieldAim` to compute each hand's virtual stabilized barrel vector `effFwd_i`, raycast from `sightOrigin_i` (`World Static` + `World Dynamic`, `200m`) to get `rightTargetPt` and `leftTargetPt`, project each to its own T3 widget (`activeWidget` and `m_leftCrosshair`), and converge `rightAimFwd` / `leftAimFwd` onto each hand's 3D target point.
+     - Updated `ShootEvents.OnEnter` to identify which hand is firing (`this.IsLeftWeaponLogic() || weapon == leftWeapon`), compute that hand's stabilized converged `aimFwd`, query `ProjectilesPerShot`, and enqueue the shot via `QueueMuzzleShot(muzzlePos, aimFwd, camFwd, pellets)`.
+  3. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua` & `config.json`:
+     - Fixed `upperBodyState == 7` (`DualWield`) and `rightWeaponState == 8` (`Shoot`) / `1` (`Charging`) in `stateStr` and `isWeaponStateReady`.
+     - Added `leftWeaponState` read and `isDualReadyPosture` gate (active in both `"HIP"` and `"ADS"` ready stances) with a `0.25s` smoothstep ramp (`dualStabBlend`) feeding `aimSys:SetDualStabilizeWeight(stabFactor)`, while keeping `Game.DR_SetBarrelOffset(0.0, 0.0)`.
+- expected_outcome:
+  1. When dual-wielding in ready stance (both non-ADS and ADS), right-gun bullets always originate from the right muzzle and hit the right gun's T3 reticle, and left-gun bullets always originate from the left muzzle and hit the left gun's T3 reticle, even when both guns fire on the exact same frame.
+  2. Both guns' T3 reticles stabilize around the center reticle in ready stance (both non-ADS and ADS) while preserving each gun's independent natural 3D breathing/walking sway, `T2A` mouse-chase lag, and `W` recoil, with `T2B` barrel compensation remaining strictly `0.0`.
+- test_procedure:
+  1. Deploy `DetachedReticle.dll`, `DetachedReticle.reds`, `NativeBridge.reds`, `init.lua`, and `config.json` to `E:\Cyberpunk 2077`.
+  2. Equip dual-wielded ranged weapons in ready stance (test both non-ADS hipfire and ADS):
+     - Verify both right and left T3 reticles stabilize around the center reticle while exhibiting natural 3D breathing and walking sway (and trailing with `T2A` chase lag when panning).
+     - Fire right gun alone, left gun alone, and both guns simultaneously (semi-auto and full-auto in both hipfire and ADS): verify right-gun bullets land on the right T3 reticle and left-gun bullets land on the left T3 reticle.
+- test_results:
+  1. User verified in-game and approved for minor release (`v1.3.0`).
+
 # next iteration above this line
 
 ### Findings Writing Rules:

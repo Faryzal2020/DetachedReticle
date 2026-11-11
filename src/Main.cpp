@@ -32,6 +32,26 @@ void SetMuzzleAimState(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFr
     DetachedReticle::ShootingHook::SetMuzzleAimState(muzzlePos, muzzleFwd, camFwd, isDecoupled);
 }
 
+void QueueMuzzleShot(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(aOut);
+    RED4EXT_UNUSED_PARAMETER(a4);
+
+    RED4ext::Vector4 muzzlePos;
+    RED4ext::Vector4 muzzleFwd;
+    RED4ext::Vector4 camFwd;
+    int32_t pelletCount = 1;
+
+    RED4ext::GetParameter(aFrame, &muzzlePos);
+    RED4ext::GetParameter(aFrame, &muzzleFwd);
+    RED4ext::GetParameter(aFrame, &camFwd);
+    RED4ext::GetParameter(aFrame, &pelletCount);
+
+    aFrame->code++; // skip ParamEnd
+
+    DetachedReticle::ShootingHook::QueueMuzzleShot(muzzlePos, muzzleFwd, camFwd, pelletCount);
+}
+
 void DR_SetSmoothing(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
     RED4EXT_UNUSED_PARAMETER(aContext);
     RED4EXT_UNUSED_PARAMETER(aOut);
@@ -521,6 +541,14 @@ void PostRegisterTypes() {
     func->AddParam("Vector4", "camFwd");
     func->AddParam("Bool", "isDecoupled");
     rtti->RegisterFunction(func);
+
+    auto funcQueueShot = RED4ext::CGlobalFunction::Create("QueueMuzzleShot", "QueueMuzzleShot", &QueueMuzzleShot);
+    funcQueueShot->flags = flags;
+    funcQueueShot->AddParam("Vector4", "muzzlePos");
+    funcQueueShot->AddParam("Vector4", "muzzleFwd");
+    funcQueueShot->AddParam("Vector4", "camFwd");
+    funcQueueShot->AddParam("Int32", "pelletCount");
+    rtti->RegisterFunction(funcQueueShot);
 
     auto funcSetSmoothing = RED4ext::CGlobalFunction::Create("DR_SetSmoothing", "DR_SetSmoothing", &DR_SetSmoothing);
     funcSetSmoothing->flags = flags;
