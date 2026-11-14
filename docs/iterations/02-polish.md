@@ -996,6 +996,31 @@ ef<...>). Fixed FromVariant<smartGunUIParameters> to FromVariant<ref<smartGunUIP
 - test_results:
   1. User verified in-game and approved for minor release (`v1.3.0`).
 
+# iteration 52
+- date: 2026-11-12 06:31 +0700
+- status: untested
+- previous_iteration_results:
+  1. Two PhysX crash reports (`20261112-053709-crash-tid133688-01.txt` and `20261112-062154-crash-tid139360-01.txt`) both faulted on `redDispatcher` worker threads inside `PhysX3_x64.dll +0xDDEDD` (`physx::Sq::AABBTree::refitMarkedNodes+0x12D`) while `OnDetachedReticleTick -> UpdateDetachedAim -> UpdateDualWieldAim -> SyncRaycastByCollisionPreset` executed `World Dynamic` / `World Static` raycasts concurrently with main-thread PhysX scene updates.
+  2. Full root-cause analysis and Option A architecture documented in `docs/design/main-thread-raycast.md`.
+- target_goal / hypothesis:
+  1. Eliminate all PhysX `SpatialQueriesSystem::SyncRaycastByCollisionPreset` calls from `inkAnimProxy` `OnDetachedReticleTick` (`redDispatcher*` worker threads) and from `ShootEvents.OnEnter` by moving all world-space aim resolution and raycasting onto the Main Thread (`CRunningState::OnTick` via CET `onUpdate` -> `DetachedAimSystem.UpdateWorldAim`), turning `OnDetachedReticleTick` into UI-only widget projection and `ShootEvents.OnEnter` into a consumer of cached main-thread target points.
+- changes_made:
+  1. `r6/scripts/DetachedReticle/DetachedReticle.reds`:
+     - Added main-thread world aim pipeline to `DetachedAimSystem`: `UpdateWorldAim`, `UpdateWorldAimDual`, `ClearDetachedAim`, `RaycastTarget`, `ResolveMuzzleTransform`, `MeasureCamRelativeAngles`, `ConvergeFromTarget`, `ComputeDualVirtualFwd`, `SetWorldAimState`, `SetScreenOffsets`, `GetLeftTargetPoint`, `IsDualWieldActive`. All `SyncRaycastByCollisionPreset` calls (`World Static` with `staticOnly = true`, `World Dynamic` when dynamic convergence is needed) now live exclusively inside `DetachedAimSystem.RaycastTarget`, reachable only from `UpdateWorldAim`.
+     - Refactored `gameuiCrosshairContainerController.UpdateDetachedAim` and `UpdateDualWieldAim` (plus shared helpers `GetRootCanvasSize`, `ProjectToScreenOffset`, `TryProjectScreenOffset`) to read cached `DetachedAimSystem` target points and muzzle positions, project them onto screen coordinates, position reticle widgets, and write screen offsets back via `SetScreenOffsets` with zero `SyncRaycastByCollisionPreset`, `UpdateDualBaseOffsets`, or `SetMuzzleAimState` calls.
+     - Refactored `ShootEvents.OnEnter` to call `ResolveMuzzleTransform`, `ComputeDualVirtualFwd`, `GetTargetPoint` / `GetLeftTargetPoint`, and `ConvergeFromTarget`, removing all 5 `SyncRaycastByCollisionPreset` calls.
+  2. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - In `onUpdate` when `shouldBeActive` is true, invoked `aimSys:SetAdsRecoilHoriMult(Config.adsRecoilHoriMult)` and `aimSys:UpdateWorldAim(player, delta or 0.016)` before reading cached aim state.
+     - In `onUpdate`'s deactivation branch (`if DetachedReticle.isActive`), invoked `clearAimSys:ClearDetachedAim()` so `DetachedAimSystem` and native `SetMuzzleAimState` cleanly reset on holster/disable.
+  3. `docs/design/main-thread-raycast.md`:
+     - Documented Option A design and thread ownership.
+- expected_outcome:
+  1. Zero `SyncRaycastByCollisionPreset` calls execute from `redDispatcher*` threads during combat or dual-wielding, eliminating the `AABBTree::refitMarkedNodes` PhysX crash while preserving dual-wield T3 stabilization, single-weapon ADS/hipfire convergence, smart weapon passthrough, and `RecordShot` telemetry.
+- test_procedure:
+  1. Obtain owner approval to deploy `r6/scripts/DetachedReticle/DetachedReticle.reds` and `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua` to `E:\Cyberpunk 2077`.
+  2. Launch Cyberpunk 2077 and verify `r6\logs\redscript_rCURRENT.log` compiles with zero errors and `DetachedReticle.log` logs `Decoupled Aim ACTIVE` with non-zero `rYaw`.
+  3. Reproduce high-action dynamic-entity combat scenes (single weapon hipfire/ADS + dual-wielding `MicroMG` / `Lexington` in Dogtown combat) and verify reticle tracking, bullet convergence, smart weapon passthrough, and zero `PhysX3_x64.dll` worker-thread crashes.
+
 # next iteration above this line
 
 ### Findings Writing Rules:

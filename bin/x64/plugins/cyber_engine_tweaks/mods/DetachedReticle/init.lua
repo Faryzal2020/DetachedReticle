@@ -1319,6 +1319,12 @@ registerForEvent("onUpdate", function(delta)
         pcall(function()
             aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
         end)
+        if aimSys then
+            pcall(function()
+                aimSys:SetAdsRecoilHoriMult(Config.adsRecoilHoriMult)
+                aimSys:UpdateWorldAim(player, delta or 0.016)
+            end)
+        end
 
         local gunFwd = nil
         local scrX, scrY = 0.0, 0.0
@@ -1383,10 +1389,6 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.restingFrames = (DetachedReticle.restingFrames or 0) + 1
         else
             DetachedReticle.restingFrames = 0
-        end
-
-        if aimSys then
-            pcall(function() aimSys:SetAdsRecoilHoriMult(Config.adsRecoilHoriMult) end)
         end
 
         -- 4. Tier 2B Active Barrel Offset Control Loop (Per-Frame Execution)
@@ -1730,6 +1732,12 @@ registerForEvent("onUpdate", function(delta)
         if DetachedReticle.isActive then
             DetachedReticle.isActive = false
             pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
+            pcall(function()
+                local clearAimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
+                if clearAimSys then
+                    clearAimSys:ClearDetachedAim()
+                end
+            end)
             DetachedReticle.t2bActiveLinear = 0.0
             DetachedReticle.lastT2BBlend = 0.0
             DetachedReticle.lastValidCompYaw = 0.0
