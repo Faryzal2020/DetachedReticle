@@ -527,6 +527,69 @@ void DR_GetHeadingLocked(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* a
     }
 }
 
+void DR_GetFppInternalYaw(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+
+    RED4ext::Handle<RED4ext::IScriptable> fppHandle;
+    RED4ext::GetParameter(aFrame, &fppHandle);
+    aFrame->code++;
+
+    if (aOut) {
+        *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetFppInternalYaw(fppHandle.instance);
+    }
+}
+
+void DR_GetFppInternalPitch(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+
+    RED4ext::Handle<RED4ext::IScriptable> fppHandle;
+    RED4ext::GetParameter(aFrame, &fppHandle);
+    aFrame->code++;
+
+    if (aOut) {
+        *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetFppInternalPitch(fppHandle.instance);
+    }
+}
+
+void DR_SetYawDesyncCorrection(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(aOut);
+    RED4EXT_UNUSED_PARAMETER(a4);
+
+    float desyncErr = 0.0f;
+    float fppYaw = 0.0f;
+    float sensX = 1.0f;
+    bool active = false;
+
+    RED4ext::GetParameter(aFrame, &desyncErr);
+    RED4ext::GetParameter(aFrame, &fppYaw);
+    RED4ext::GetParameter(aFrame, &sensX);
+    RED4ext::GetParameter(aFrame, &active);
+    aFrame->code++;
+
+    DetachedReticle::InputHook::SetYawDesyncCorrection(desyncErr, fppYaw, sensX, active);
+}
+
+void DR_IsYawDesyncCorrecting(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) {
+        *reinterpret_cast<bool*>(aOut) = DetachedReticle::InputHook::IsYawDesyncCorrecting();
+    }
+}
+
+void DR_GetLastYawDesyncStep(RED4ext::IScriptable* aContext, RED4ext::CStackFrame* aFrame, void* aOut, int64_t a4) {
+    RED4EXT_UNUSED_PARAMETER(aContext);
+    RED4EXT_UNUSED_PARAMETER(a4);
+    aFrame->code++;
+    if (aOut) {
+        *reinterpret_cast<float*>(aOut) = DetachedReticle::InputHook::GetLastYawDesyncStep();
+    }
+}
+
 void RegisterTypes() {
 }
 
@@ -718,6 +781,33 @@ void PostRegisterTypes() {
     funcGetHeading->AddParam("handle:IScriptable", "fpp");
     funcGetHeading->SetReturnType("Bool");
     rtti->RegisterFunction(funcGetHeading);
+
+    auto funcGetFppYaw = RED4ext::CGlobalFunction::Create("DR_GetFppInternalYaw", "DR_GetFppInternalYaw", &DR_GetFppInternalYaw);
+    funcGetFppYaw->flags = flags;
+    funcGetFppYaw->AddParam("handle:IScriptable", "fpp");
+    funcGetFppYaw->SetReturnType("Float");
+    rtti->RegisterFunction(funcGetFppYaw);
+
+    auto funcGetFppPitch = RED4ext::CGlobalFunction::Create("DR_GetFppInternalPitch", "DR_GetFppInternalPitch", &DR_GetFppInternalPitch);
+    funcGetFppPitch->flags = flags;
+    funcGetFppPitch->AddParam("handle:IScriptable", "fpp");
+    funcGetFppPitch->SetReturnType("Float");
+    rtti->RegisterFunction(funcGetFppPitch);
+
+    auto funcSetYawDesync = RED4ext::CGlobalFunction::Create("DR_SetYawDesyncCorrection", "DR_SetYawDesyncCorrection", &DR_SetYawDesyncCorrection);
+    funcSetYawDesync->flags = flags;
+    funcSetYawDesync->AddParam("Float", "desyncErr");
+    funcSetYawDesync->AddParam("Float", "fppYaw");
+    funcSetYawDesync->AddParam("Float", "sensX");
+    funcSetYawDesync->AddParam("Bool", "active");
+    rtti->RegisterFunction(funcSetYawDesync);
+
+    auto funcIsYawDesync = RED4ext::CGlobalFunction::Create("DR_IsYawDesyncCorrecting", "DR_IsYawDesyncCorrecting", &DR_IsYawDesyncCorrecting);
+    funcIsYawDesync->flags = flags;
+    funcIsYawDesync->SetReturnType("Bool");
+    rtti->RegisterFunction(funcIsYawDesync);
+
+    regGetter("DR_GetLastYawDesyncStep", &DR_GetLastYawDesyncStep);
 
     // Route A: RTTI inspection across camera and player puppet classes
     DetachedReticle::InputHook::ProbeRTTI();

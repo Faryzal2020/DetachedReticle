@@ -81,6 +81,15 @@ public:
     static void SetHeadingLocked(RED4ext::IScriptable* aFpp, bool aLocked);
     static bool GetHeadingLocked(RED4ext::IScriptable* aFpp);
 
+    // FPP Internal Yaw/Pitch Direct Memory Access (offsets 0x4C4, 0x4C8 on gameFPPCameraComponent)
+    static float GetFppInternalYaw(RED4ext::IScriptable* aFpp);
+    static float GetFppInternalPitch(RED4ext::IScriptable* aFpp);
+
+    // Proactive Yaw Desync Correction Bridge APIs
+    static void SetYawDesyncCorrection(float aDesyncErr, float aFppYaw, float aSensX, bool aActive);
+    static bool IsYawDesyncCorrecting();
+    static float GetLastYawDesyncStep();
+
     // Event Buffer
     static void PushEvent(const std::string& aEvent);
     static std::string DrainEvents();
@@ -164,8 +173,15 @@ public:
     // Option A: Continuous Power-Law Curve Parameters
     static inline float s_expPower{ 0.6f };         // Curve exponent: 1.0 = linear exponential, 0.6 = tight power-law chase
 
+    // Proactive Yaw Desync Correction State
+    static inline bool s_yawDesyncCorrecting{ false };
+    static inline float s_yawDesyncErr{ 0.0f };
+    static inline float s_fppInternalYaw{ 0.0f };
+    static inline float s_fppSensX{ 1.0f };
+    static inline float s_lastYawDesyncStep{ 0.0f };
+
     static void ResetChase(float aInitialPitch = 0.0f);
-    static void ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, const float* aSplitProbe, float& outYaw, float& outPitch);
+    static void ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, float* aSplitProbe, float& outYaw, float& outPitch);
 
 private:
     static inline RED4ext::v1::PluginHandle s_handle{ nullptr };
@@ -182,4 +198,4 @@ private:
 } // namespace DetachedReticle
 
 extern "C" void MouseLookRelay();
-extern "C" void OnNativeMouseAim(void* aFpp, float* aYawDelta, float* aPitchDelta, const float* aSplitProbe);
+extern "C" void OnNativeMouseAim(void* aFpp, float* aYawDelta, float* aPitchDelta, float* aSplitProbe);

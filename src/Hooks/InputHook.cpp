@@ -233,8 +233,22 @@ void InputHook::SetSmoothing(float aLambda, int32_t aMode, float aMaxDiv, float 
     s_enabled = aEnabled;
 }
 
-void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, const float* aSplitProbe, float& outYaw, float& outPitch) {
-    if (!s_enabled) {
+void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, float* aSplitProbe, float& outYaw, float& outPitch) {
+    // 0. Extract native weapon recoil/sway delta ([rsp+128h]/[rsp+124h]) vs pure mouse look delta ([rbp-78h]/[rbp-7Ch])
+    // before writing outFppYaw into aSplitProbe[0] for MouseLookRelay.asm (xmm2).
+    float dRecoilYaw = 0.0f;
+    float dRecoilPitch = 0.0f;
+    float dMouseYaw = aRawYaw;
+    float dMousePitch = aRawPitch;
+    if (aSplitProbe) {
+        dRecoilYaw = aSplitProbe[0];
+        dRecoilPitch = aSplitProbe[1];
+        dMouseYaw = aSplitProbe[2];
+        dMousePitch = aSplitProbe[3];
+        aSplitProbe[0] = 0.0f; // Default xmm2 fppYawDelta to 0.0f (vanilla behavior at 0x51D45B)
+    }
+
+    if (!s_enabled && !s_yawDesyncCorrecting) {
         outYaw = aRawYaw;
         outPitch = aRawPitch;
         return;
@@ -251,16 +265,51 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
     }
     float dt = s_smoothedDt;
 
-    // 0. Extract native weapon recoil/sway delta ([rsp+128h]/[rsp+124h]) vs pure mouse look delta ([rbp-78h]/[rbp-7Ch])
-    float dRecoilYaw = 0.0f;
-    float dRecoilPitch = 0.0f;
-    float dMouseYaw = aRawYaw;
-    float dMousePitch = aRawPitch;
+    // Compute proactive yaw desync corrective step if active:
+    // Case 1 (|s_fppInternalYaw| > 0.05 deg): trapped FPP internal freelook yaw [fpp + 0x4C4].
+    //   Simultaneously rotate bodyYaw ([rcx+9Ch] via xmm6) by +corrStep and unwind [fpp + 0x4C4]
+    //   (via xmm2 -> 0x39CA70 -> 0x39CD5C) by -corrStep / sensX so bodyYaw + [fpp + 0x4C4] stays invariant.
+    // Case 2 (|s_fppInternalYaw| <= 0.05 deg): baselineRot offset while [fpp + 0x4C4] is ~0.
+    //   Rotate bodyYaw by +corrStep and accumulate s_lastYawDesyncStep for init.lua to counter-rotate baselineRot.
+    float corrStep = 0.0f;
+    float outFppYaw = 0.0f;
+    if (s_yawDesyncCorrecting && std::abs(s_yawDesyncErr) > 0.05f) {
+        float absErr = std::abs(s_yawDesyncErr);
+        float rate = std::clamp(10.0f * absErr, 20.0f, 300.0f);
+        float stepMag = std::min(absErr, rate * dt);
+        corrStep = std::copysign(stepMag, s_yawDesyncErr);
+
+        if (std::abs(s_fppInternalYaw) > 0.05f) {
+            if (std::abs(corrStep) > std::abs(s_fppInternalYaw)) {
+                corrStep = s_fppInternalYaw;
+            }
+            float sensX = std::max(s_fppSensX, 0.01f);
+            outFppYaw = -corrStep / sensX;
+            s_fppInternalYaw -= corrStep;
+        } else {
+            s_lastYawDesyncStep += corrStep;
+        }
+
+        s_yawDesyncErr -= corrStep;
+        if (std::abs(s_yawDesyncErr) <= 0.05f && std::abs(s_fppInternalYaw) <= 0.05f) {
+            s_yawDesyncCorrecting = false;
+            s_yawDesyncErr = 0.0f;
+            s_fppInternalYaw = 0.0f;
+        }
+    } else if (s_yawDesyncCorrecting) {
+        s_yawDesyncCorrecting = false;
+        s_yawDesyncErr = 0.0f;
+        s_fppInternalYaw = 0.0f;
+    }
+
     if (aSplitProbe) {
-        dRecoilYaw = aSplitProbe[0];
-        dRecoilPitch = aSplitProbe[1];
-        dMouseYaw = aSplitProbe[2];
-        dMousePitch = aSplitProbe[3];
+        aSplitProbe[0] = outFppYaw;
+    }
+
+    if (!s_enabled) {
+        outYaw = aRawYaw + corrStep;
+        outPitch = aRawPitch;
+        return;
     }
 
     s_lastDRecoilYaw = dRecoilYaw;
@@ -710,9 +759,9 @@ void InputHook::ProcessMouseAim(void* aFpp, float aRawYaw, float aRawPitch, cons
     // NOTE: Pitch does NOT wrap around 360; it remains bounded in [-85, +85] degrees absolute.
     // s_aimPitch represents continuous native camera pitch for roll-free yaw projection.
 
-    // 10. Output chase + recoil deltas to engine look integrator at RVA 0x51D462:
-    // Feeds d(T2B) = dA - dComp + dRecoil into puppet yaw [rcx+9Ch] and camera pitch accumulator
-    outYaw = dAYaw - dCompYaw + effDRecoilYaw;
+    // 10. Output chase + recoil deltas (+ any active yaw desync corrective step) to engine look integrator at RVA 0x51D462:
+    // Feeds d(T2B) = dA - dComp + dRecoil + corrStep into puppet yaw [rcx+9Ch] and camera pitch accumulator
+    outYaw = dAYaw - dCompYaw + effDRecoilYaw + corrStep;
     outPitch = dAPitch - dCompPitch + effDRecoilPitch;
 }
 
@@ -778,6 +827,50 @@ bool InputHook::GetHeadingLocked(RED4ext::IScriptable* aFpp) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+
+float InputHook::GetFppInternalYaw(RED4ext::IScriptable* aFpp) {
+    if (!aFpp) return 0.0f;
+    __try {
+        uintptr_t addr = reinterpret_cast<uintptr_t>(aFpp);
+        return *reinterpret_cast<const float*>(addr + 0x4C4);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0.0f;
+    }
+}
+
+float InputHook::GetFppInternalPitch(RED4ext::IScriptable* aFpp) {
+    if (!aFpp) return 0.0f;
+    __try {
+        uintptr_t addr = reinterpret_cast<uintptr_t>(aFpp);
+        return *reinterpret_cast<const float*>(addr + 0x4C8);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0.0f;
+    }
+}
+
+void InputHook::SetYawDesyncCorrection(float aDesyncErr, float aFppYaw, float aSensX, bool aActive) {
+    if (!aActive) {
+        s_yawDesyncCorrecting = false;
+        s_yawDesyncErr = 0.0f;
+        s_fppInternalYaw = 0.0f;
+        s_lastYawDesyncStep = 0.0f;
+        return;
+    }
+    s_yawDesyncErr = std::clamp(aDesyncErr, -180.0f, 180.0f);
+    s_fppInternalYaw = std::clamp(aFppYaw, -180.0f, 180.0f);
+    s_fppSensX = (aSensX > 0.01f) ? aSensX : 1.0f;
+    s_yawDesyncCorrecting = (std::abs(s_yawDesyncErr) > 0.05f);
+}
+
+bool InputHook::IsYawDesyncCorrecting() {
+    return s_yawDesyncCorrecting;
+}
+
+float InputHook::GetLastYawDesyncStep() {
+    float step = s_lastYawDesyncStep;
+    s_lastYawDesyncStep = 0.0f;
+    return step;
 }
 
 void InputHook::PushEvent(const std::string& aEvent) {
@@ -1026,7 +1119,10 @@ void InputHook::ProbeRTTI() {
 
 } // namespace DetachedReticle
 
-extern "C" void OnNativeMouseAim(void* aFpp, float* aYawDelta, float* aPitchDelta, const float* aSplitProbe) {
-    if (!aFpp || !aYawDelta || !aPitchDelta) return;
+extern "C" void OnNativeMouseAim(void* aFpp, float* aYawDelta, float* aPitchDelta, float* aSplitProbe) {
+    if (!aFpp || !aYawDelta || !aPitchDelta) {
+        if (aSplitProbe) aSplitProbe[0] = 0.0f;
+        return;
+    }
     DetachedReticle::InputHook::ProcessMouseAim(aFpp, *aYawDelta, *aPitchDelta, aSplitProbe, *aYawDelta, *aPitchDelta);
 }

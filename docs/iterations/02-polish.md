@@ -1021,6 +1021,35 @@ ef<...>). Fixed FromVariant<smartGunUIParameters> to FromVariant<ref<smartGunUIP
   2. Launch Cyberpunk 2077 and verify `r6\logs\redscript_rCURRENT.log` compiles with zero errors and `DetachedReticle.log` logs `Decoupled Aim ACTIVE` with non-zero `rYaw`.
   3. Reproduce high-action dynamic-entity combat scenes (single weapon hipfire/ADS + dual-wielding `MicroMG` / `Lexington` in Dogtown combat) and verify reticle tracking, bullet convergence, smart weapon passthrough, and zero `PhysX3_x64.dll` worker-thread crashes.
 
+# iteration 53
+- date: 2026-11-14 21:57 +0700
+- status: untested
+- previous_iteration_results:
+  1. Telemetry in `DetachedReticle.log` (`2026-11-14 21:08:08`–`21:09:46`) captured a persistent `-66.15°` yaw desync between puppet `bodyYaw` (`player:GetWorldYaw()`) and rendered camera heading `camYaw` after a `Loco:9` (`Workspot`) transition:
+     - At `21:08:08` (`Loco:9`), `bodyYaw` froze at `+14.87°` while `camYaw` rotated via FPP camera freelook to `-51.28°`, accumulating `-66.14°` in `gameFPPCameraComponent`'s internal freelook yaw (`[fpp + 0x4C4]`).
+     - When `sub_51CFA8` returned to normal on-foot mode (`headingLocked == false`), `0x51D45B` executed `xorps xmm2, xmm2` before calling `0x39CA70` (`FPPCameraComponent::OnMouseLook`) at `0x51D488`, permanently trapping the `-66.14°` freelook yaw in `[fpp + 0x4C4]`.
+     - Additionally, `init.lua:1009` had latched `origHeadingLocked = true` if activated during `Loco:9` and restored `fpp.headingLocked = true` on foot upon deactivation (`init.lua:1765`).
+     - Because `gunYaw` followed the upper-body socket (`bodyYaw + [fpp + 0x4C4] = camYaw + O_yaw`), `diffYaw = normalizeDeg(gunYaw - bodyYaw)` saw `-66.15° + O_yaw`, blowing open Tier 2B's `readyWeight` gate (`maxAngle < 8.5°` -> `ReadyW = 0.00`), while WASD locomotion (`dMove_Body = 0°`, `dMove_Cam = +66.15°`) crab-walked at `+66.15°` relative to the camera.
+- target_goal / hypothesis:
+  1. Prevent `origHeadingLocked = true` from ever being latched or restored on foot, decouple Tier 2B `diffYaw` from `bodyYaw` using `socketYaw = normalizeDeg(camYaw - lastWrittenRYaw)` (Layer 1), and implement a zero-false-positive on-foot Yaw Desync Detector & Native Counter-Steer Corrector (Layer 2) that simultaneously feeds `+corrStep` into `xmm6` (`[rcx + 9Ch]`, rotating `bodyYaw`) and `-corrStep / sensX` into `xmm2` (`0x51D488` -> `0x39CA70` -> `0x39CD5C`, unwinding `[fpp + 0x4C4]`) on the exact same native tick so `bodyYaw + [fpp + 0x4C4]` remains invariant while `bodyYaw` smoothly slews back into alignment with `camYaw`.
+- changes_made:
+  1. `src/Hooks/MouseLookRelay.asm`:
+     - After restoring `xmm2` from `[rsp+40h]`, loads `movss xmm2, dword ptr [rsp+0C8h]` (`aSplitProbe[0]`), passing `outFppYaw` (`0.0f` during normal operation; `-corrStep / sensX` during active FPP yaw desync unwind) to `call 0x39CA70` at `0x51D488`.
+  2. `src/Hooks/InputHook.hpp`, `src/Hooks/InputHook.cpp`, `src/Main.cpp`, `r6/scripts/DetachedReticle/NativeBridge.reds`:
+     - Added `GetFppInternalYaw` (`[fpp + 0x4C4]`), `GetFppInternalPitch` (`[fpp + 0x4C8]`), `SetYawDesyncCorrection`, `IsYawDesyncCorrecting`, and `GetLastYawDesyncStep`, and registered their `DR_*` RTTI bindings.
+     - Updated `InputHook::ProcessMouseAim` to default `aSplitProbe[0] = 0.0f` after reading `dRecoilYaw` and, when `s_yawDesyncCorrecting` is active (both holstered and armed), compute bounded smooth `corrStep` (`rate = clamp(10 * |err|, 20, 300)` deg/s), add `+corrStep` to `outYaw` (`xmm6`), and either unwind `[fpp + 0x4C4]` via `outFppYaw = -corrStep / sensX` (`xmm2`, Case 1) or accumulate `s_lastYawDesyncStep` for `baselineRot` counter-rotation (Case 2).
+  3. `bin/x64/plugins/cyber_engine_tweaks/mods/DetachedReticle/init.lua`:
+     - Prevention: Set `origHeadingLocked = false` and added a stranded-`headingLocked` watchdog on foot (`Loco == 0 or 1`, `Det == 0..2`).
+     - Layer 1 (Tier 2B `socketYaw` reference): Tracked `lastWrittenRYaw = rYaw` and computed `socketYaw = normalizeDeg(camYaw - lastWrittenRYaw)` so `diffYaw = normalizeDeg(gunYaw - socketYaw)` measures pure anatomical barrel offset `O_yaw` even if `bodyYaw` is desynced.
+     - Layer 2 (`UpdateYawDesyncCorrector`): Added strict on-foot locomotion gates (`Loco in {0,1,2}`, `Det in {0..5}`, `SceneTier <= 1`), `0.12s` persistence confirmation on `desyncErr` / `fppInternalYaw`, closed-loop native counter-steer invocation, and `[CORRECTIVE][YAW_DESYNC]` + `[LOCOMOTION_MONITOR]` (`FppYaw`) telemetry.
+- expected_outcome:
+  1. Tier 2B `ReadyW` and `TargetErr` remain unaffected even if an external system transiently desyncs `bodyYaw`.
+  2. Whenever a workspot/transition leaves `bodyYaw` desynced from `camYaw` (or `[fpp + 0x4C4]` non-zero) on foot, `UpdateYawDesyncCorrector` detects it after `0.12s` with zero false positives and smoothly slews `bodyYaw` to match `camYaw` (`dCam_Body(rYaw) -> 0.00 deg`, `FppYaw -> 0.00 deg`, `dMove_Cam == dMove_Body`) without twitching the camera or gun reticle.
+- test_procedure:
+  1. Build `DetachedReticle.dll` and deploy `DetachedReticle.dll`, `NativeBridge.reds`, and `init.lua` to `E:\Cyberpunk 2077`.
+  2. Verify normal holstered and armed gameplay has zero false-positive `[CORRECTIVE][YAW_DESYNC]` triggers and normal `rYaw` chase behavior.
+  3. Trigger a `Loco:9` workspot or inspect `[LOCOMOTION_MONITOR]` (`FppYaw` and `dCam_Body`) to verify automatic detection and smooth zero-twitch correction back to `0.00 deg`.
+
 # next iteration above this line
 
 ### Findings Writing Rules:

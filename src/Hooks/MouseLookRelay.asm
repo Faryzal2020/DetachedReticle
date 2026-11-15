@@ -67,6 +67,8 @@ MouseLookRelay proc
     movaps xmm0, [rsp+20h]
     movaps xmm1, [rsp+30h]
     movaps xmm2, [rsp+40h]
+    ; Load optional FPP freelook yaw corrective delta (0.0f normally) into xmm2 for call 0x39CA70 at 0x51D488
+    movss xmm2, dword ptr [rsp+0C8h]
     movaps xmm3, [rsp+50h]
     movaps xmm4, [rsp+60h]
     movaps xmm5, [rsp+70h]
