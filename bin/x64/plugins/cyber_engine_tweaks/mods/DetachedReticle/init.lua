@@ -837,13 +837,192 @@ local function MonitorLocomotion(player, fpp, isArmed, weapon, dt, rYaw, cYaw, w
             end)
         end
 
+        local fppYawNow = 0.0
+        local headLockedNow = false
+        if fpp then
+            pcall(function() fppYawNow = Game.DR_GetFppInternalYaw(fpp) end)
+            pcall(function() headLockedNow = Game.DR_GetHeadingLocked(fpp) end)
+        end
+
         local statusStr = isArmed and (DetachedReticle.isDualWielding and "DUAL_ARMED" or "ARMED") or "HOLSTERED"
-        local locoLine = string.format("[LOCOMOTION_MONITOR] State=%s | Weapon=%s | Speed=%.2fm/s | States=(Upper:%d, Weapon:%d, Loco:%d, Det:%d, Xhair:%d) | MoveHeading=%.2f deg | CamHeading=%.2f deg | BodyHeading=%.2f deg | dMove_Cam=%+.2f deg | dMove_Body=%+.2f deg | dCam_Body(rYaw)=%+.2f deg | CompYaw=%+.2f deg (T2BBlend=%.2f) | RecoilYaw=%+.2f deg",
+        local locoLine = string.format("[LOCOMOTION_MONITOR] State=%s | Weapon=%s | Speed=%.2fm/s | States=(Upper:%d, Weapon:%d, Loco:%d, Det:%d, Xhair:%d) | MoveHeading=%.2f deg | CamHeading=%.2f deg | BodyHeading=%.2f deg | dMove_Cam=%+.2f deg | dMove_Body=%+.2f deg | dCam_Body(rYaw)=%+.2f deg | FppYaw=%+.2f deg (HeadLock=%s) | CompYaw=%+.2f deg (T2BBlend=%.2f) | RecoilYaw=%+.2f deg",
             statusStr, wName, speed2D, upperState, weapState, locoState, locoDetailed, xhairState,
             moveHeading, camYaw, bodyYaw,
             dMoveCam, dMoveBody, dCamBody,
+            fppYawNow, tostring(headLockedNow),
             cYaw or 0.0, DetachedReticle.lastT2BBlend or 0.0, wYaw or 0.0)
         Log(locoLine)
+    end
+end
+
+-- Layer 2 Proactive Yaw Desync Detector & Native Counter-Steer Corrector:
+-- Detects when puppet bodyYaw is locked to a non-zero offset relative to camera yaw (before T2B/chase residual),
+-- such as when FPP internal freelook yaw [fpp + 0x4C4] accumulates during a headingLocked workspot/transition
+-- (Loco:9) and remains trapped on foot once headingLocked clears (0x51D45B zeroes xmm2).
+-- Strictly gated to standard on-foot locomotion with a 0.12s persistence filter so zero false positives occur.
+local function UpdateYawDesyncCorrector(player, fpp, isArmed, delta, rYaw)
+    if not Config.enabled or not player or not fpp then
+        if DetachedReticle.yawDesyncCorrecting then
+            DetachedReticle.yawDesyncCorrecting = false
+            DetachedReticle.yawDesyncConfirmTimer = 0.0
+            pcall(function() Game.DR_SetYawDesyncCorrection(0.0, 0.0, 1.0, false) end)
+        end
+        return
+    end
+
+    local dt = (type(delta) == "number" and delta > 0.0001 and delta < 0.1) and delta or 0.016
+
+    local locoState = -1
+    local locoDetailed = -1
+    local upperState = -1
+    local sceneTier = 1
+    pcall(function()
+        local psmBB = player:GetPlayerStateMachineBlackboard()
+        if psmBB then
+            locoState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.Locomotion)
+            locoDetailed = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.LocomotionDetailed)
+            upperState = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.UpperBody)
+            sceneTier = psmBB:GetInt(GetAllBlackboardDefs().PlayerStateMachine.SceneTier)
+        end
+    end)
+
+    -- Strict standard on-foot locomotion gate:
+    -- Exclude workspots/vehicles/turrets/takedowns (Loco == 9), ladder/vault/slide (LocoDetailed > 5), and cinematic SceneTiers (> 1).
+    local isStandardOnFootLoco = (locoState == 0 or locoState == 1 or locoState == 2)
+        and (locoDetailed >= 0 and locoDetailed <= 5)
+        and (upperState == 0 or upperState == 1 or upperState == 4 or upperState == 6 or upperState == 7)
+        and (sceneTier <= 1)
+
+    if not isStandardOnFootLoco then
+        DetachedReticle.yawDesyncConfirmTimer = 0.0
+        DetachedReticle.lastDesyncErr = nil
+        if DetachedReticle.yawDesyncCorrecting then
+            DetachedReticle.yawDesyncCorrecting = false
+            pcall(function() Game.DR_SetYawDesyncCorrection(0.0, 0.0, 1.0, false) end)
+            Log(string.format("[CORRECTIVE][YAW_DESYNC] Aborted (left standard on-foot locomotion: Loco=%d, Det=%d, Upper=%d, Tier=%d)",
+                locoState, locoDetailed, upperState, sceneTier))
+        end
+        return
+    end
+
+    -- Check for stranded headingLocked == true while standing/crouching on foot (Loco 0 or 1, Det 0..2)
+    local headLocked = false
+    pcall(function() headLocked = Game.DR_GetHeadingLocked(fpp) end)
+    if headLocked and (locoState == 0 or locoState == 1) and (locoDetailed >= 0 and locoDetailed <= 2) then
+        DetachedReticle.strandedHeadLockTimer = (DetachedReticle.strandedHeadLockTimer or 0.0) + dt
+        if DetachedReticle.strandedHeadLockTimer >= 0.08 then
+            pcall(function() Game.DR_SetHeadingLocked(fpp, false) end)
+            pcall(function() fpp.headingLocked = false end)
+            headLocked = false
+            DetachedReticle.strandedHeadLockTimer = 0.0
+            Log(string.format("[CORRECTIVE][YAW_DESYNC] Cleared stranded fpp.headingLocked=true on foot (Loco:%d, Det:%d, Upper:%d)",
+                locoState, locoDetailed, upperState))
+        end
+    else
+        DetachedReticle.strandedHeadLockTimer = 0.0
+    end
+
+    if headLocked then
+        return
+    end
+
+    -- Read rendered camera yaw and puppet body yaw
+    local camYaw = 0.0
+    local camPitch = 0.0
+    local hasCam = false
+    pcall(function()
+        local cf = Game.GetCameraSystem():GetActiveCameraForward()
+        if cf then
+            local cx = cf.x or cf.X or 0.0
+            local cy = cf.y or cf.Y or 0.0
+            local cz = cf.z or cf.Z or 0.0
+            local xy = math.sqrt(cx * cx + cy * cy)
+            if xy > 1e-4 or math.abs(cz) > 1e-4 then
+                camYaw = Vector4.Heading(cf)
+                camPitch = math.deg(math.atan2(cz, xy))
+                hasCam = true
+            end
+        end
+    end)
+    if not hasCam then
+        return
+    end
+
+    local bodyYaw = 0.0
+    local okBYaw, by = pcall(function() return player:GetWorldYaw() end)
+    if okBYaw and by then
+        bodyYaw = by
+    else
+        return
+    end
+
+    local fppInternalYaw = 0.0
+    pcall(function() fppInternalYaw = Game.DR_GetFppInternalYaw(fpp) end)
+
+    local writtenRYaw = DetachedReticle.chaseActive and (DetachedReticle.lastWrittenRYaw or rYaw or 0.0) or 0.0
+    local actualCamBodyDiff = normalizeDeg(camYaw - bodyYaw)
+    local desyncErr = normalizeDeg(actualCamBodyDiff - writtenRYaw)
+    local absDesync = math.abs(desyncErr)
+    local absFppYaw = math.abs(fppInternalYaw)
+
+    local prevErr = DetachedReticle.lastDesyncErr or desyncErr
+    local dDesyncErr = math.abs(normalizeDeg(desyncErr - prevErr))
+    DetachedReticle.lastDesyncErr = desyncErr
+
+    -- Detection criteria:
+    -- Either [fpp + 0x4C4] holds a trapped freelook yaw (> 0.50 deg) OR world-space desyncErr (> 1.25 deg)
+    -- is rigid/locked (changing by < 0.60 deg/frame) for >= 0.12s on foot.
+    local isCandidateDesync = (absDesync > 1.25 and dDesyncErr < 0.60) or (absFppYaw > 0.50 and absDesync > 0.50)
+
+    if not DetachedReticle.yawDesyncCorrecting then
+        if isCandidateDesync then
+            DetachedReticle.yawDesyncConfirmTimer = (DetachedReticle.yawDesyncConfirmTimer or 0.0) + dt
+            if DetachedReticle.yawDesyncConfirmTimer >= 0.12 then
+                DetachedReticle.yawDesyncCorrecting = true
+                DetachedReticle.yawDesyncLogTimer = 0.0
+                Log(string.format("[CORRECTIVE][YAW_DESYNC] DETECTED: desyncErr=%+.2f deg | fppInternalYaw=%+.2f deg | camYaw=%.2f | bodyYaw=%.2f | writtenRYaw=%+.2f | Armed=%s | States=(Loco:%d, Det:%d, Upper:%d)",
+                    desyncErr, fppInternalYaw, camYaw, bodyYaw, writtenRYaw, tostring(isArmed), locoState, locoDetailed, upperState))
+            end
+        else
+            DetachedReticle.yawDesyncConfirmTimer = 0.0
+        end
+    end
+
+    if DetachedReticle.yawDesyncCorrecting then
+        -- Apply any Case 2 baselineRot counter-rotation step reported by native hook since last frame
+        local appliedStep = 0.0
+        pcall(function() appliedStep = Game.DR_GetLastYawDesyncStep() end)
+        if math.abs(appliedStep) > 1e-5 and DetachedReticle.baselineRot then
+            local socketPitch = camPitch - (DetachedReticle.lastWrittenRPitch or 0.0)
+            local pitchRad = math.rad(socketPitch)
+            local fwdZ = math.sin(pitchRad)
+            local fwdXY = math.cos(pitchRad)
+            local qUnwind = quatAxisAngle(0.0, fwdZ, fwdXY, -appliedStep)
+            DetachedReticle.baselineRot = quatMultiply(qUnwind, DetachedReticle.baselineRot)
+        end
+
+        if absDesync <= 0.15 and absFppYaw <= 0.15 then
+            DetachedReticle.yawDesyncCorrecting = false
+            DetachedReticle.yawDesyncConfirmTimer = 0.0
+            pcall(function() Game.DR_SetYawDesyncCorrection(0.0, 0.0, 1.0, false) end)
+            Log(string.format("[CORRECTIVE][YAW_DESYNC] RESOLVED: desyncErr=%+.3f deg | fppInternalYaw=%+.3f deg | camYaw=%.2f | bodyYaw=%.2f",
+                desyncErr, fppInternalYaw, camYaw, bodyYaw))
+        else
+            local sensX = DetachedReticle.origSensX or 1.0
+            if not DetachedReticle.origSensX then
+                local okSX, sx = pcall(function() return Game.DR_GetSensitivityMultX(fpp) end)
+                if okSX and type(sx) == "number" and sx > 0.01 then sensX = sx end
+            end
+            local targetErr = (absFppYaw > 0.05) and fppInternalYaw or desyncErr
+            pcall(function() Game.DR_SetYawDesyncCorrection(targetErr, fppInternalYaw, sensX, true) end)
+
+            DetachedReticle.yawDesyncLogTimer = (DetachedReticle.yawDesyncLogTimer or 0.0) + dt
+            if DetachedReticle.yawDesyncLogTimer >= 0.10 then
+                DetachedReticle.yawDesyncLogTimer = 0.0
+                Log(string.format("[CORRECTIVE][YAW_DESYNC] SLEWING: desyncErr=%+.2f deg | fppInternalYaw=%+.2f deg | camYaw=%.2f | bodyYaw=%.2f | writtenRYaw=%+.2f",
+                    desyncErr, fppInternalYaw, camYaw, bodyYaw, writtenRYaw))
+            end
+        end
     end
 end
 
@@ -854,6 +1033,7 @@ registerForEvent("onUpdate", function(delta)
         DetachedReticle.chaseActive = false
         DetachedReticle.wasArmed = false
         DetachedReticle.lastWrittenRPitch = 0.0
+        DetachedReticle.lastWrittenRYaw = 0.0
         return
     end
 
@@ -932,6 +1112,9 @@ registerForEvent("onUpdate", function(delta)
     -- Locomotion heading monitor: inspect whether movement follows camera (T1) or puppet body (T2B)
     MonitorLocomotion(player, fpp, isArmed, weapon, delta, rYaw, cYaw, wYaw)
 
+    -- Proactive yaw desync detector & native counter-steer corrector (runs both holstered and armed on foot)
+    UpdateYawDesyncCorrector(player, fpp, isArmed, delta, rYaw)
+
     local shouldBeActive = Config.enabled and fpp and (isArmed or settling)
 
     if shouldBeActive then
@@ -986,6 +1169,7 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.lastAppliedDrop = 0.0
             DetachedReticle.lastWrittenRot = nil
             DetachedReticle.lastWrittenRPitch = 0.0
+            DetachedReticle.lastWrittenRYaw = 0.0
             DetachedReticle.lastCamYaw = nil
             DetachedReticle.lastBodyYaw = nil
             DetachedReticle.lastCYaw = nil
@@ -998,16 +1182,15 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.readyStableTimer = 0.0
             DetachedReticle.recoilHoldTimer = 0.0
 
-            -- Capture baseline sensitivity and heading lock before enabling chase
+            -- Capture baseline sensitivity before enabling chase.
+            -- Never latch origHeadingLocked = true from a transient workspot (Loco:9) so deactivation on foot never freezes bodyYaw.
             local okNatX, natX = pcall(function() return Game.DR_GetSensitivityMultX(fpp) end)
             local okNatY, natY = pcall(function() return Game.DR_GetSensitivityMultY(fpp) end)
             local okPropX, propX = pcall(function() return fpp.sensitivityMultX end)
             local okPropY, propY = pcall(function() return fpp.sensitivityMultY end)
             DetachedReticle.origSensX = (okNatX and type(natX) == "number" and natX > 0.0) and natX or ((okPropX and type(propX) == "number") and propX or 1.0)
             DetachedReticle.origSensY = (okNatY and type(natY) == "number" and natY > 0.0) and natY or ((okPropY and type(propY) == "number") and propY or 1.0)
-
-            local okHead, headLocked = pcall(function() return Game.DR_GetHeadingLocked(fpp) end)
-            DetachedReticle.origHeadingLocked = (okHead and headLocked) or false
+            DetachedReticle.origHeadingLocked = false
 
             -- Get initial camera pitch before chase begins from rendered active camera (Fix F0)
             local initPitch = hasCamFwd and camPitch or 0.0
@@ -1037,6 +1220,7 @@ registerForEvent("onUpdate", function(delta)
             if math.abs(camPitch - curTPitch) > 0.5 then
                 pcall(function() Game.DR_ResetChasePitch(camPitch) end)
                 DetachedReticle.lastWrittenRPitch = 0.0
+                DetachedReticle.lastWrittenRYaw = 0.0
                 DetachedReticle.lastSettledCompTargetYaw = nil
                 DetachedReticle.lastSettledCompTargetPitch = nil
                 DetachedReticle.t2bActiveLinear = 0.0
@@ -1065,6 +1249,7 @@ registerForEvent("onUpdate", function(delta)
                 pcall(function() Game.DR_ResetChasePitch(camPitch) end)
                 rYaw, rPitch = 0.0, 0.0
                 DetachedReticle.lastWrittenRPitch = 0.0
+                DetachedReticle.lastWrittenRYaw = 0.0
             end
         end
 
@@ -1094,6 +1279,7 @@ registerForEvent("onUpdate", function(delta)
         -- Resolve weapon type and evolution
         local weaponName = "Unknown"
         local isHeavyWeapon = false
+        local isRasetsu = false
         local isLMG = false
         local isSmartWeapon = false
         if weapon then
@@ -1122,6 +1308,9 @@ registerForEvent("onUpdate", function(delta)
             if not isHeavyWeapon and weaponName and (weaponName:find("HMG") or weaponName:find("HeavyMachineGun")) then
                 isHeavyWeapon = true
             end
+            if weaponName and weaponName:find("Rasetsu") then
+                isRasetsu = true
+            end
             if not isLMG and weaponName and (weaponName:find("Defender") or weaponName:find("MA70") or weaponName:find("LMG") or weaponName:find("LightMachineGun")) then
                 isLMG = true
             end
@@ -1130,12 +1319,14 @@ registerForEvent("onUpdate", function(delta)
             end
         end
 
-        -- Physical socket pitch angle in parent coordinate frame:
-        -- Derived directly from rendered camera pitch minus the previous frame's written local pitch residual,
-        -- guaranteeing the horizontal yaw axis is always aligned with true world-up even if the engine alters pitch externally.
+        -- Physical socket pitch and yaw angles in parent coordinate frame:
+        -- Derived directly from rendered camera pitch/yaw minus the previous frame's written local residual,
+        -- guaranteeing the horizontal yaw axis is aligned with true world-up and Tier 2B is immune to external bodyYaw desync.
         local socketPitch = 0.0
+        local socketYaw = bodyYaw
         if hasCamFwd then
             socketPitch = camPitch - (DetachedReticle.lastWrittenRPitch or 0.0)
+            socketYaw = normalizeDeg(camYaw - (DetachedReticle.lastWrittenRYaw or rYaw or 0.0))
         else
             pcall(function() socketPitch = Game.DR_GetT2BPitch() end)
         end
@@ -1204,6 +1395,7 @@ registerForEvent("onUpdate", function(delta)
         end)
         DetachedReticle.lastWrittenRot = targetRot
         DetachedReticle.lastWrittenRPitch = rPitch
+        DetachedReticle.lastWrittenRYaw = rYaw
 
         if Config.debugLogging then
             local tYaw = 0.0
@@ -1319,6 +1511,12 @@ registerForEvent("onUpdate", function(delta)
         pcall(function()
             aimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
         end)
+        if aimSys then
+            pcall(function()
+                aimSys:SetAdsRecoilHoriMult(Config.adsRecoilHoriMult)
+                aimSys:UpdateWorldAim(player, delta or 0.016)
+            end)
+        end
 
         local gunFwd = nil
         local scrX, scrY = 0.0, 0.0
@@ -1385,10 +1583,6 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.restingFrames = 0
         end
 
-        if aimSys then
-            pcall(function() aimSys:SetAdsRecoilHoriMult(Config.adsRecoilHoriMult) end)
-        end
-
         -- 4. Tier 2B Active Barrel Offset Control Loop (Per-Frame Execution)
         local diffYaw = 0.0
         local diffPitch = 0.0
@@ -1415,10 +1609,12 @@ registerForEvent("onUpdate", function(delta)
             end
 
             t2bPitch = socketPitch
+            local t2bYaw = socketYaw
 
-            -- Body-relative anatomical offset (fixed-point target C = O):
-            -- Eliminates the half-gain error and dynamic chase gap pollution
-            diffYaw = normalizeDeg(gunYaw - bodyYaw)
+            -- Socket-relative anatomical offset (fixed-point target C = O):
+            -- Using socketYaw = normalizeDeg(camYaw - lastWrittenRYaw) (mirroring socketPitch)
+            -- eliminates the half-gain error, dynamic chase gap pollution, and any external bodyYaw desync.
+            diffYaw = normalizeDeg(gunYaw - t2bYaw)
             diffPitch = gunPitch - t2bPitch
 
             -- Frame delta and body-relative barrel angular velocity (deg/s)
@@ -1439,9 +1635,11 @@ registerForEvent("onUpdate", function(delta)
             local inRecoilWindow = isRecoiling or ((DetachedReticle.recoilHoldTimer or 0.0) > 0.0)
             local isSwinging = (rawGapYaw > 0.50) or (rawGapPitch > 0.50)
 
+            local hasAdsT2B = isHeavyWeapon or isRasetsu
+
             -- Reset integral trim and settled compensation on weapon change;
-            -- on HIP <-> ADS transitions, reset trim and settled target for non-heavy weapons
-            -- (HMG toggles crosshairState 4 <-> 8 on every zoomed shot without changing stance, whereas LMG/rifles transition between hip-cradle and iron-sight ADS)
+            -- on HIP <-> ADS transitions, reset trim and settled target for non-heavy/non-Rasetsu weapons
+            -- (HMG and Rasetsu keep T2B active in ADS without an iron-sight stance change, whereas LMG/rifles transition between hip-cradle and iron-sight ADS)
             if weaponName ~= DetachedReticle.lastTrimWeapon then
                 DetachedReticle.lastTrimWeapon = weaponName
                 DetachedReticle.lastTrimADS = isADS
@@ -1452,7 +1650,7 @@ registerForEvent("onUpdate", function(delta)
                 DetachedReticle.readyStableTimer = 0.0
             elseif isADS ~= DetachedReticle.lastTrimADS then
                 DetachedReticle.lastTrimADS = isADS
-                if not isHeavyWeapon then
+                if not hasAdsT2B then
                     DetachedReticle.trimYaw = 0.0
                     DetachedReticle.trimPitch = 0.0
                     DetachedReticle.lastSettledCompTargetYaw = nil
@@ -1466,7 +1664,7 @@ registerForEvent("onUpdate", function(delta)
             local curLinear = DetachedReticle.t2bActiveLinear or 0.0
             local isWeaponStateReady = (rightWeaponState == 5) or (rightWeaponState == 8) or (rightWeaponState == 1) or (rightWeaponState == 3) or (rightWeaponState == 4)
                 or (rightWeaponState == 0 and (inRecoilWindow or (curLinear > 0.5 and (upperBodyState == 4 or upperBodyState == 6))))
-            local isCombatStance = (not isSmartWeapon) and (not isDual) and (stateStr == "HIP" or (isHeavyWeapon and stateStr == "ADS"))
+            local isCombatStance = (not isSmartWeapon) and (not isDual) and (stateStr == "HIP" or (hasAdsT2B and stateStr == "ADS"))
             local isReadyPosture = isCombatStance and (not isNonReadyLoco) and isWeaponStateReady and (diffPitch >= -14.0)
 
             local maxAngle = math.max(math.abs(diffYaw), math.abs(diffPitch))
@@ -1730,6 +1928,12 @@ registerForEvent("onUpdate", function(delta)
         if DetachedReticle.isActive then
             DetachedReticle.isActive = false
             pcall(function() Game.DR_SetBarrelOffset(0.0, 0.0) end)
+            pcall(function()
+                local clearAimSys = Game.GetScriptableSystemsContainer():Get(CName.new("DetachedReticle.DetachedAimSystem"))
+                if clearAimSys then
+                    clearAimSys:ClearDetachedAim()
+                end
+            end)
             DetachedReticle.t2bActiveLinear = 0.0
             DetachedReticle.lastT2BBlend = 0.0
             DetachedReticle.lastValidCompYaw = 0.0
@@ -1768,6 +1972,7 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.lastAppliedDrop = 0.0
             DetachedReticle.lastWrittenRot = nil
             DetachedReticle.lastWrittenRPitch = 0.0
+            DetachedReticle.lastWrittenRYaw = 0.0
             DetachedReticle.origHeadingLocked = nil
             DetachedReticle.origSensX = nil
             DetachedReticle.origSensY = nil
