@@ -237,6 +237,20 @@ public class DetachedAimSystem extends ScriptableSystem {
         SetMuzzleAimState(new Vector4(0.0, 0.0, 0.0, 1.0), new Vector4(0.0, 1.0, 0.0, 0.0), new Vector4(0.0, 1.0, 0.0, 0.0), false);
     }
 
+    // Returns true for weapons whose ADS behaves like HMG (keep Tier 2B active and trace/fire directly from muzzle)
+    public func IsHmgStyleAdsWeapon(weapon: ref<WeaponObject>) -> Bool {
+        if !IsDefined(weapon) {
+            return false;
+        }
+        let itemID: ItemID = weapon.GetItemID();
+        let wType: gamedataItemType = WeaponObject.GetWeaponType(itemID);
+        if weapon.IsHeavyWeapon() || Equals(wType, gamedataItemType.Wea_HeavyMachineGun) {
+            return true;
+        }
+        let tdbidStr: String = TDBID.ToStringDEBUG(ItemID.GetTDBID(itemID));
+        return StrFindFirst(tdbidStr, "Rasetsu") >= 0;
+    }
+
     // Executed strictly on the Main Thread via CET onUpdate (CRunningState::OnTick)
     // so SyncRaycastByCollisionPreset never runs concurrently from redDispatcher inkAnim callbacks.
     public func UpdateWorldAim(player: ref<PlayerPuppet>, dt: Float) -> Void {
@@ -309,8 +323,7 @@ public class DetachedAimSystem extends ScriptableSystem {
             let crosshair: Int32 = psmBB.GetInt(GetAllBlackboardDefs().PlayerStateMachine.Crosshair);
             isAiming = upperBody == EnumInt(gamePSMUpperBodyStates.Aim) || crosshair == EnumInt(gamePSMCrosshairStates.Aim);
         }
-        let wType: gamedataItemType = WeaponObject.GetWeaponType(weapon.GetItemID());
-        let isHMG: Bool = weapon.IsHeavyWeapon() || Equals(wType, gamedataItemType.Wea_HeavyMachineGun);
+        let isHMG: Bool = this.IsHmgStyleAdsWeapon(weapon);
 
         let effGunFwd: Vector4 = gunFwd;
         if isAiming && !isHMG {
@@ -1052,8 +1065,7 @@ protected func OnEnter(stateContext: ref<StateContext>, scriptInterface: ref<Sta
             }
         } else {
             let isAiming: Bool = false;
-            let wType: gamedataItemType = WeaponObject.GetWeaponType(weapon.GetItemID());
-            let isHMG: Bool = weapon.IsHeavyWeapon() || Equals(wType, gamedataItemType.Wea_HeavyMachineGun);
+            let isHMG: Bool = aimSys.IsHmgStyleAdsWeapon(weapon);
             if IsDefined(scriptInterface.localBlackboard) {
                 let upperBody: Int32 = scriptInterface.localBlackboard.GetInt(GetAllBlackboardDefs().PlayerStateMachine.UpperBody);
                 let crosshair: Int32 = scriptInterface.localBlackboard.GetInt(GetAllBlackboardDefs().PlayerStateMachine.Crosshair);

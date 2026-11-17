@@ -1279,6 +1279,7 @@ registerForEvent("onUpdate", function(delta)
         -- Resolve weapon type and evolution
         local weaponName = "Unknown"
         local isHeavyWeapon = false
+        local isRasetsu = false
         local isLMG = false
         local isSmartWeapon = false
         if weapon then
@@ -1306,6 +1307,9 @@ registerForEvent("onUpdate", function(delta)
             end)
             if not isHeavyWeapon and weaponName and (weaponName:find("HMG") or weaponName:find("HeavyMachineGun")) then
                 isHeavyWeapon = true
+            end
+            if weaponName and weaponName:find("Rasetsu") then
+                isRasetsu = true
             end
             if not isLMG and weaponName and (weaponName:find("Defender") or weaponName:find("MA70") or weaponName:find("LMG") or weaponName:find("LightMachineGun")) then
                 isLMG = true
@@ -1631,9 +1635,11 @@ registerForEvent("onUpdate", function(delta)
             local inRecoilWindow = isRecoiling or ((DetachedReticle.recoilHoldTimer or 0.0) > 0.0)
             local isSwinging = (rawGapYaw > 0.50) or (rawGapPitch > 0.50)
 
+            local hasAdsT2B = isHeavyWeapon or isRasetsu
+
             -- Reset integral trim and settled compensation on weapon change;
-            -- on HIP <-> ADS transitions, reset trim and settled target for non-heavy weapons
-            -- (HMG toggles crosshairState 4 <-> 8 on every zoomed shot without changing stance, whereas LMG/rifles transition between hip-cradle and iron-sight ADS)
+            -- on HIP <-> ADS transitions, reset trim and settled target for non-heavy/non-Rasetsu weapons
+            -- (HMG and Rasetsu keep T2B active in ADS without an iron-sight stance change, whereas LMG/rifles transition between hip-cradle and iron-sight ADS)
             if weaponName ~= DetachedReticle.lastTrimWeapon then
                 DetachedReticle.lastTrimWeapon = weaponName
                 DetachedReticle.lastTrimADS = isADS
@@ -1644,7 +1650,7 @@ registerForEvent("onUpdate", function(delta)
                 DetachedReticle.readyStableTimer = 0.0
             elseif isADS ~= DetachedReticle.lastTrimADS then
                 DetachedReticle.lastTrimADS = isADS
-                if not isHeavyWeapon then
+                if not hasAdsT2B then
                     DetachedReticle.trimYaw = 0.0
                     DetachedReticle.trimPitch = 0.0
                     DetachedReticle.lastSettledCompTargetYaw = nil
@@ -1658,7 +1664,7 @@ registerForEvent("onUpdate", function(delta)
             local curLinear = DetachedReticle.t2bActiveLinear or 0.0
             local isWeaponStateReady = (rightWeaponState == 5) or (rightWeaponState == 8) or (rightWeaponState == 1) or (rightWeaponState == 3) or (rightWeaponState == 4)
                 or (rightWeaponState == 0 and (inRecoilWindow or (curLinear > 0.5 and (upperBodyState == 4 or upperBodyState == 6))))
-            local isCombatStance = (not isSmartWeapon) and (not isDual) and (stateStr == "HIP" or (isHeavyWeapon and stateStr == "ADS"))
+            local isCombatStance = (not isSmartWeapon) and (not isDual) and (stateStr == "HIP" or (hasAdsT2B and stateStr == "ADS"))
             local isReadyPosture = isCombatStance and (not isNonReadyLoco) and isWeaponStateReady and (diffPitch >= -14.0)
 
             local maxAngle = math.max(math.abs(diffYaw), math.abs(diffPitch))
