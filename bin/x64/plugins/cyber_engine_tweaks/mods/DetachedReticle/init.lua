@@ -70,6 +70,9 @@ local DetachedReticle = {
     restingFrames = 0,
     offCenterTimer = 0.0,
     offCenterLogCooldown = 0.0,
+    adsMisalignTimer = 0.0,
+    adsCorrectiveT2B = false,
+    camRollTimer = 0.0,
     isOverlayOpen = false,
     nativeSettingsInitAttempted = false
 }
@@ -1181,6 +1184,9 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.lastValidCompPitch = 0.0
             DetachedReticle.readyStableTimer = 0.0
             DetachedReticle.recoilHoldTimer = 0.0
+            DetachedReticle.adsMisalignTimer = 0.0
+            DetachedReticle.adsCorrectiveT2B = false
+            DetachedReticle.camRollTimer = 0.0
 
             -- Capture baseline sensitivity before enabling chase.
             -- Never latch origHeadingLocked = true from a transient workspot (Loco:9) so deactivation on foot never freezes bodyYaw.
@@ -1333,6 +1339,33 @@ registerForEvent("onUpdate", function(delta)
         local pitchRad = math.rad(socketPitch)
         local fwdZ = math.sin(pitchRad)
         local fwdXY = math.cos(pitchRad)
+
+        -- Corrective Camera Roll Watchdog:
+        -- If baselineRot was captured tilted (e.g. exiting cutscene/workspot/knockback) and world-space
+        -- camera roll (> 0.5 deg) persists for >= 0.60s on foot in ready locomotion, reset baselineRot to identity.
+        local camRollDeg = 0.0
+        pcall(function()
+            local cr = Game.GetCameraSystem():GetActiveCameraRight()
+            if cr then
+                local rz = cr.z or cr.Z or 0.0
+                camRollDeg = math.deg(math.asin(math.max(-1.0, math.min(1.0, rz))))
+            end
+        end)
+        local dtRoll = (type(delta) == "number" and delta > 0.0001 and delta < 0.1) and delta or 0.016
+        if (not DetachedReticle.isOverlayOpen) and (not DetachedReticle.yawDesyncCorrecting) and (not isNonReadyLoco) and (math.abs(camRollDeg) > 0.5) then
+            DetachedReticle.camRollTimer = (DetachedReticle.camRollTimer or 0.0) + dtRoll
+            if DetachedReticle.camRollTimer >= 0.60 and DetachedReticle.baselineRot then
+                local br = DetachedReticle.baselineRot
+                local bAngleDeg = math.deg(2.0 * math.acos(math.min(1.0, math.abs(br.r or 1.0))))
+                if bAngleDeg > 0.25 then
+                    DetachedReticle.baselineRot = Quaternion.new(0, 0, 0, 1)
+                    Log(string.format("[CORRECTIVE][CAM_ROLL] RESET baselineRot | camRoll=%+.2f deg | baselineAngle=%.2f deg", camRollDeg, bAngleDeg))
+                end
+                DetachedReticle.camRollTimer = 0.0
+            end
+        else
+            DetachedReticle.camRollTimer = 0.0
+        end
 
         -- Compose residual onto camera local orientation without gimbal roll:
         -- 1. qRx: pitch around local horizontal right axis (1, 0, 0)
@@ -1664,7 +1697,31 @@ registerForEvent("onUpdate", function(delta)
             local curLinear = DetachedReticle.t2bActiveLinear or 0.0
             local isWeaponStateReady = (rightWeaponState == 5) or (rightWeaponState == 8) or (rightWeaponState == 1) or (rightWeaponState == 3) or (rightWeaponState == 4)
                 or (rightWeaponState == 0 and (inRecoilWindow or (curLinear > 0.5 and (upperBodyState == 4 or upperBodyState == 6))))
-            local isCombatStance = (not isSmartWeapon) and (not isDual) and (stateStr == "HIP" or (hasAdsT2B and stateStr == "ADS"))
+
+            -- Corrective ADS Misalignment Watchdog:
+            -- If a non-HMG/non-Rasetsu weapon is genuinely stuck off-center (> 1.8 deg) in settled ADS
+            -- (no mouse swing, no recoil, barrel stationary < 3.5 deg/s) for >= 0.30s, latch T2B on for this ADS hold.
+            if (stateStr == "ADS") and (not hasAdsT2B) and (not isSmartWeapon) and (not isDual) then
+                local adsOffMag = math.max(math.abs(diffYaw), math.abs(diffPitch))
+                if (not DetachedReticle.isOverlayOpen) and isWeaponStateReady and (not isNonReadyLoco) and (not isSwinging) and (not inRecoilWindow) and (gunRelVel < 3.5) and (diffPitch >= -14.0) and (adsOffMag > 1.8) and (adsOffMag < 12.0) then
+                    DetachedReticle.adsMisalignTimer = (DetachedReticle.adsMisalignTimer or 0.0) + dt
+                    if DetachedReticle.adsMisalignTimer >= 0.30 and (not DetachedReticle.adsCorrectiveT2B) then
+                        DetachedReticle.adsCorrectiveT2B = true
+                        Log(string.format("[CORRECTIVE][ADS_MISALIGN] ENGAGED: Weapon=%s | Offset=(dYaw:%+.2f, dPitch:%+.2f)deg | MuzzleRelCam=(R:%+.2f, F:%.2f, U:%+.2f)m",
+                            weaponName, diffYaw, diffPitch, muzRelR, muzRelF, muzRelU))
+                    end
+                elseif not DetachedReticle.adsCorrectiveT2B then
+                    DetachedReticle.adsMisalignTimer = 0.0
+                end
+            else
+                if DetachedReticle.adsCorrectiveT2B then
+                    Log(string.format("[CORRECTIVE][ADS_MISALIGN] CLEARED: Weapon=%s | NewStance=%s", weaponName, stateStr))
+                end
+                DetachedReticle.adsMisalignTimer = 0.0
+                DetachedReticle.adsCorrectiveT2B = false
+            end
+
+            local isCombatStance = (not isSmartWeapon) and (not isDual) and (stateStr == "HIP" or ((hasAdsT2B or DetachedReticle.adsCorrectiveT2B) and stateStr == "ADS"))
             local isReadyPosture = isCombatStance and (not isNonReadyLoco) and isWeaponStateReady and (diffPitch >= -14.0)
 
             local maxAngle = math.max(math.abs(diffYaw), math.abs(diffPitch))
@@ -1940,6 +1997,9 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.lastValidCompPitch = 0.0
             DetachedReticle.readyStableTimer = 0.0
             DetachedReticle.recoilHoldTimer = 0.0
+            DetachedReticle.adsMisalignTimer = 0.0
+            DetachedReticle.adsCorrectiveT2B = false
+            DetachedReticle.camRollTimer = 0.0
             DetachedReticle.lastSettledCompTargetYaw = nil
             DetachedReticle.lastSettledCompTargetPitch = nil
             DetachedReticle.restingFrames = 0
@@ -1978,6 +2038,9 @@ registerForEvent("onUpdate", function(delta)
             DetachedReticle.origSensY = nil
             DetachedReticle.lastLoggedWeapon = nil
             DetachedReticle.lastLoggedADS = nil
+            DetachedReticle.adsMisalignTimer = 0.0
+            DetachedReticle.adsCorrectiveT2B = false
+            DetachedReticle.camRollTimer = 0.0
         end
     end
     DetachedReticle.wasArmed = isArmed
